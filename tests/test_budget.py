@@ -13,16 +13,17 @@ def _make_source(conn, monthly_budget_eur):
 
 
 def test_global_daily_cap(conn):
-    record_spend(conn, config.GLOBAL_DAILY_LLM_CAP_EUR - 0.01, "llm")
+    record_spend(config.GLOBAL_DAILY_LLM_CAP_EUR - 0.01, "llm")
     check_budget(conn)  # still under the cap
-    record_spend(conn, 0.02, "llm")
+    record_spend(0.02, "llm")
     with pytest.raises(BudgetExceeded, match="global daily cap"):
         check_budget(conn)
 
 
 def test_source_monthly_budget(conn):
     source_id = _make_source(conn, monthly_budget_eur=0.05)
-    record_spend(conn, 0.05, "llm", source_id=source_id)
+    conn.commit()  # record_spend's own connection must see the source row
+    record_spend(0.05, "llm", source_id=source_id)
     with pytest.raises(BudgetExceeded, match="monthly budget"):
         check_budget(conn, source_id=source_id)
     check_budget(conn)  # global cap untouched by the tiny amount
@@ -31,5 +32,6 @@ def test_source_monthly_budget(conn):
 def test_source_spend_does_not_hit_other_sources(conn):
     exhausted = _make_source(conn, monthly_budget_eur=0.01)
     fresh = _make_source(conn, monthly_budget_eur=0.01)
-    record_spend(conn, 0.01, "llm", source_id=exhausted)
+    conn.commit()
+    record_spend(0.01, "llm", source_id=exhausted)
     check_budget(conn, source_id=fresh)

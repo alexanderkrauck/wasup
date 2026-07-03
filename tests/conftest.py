@@ -19,6 +19,9 @@ def test_db_url() -> str:
             c.execute(f"CREATE DATABASE {TEST_DB}")
     with psycopg.connect(TEST_URL, row_factory=dict_row) as conn:
         migrate(conn)
+    # everything in the test process (incl. record_spend's own connections)
+    # must hit the test db
+    config.DATABASE_URL = TEST_URL
     return TEST_URL
 
 

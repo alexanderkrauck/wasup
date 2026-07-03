@@ -24,7 +24,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MODEL_MINI = "openai/gpt-5-mini"
 MODEL_MID = "anthropic/claude-sonnet-4.5"
 MODEL_FRONTIER = "anthropic/claude-opus-4.5"
-LLM_MAX_OUTPUT_TOKENS = 4096
+LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 
 # Budgets (DECISIONS.md: enforced in code from day one)
@@ -39,11 +39,20 @@ JOB_RETRY_BACKOFF_S = 60  # attempt n retries after 60 * 5^(n-1) seconds
 JOB_STALE_RUNNING_S = 3600  # running jobs older than this are requeued at startup
 WORKER_IDLE_POLL_S = 5
 
-# Crawl politeness (used from phase 1)
+# Crawl politeness
 USER_AGENT = "EventIndexBot/0.1 (+alexander.krauck@gmail.com)"
+CRAWL_DELAY_S = 2.0  # DECISIONS.md: per-domain rate limit >= 2s
 
 # Digest
 DIGEST_DIR = VAR_DIR / "digests"
 DEAD_MAN_HOURS = 48
 
 TIMEZONE = "Europe/Vienna"
+
+# Top-level taxonomy seed (§8: two-level, ~15 top; sub-categories come with
+# the enrichment pass in phase 4)
+CATEGORIES = [
+    "music", "nightlife", "theatre", "film", "art", "culture", "sport",
+    "community", "learning", "family", "market", "food_drink", "tech",
+    "religion", "other",
+]

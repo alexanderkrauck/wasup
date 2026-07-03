@@ -82,7 +82,6 @@ def complete(
         )
         cost, tokens_in, tokens_out = _cost_eur(response.usage)
         record_spend(
-            tx,
             cost,
             "llm",
             source_id=source_id,

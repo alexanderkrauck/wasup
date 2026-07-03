@@ -60,7 +60,6 @@ def check_budget(tx, source_id: UUID | None = None) -> None:
 
 
 def record_spend(
-    tx,
     amount_eur: Decimal | float,
     category: str,
     *,
@@ -71,9 +70,19 @@ def record_spend(
     tokens_out: int | None = None,
     detail: str | None = None,
 ) -> None:
-    tx.execute(
-        "INSERT INTO budget_spend "
-        "(amount_eur, category, source_id, job_id, model, tokens_in, tokens_out, detail) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (amount_eur, category, source_id, job_id, model, tokens_in, tokens_out, detail),
-    )
+    """Ledger a spend on its own connection, committed immediately.
+
+    Deliberate exception to the everything-in-one-tx rule: the money is
+    already spent at the provider, so the ledger row must survive a rollback
+    of the failing job that spent it.
+    """
+    from eventindex import db
+
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO budget_spend "
+            "(amount_eur, category, source_id, job_id, model, tokens_in, tokens_out, detail) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (amount_eur, category, source_id, job_id, model, tokens_in, tokens_out, detail),
+        )
+        conn.commit()

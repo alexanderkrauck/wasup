@@ -1,0 +1,27 @@
+name,url,kind,entity_type,tier,trust,lat,lon
+linztermine.at (open data XML),https://www.linztermine.at/schnittstelle/downloads/events_xml.php,api,portal,1,0.9,,
+Eventbrite Linz,https://www.eventbrite.at/d/austria--linz/events/,website,portal,1,0.9,,
+Kupfticket,https://kupfticket.com/events,website,portal,1,0.9,,
+eventfinder.at Linz,https://www.eventfinder.at/veranstaltungskalender-oesterreich/oberoesterreich/linz,website,portal,1,0.65,,
+Ars Electronica Center Events (RSS),https://ars.electronica.art/center/de/events/feed/,rss,venue,2,0.8,48.3097,14.2842
+Ars Electronica Eventservice,https://ars.electronica.art/center/de/eventservice/,website,venue,3,0.65,48.3097,14.2842
+Brucknerhaus,https://www.brucknerhaus.at/programm/veranstaltungen,website,venue,3,0.65,48.3103,14.2926
+Landestheater Linz,https://www.landestheater-linz.at/termine,website,venue,3,0.65,48.3021,14.2851
+Posthof,https://www.posthof.at/,website,venue,3,0.65,48.3230,14.3010
+Stadtwerkstatt,https://newcontext.stwst.at/tools/announce-all,website,venue,3,0.65,48.3111,14.2846
+Kapu,https://kapu.at/events,website,venue,3,0.65,48.3095,14.2834
+Lentos Kunstmuseum,https://www.lentos.at/programm/veranstaltungen,website,venue,3,0.65,48.3096,14.2888
+Nordico Stadtmuseum,https://www.nordico.at/programm/fuehrungen-veranstaltungen,website,venue,3,0.65,48.3039,14.2903
+OÖ Kulturquartier,https://www.ooekultur.at/events-exhibitions,website,venue,3,0.65,48.3033,14.2851
+Tabakfabrik Linz,https://tabakfabrik-linz.at/events/,website,venue,3,0.65,48.3175,14.3006
+Grand Garage,https://grandgarage.eu/events/,website,venue,3,0.65,48.3175,14.3006
+Moviemento,https://www.moviemento.at/spielplan,website,venue,3,0.65,48.3037,14.2917
+StifterHaus,https://www.stifterhaus.at/programm/veranstaltungen,website,venue,3,0.65,48.3086,14.2867
+Wissensturm VHS,https://wissensturm.linz.at/vhs/,website,university,3,0.65,48.2909,14.2903
+Stadtbibliothek Linz,https://wissensturm.linz.at/bibliothek/veranstaltungen.php,website,venue,3,0.65,48.2909,14.2903
+Zoo Linz,https://zoo-linz.at/de/erlebnis-zoo/veranstaltungen,website,venue,3,0.65,48.3247,14.2699
+JKU Events,https://www.jku.at/news-events/events/,website,university,3,0.65,48.3372,14.3222
+ÖH JKU Veranstaltungen,https://oeh.jku.at/oeh-services/veranstaltungen,website,university,3,0.65,48.3372,14.3222
+FH OÖ Events,https://fh-ooe.at/events,website,university,3,0.65,,
+Diözese Linz,https://www.dioezese-linz.at/veranstaltungen,website,church,3,0.65,,
+KUVA Leonding,https://www.kuva-leonding.at/,website,verein,3,0.65,48.2794,14.2528

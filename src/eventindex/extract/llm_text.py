@@ -1,0 +1,79 @@
+"""Tier c: LLM extraction on readable page text (mini model, structured
+output, budget-enforced through eventindex.llm)."""
+
+from bs4 import BeautifulSoup
+from pydantic import BaseModel, ConfigDict
+
+from eventindex import config, llm
+
+MAX_CHARS = 20_000
+CONFIDENCE_CAP = 0.9  # self-reported confidence is never taken at face value
+
+_PROMPT = """Extract all upcoming events from this web page text (usually German, \
+from Linz, Austria). Today is {today}.
+
+Rules:
+- Only actual events/courses/happenings with a concrete date. Skip navigation, \
+news without dates, and past events.
+- starts_at/ends_at: ISO 8601. If no time given, use the date alone (YYYY-MM-DD). \
+Do not invent times, prices, or venues - omit unknown fields (null).
+- category: one of {categories}, or null.
+- confidence: your certainty (0-1) that this is a real upcoming event with correct date.
+
+PAGE TEXT:
+{text}"""
+
+
+class LLMEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    starts_at: str
+    ends_at: str | None
+    venue_name: str | None
+    address: str | None
+    description: str | None
+    url: str | None
+    price_min: float | None
+    price_max: float | None
+    category: str | None
+    confidence: float
+
+
+class LLMExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    events: list[LLMEvent]
+
+
+def html_to_text(content: bytes) -> str:
+    soup = BeautifulSoup(content, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return " ".join(soup.get_text(" ").split())
+
+
+def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
+    from datetime import date
+
+    from eventindex.extract import field
+
+    if len(text.strip()) < 100:
+        return []  # JS shell or empty page; headless rendering is phase 3
+
+    prompt = _PROMPT.format(
+        today=date.today().isoformat(),
+        categories=", ".join(config.CATEGORIES),
+        text=text[:MAX_CHARS],
+    )
+    result = llm.complete(
+        tx, prompt, LLMExtraction,
+        source_id=source["id"], job_id=job_id,
+    )
+
+    payloads = []
+    for ev in result.events:
+        conf = min(max(ev.confidence, 0.0), CONFIDENCE_CAP)
+        fields = ev.model_dump(exclude_none=True, exclude={"confidence", "category"})
+        if ev.category in config.CATEGORIES:
+            fields["category"] = ev.category
+        payloads.append({k: field(v, conf) for k, v in fields.items()})
+    return payloads

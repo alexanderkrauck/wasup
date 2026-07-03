@@ -1,0 +1,24 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//test//DE
+BEGIN:VEVENT
+UID:1@example.at
+SUMMARY:Yoga im Park
+DTSTART;TZID=Europe/Vienna:20260810T183000
+DTEND;TZID=Europe/Vienna:20260810T200000
+LOCATION:Donaupark Linz
+DESCRIPTION:Offene Yogastunde\, alle Level
+URL:https://example.at/yoga
+END:VEVENT
+BEGIN:VEVENT
+UID:2@example.at
+SUMMARY:Schachabend
+DTSTART;TZID=Europe/Vienna:20260812T190000
+RRULE:FREQ=WEEKLY;BYDAY=WE
+LOCATION:Vereinsheim
+END:VEVENT
+BEGIN:VEVENT
+UID:3@example.at
+SUMMARY:Kaputtes Event ohne Datum
+END:VEVENT
+END:VCALENDAR

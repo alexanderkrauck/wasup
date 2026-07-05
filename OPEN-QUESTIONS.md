@@ -7,6 +7,9 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 4. **Google Places API** - OK to create a key with billing (discovery sweep, ~€0-50 one-time within free credit)? Alternative: OSM-only start (free, ~80% of venue coverage).
 5. **Agent harness** - you mentioned you have a Python agent harness; repo/path so the onboarding agent (phase 3) builds on it instead of a new one?
 7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
+9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
+10. **Gold-set labeling session** - `db/gold/candidates.csv` has 123 scored claim pairs ready; fill the `label` column (s/d/?), save as `db/gold/gold_set.csv`, and precision@merge becomes a permanent regression test (~1-2h, one sitting).
+11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).
 ## Answered
 
 1. **LLM provider/key** → OpenRouter. Key itself still pending (→ #8). *(2026-07-03)*

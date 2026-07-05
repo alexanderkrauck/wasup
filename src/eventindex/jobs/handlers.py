@@ -16,7 +16,7 @@ from eventindex import config, fetch, llm
 from eventindex.budget import record_spend
 from eventindex.extract import extract, parse_dt
 from eventindex.resolve.fingerprint import fingerprint
-from eventindex.resolve.v0 import resolve_crawl
+from eventindex.resolve.rebuild import rebuild
 
 YIELD_EMA_ALPHA = 0.3
 
@@ -124,11 +124,23 @@ def crawl(job: dict, tx) -> list[dict]:
     )
     if not payloads:
         return []
-    return [{"kind": "resolve", "payload": {"crawl_id": str(crawl_id)}}]
+    # debounce: one pending rebuild covers any number of finished crawls
+    pending = tx.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+    ).fetchone()
+    return [] if pending else [{"kind": "resolve", "payload": {}}]
 
 
 def resolve(job: dict, tx) -> list[dict]:
-    resolve_crawl(tx, job["payload"]["crawl_id"])
+    """Full canon rebuild (H0): resolve(all_claims) -> canon, atomically."""
+    stats = rebuild(tx)
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, events_found, detail) "
+        "VALUES (%s, now(), 'ok', %s, %s)",
+        (job["id"], stats["events"],
+         f"rebuild: {stats['claims']} claims -> {stats['events']} events, "
+         f"{stats['occurrences']} occurrences, {stats['venues_created']} new venues"),
+    )
     return []
 
 

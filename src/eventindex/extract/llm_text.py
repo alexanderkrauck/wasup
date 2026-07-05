@@ -1,10 +1,13 @@
 """Tier c: LLM extraction on readable page text (mini model, structured
 output, budget-enforced through eventindex.llm)."""
 
+from typing import Literal
+
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict
 
 from eventindex import config, llm
+from eventindex.resolve.recurrence import Recurrence
 
 MAX_CHARS = 20_000
 CONFIDENCE_CAP = 0.9  # self-reported confidence is never taken at face value
@@ -19,6 +22,12 @@ news without dates, and past events.
 Do not invent times, prices, or venues - omit unknown fields (null).
 - category: one of {categories}, or null.
 - confidence: your certainty (0-1) that this is a real upcoming event with correct date.
+- recurrence: ONLY if the text describes a repeating pattern ("jeden Dienstag", \
+"wöchentlich", a course timetable row). Copy the exact wording into as_stated. \
+For a repeating event, starts_at = the first upcoming occurrence. \
+"außer Ferien"/"nicht in den Schulferien" -> except_holidays=["school_holidays"]. \
+One-off events: recurrence=null.
+- status: "cancelled" if marked ABGESAGT/abgesagt, "moved" if verschoben, else null.
 
 PAGE TEXT:
 {text}"""
@@ -36,6 +45,8 @@ class LLMEvent(BaseModel):
     price_min: float | None
     price_max: float | None
     category: str | None
+    recurrence: Recurrence | None
+    status: Literal["cancelled", "moved", "postponed"] | None
     confidence: float
 
 
@@ -72,8 +83,14 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
     payloads = []
     for ev in result.events:
         conf = min(max(ev.confidence, 0.0), CONFIDENCE_CAP)
-        fields = ev.model_dump(exclude_none=True, exclude={"confidence", "category"})
+        fields = ev.model_dump(
+            exclude_none=True, exclude={"confidence", "category", "recurrence"}
+        )
         if ev.category in config.CATEGORIES:
             fields["category"] = ev.category
+        if ev.recurrence is not None:
+            # full dump, nulls kept: the stored claim must round-trip through
+            # the strict Recurrence schema at resolve time
+            fields["recurrence"] = ev.recurrence.model_dump()
         payloads.append({k: field(v, conf) for k, v in fields.items()})
     return payloads

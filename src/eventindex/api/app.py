@@ -27,6 +27,16 @@ _PROVENANCE_SQL = """
     WHERE i.event_id = e.id
 """
 
+# §7 staleness decay, computed at query time: each missed re-confirmation
+# cadence multiplies confidence by 0.9. A dead pipeline fades to an empty
+# feed instead of serving frozen confidence.
+_EFFECTIVE_CONFIDENCE_SQL = """
+    e.confidence * power(0.9, least(50, greatest(0, floor(
+        extract(epoch from now() - o.last_confirmed_at)
+        / nullif(extract(epoch from coalesce(e.expected_cadence, interval '7 days')), 0)
+    ))))
+"""
+
 
 def _data_freshness(conn) -> datetime | None:
     return conn.execute(
@@ -90,7 +100,7 @@ def occurrences(
         conditions.append("e.category && %(cats)s")
         params["cats"] = [c.strip() for c in category.split(",")]
     if min_confidence is not None:
-        conditions.append("e.confidence >= %(min_conf)s")
+        conditions.append(f"({_EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
         params["min_conf"] = min_confidence
     if cursor is not None:
         after_ts, after_id = _parse_cursor(cursor)
@@ -101,7 +111,8 @@ def occurrences(
         SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
                o.availability, o.last_confirmed_at,
                e.title, e.category, e.price_min, e.price_max, e.url,
-               e.confidence, ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
+               ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
+               ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
                ({_PROVENANCE_SQL}) AS provenance_summary
         FROM occurrence o JOIN event e ON e.id = o.event_id
         WHERE {" AND ".join(conditions)}

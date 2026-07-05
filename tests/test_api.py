@@ -86,3 +86,29 @@ def test_keyset_pagination_walks_everything_once(client):
 
 def test_event_detail_404(client):
     assert client.get(f"/v1/events/{uuid.uuid4()}").status_code == 404
+
+
+def test_staleness_decay_is_computed_at_query_time(conn):
+    event_id = _add_event(conn, "Zombie Stammtisch", starts=NOW + timedelta(days=1))
+    # confirmed a month ago, weekly cadence -> 0.9^4 ≈ 0.59 effective
+    conn.execute(
+        "UPDATE event SET expected_cadence = interval '7 days' WHERE id = %s",
+        (event_id,),
+    )
+    conn.execute(
+        "UPDATE occurrence SET last_confirmed_at = now() - interval '30 days' "
+        "WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+    client = TestClient(app)
+
+    fresh = client.get("/v1/occurrences", params={"min_confidence": 0.8})
+    assert "Zombie Stammtisch" not in _titles(fresh)  # stored 0.9 has decayed
+    lenient = client.get("/v1/occurrences", params={"min_confidence": 0.5})
+    assert "Zombie Stammtisch" in _titles(lenient)
+    served = next(
+        o for o in client.get("/v1/occurrences").json()["occurrences"]
+        if o["title"] == "Zombie Stammtisch"
+    )
+    assert 0.55 < served["confidence"] < 0.65  # 0.9 × 0.9^4

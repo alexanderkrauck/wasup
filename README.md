@@ -24,7 +24,12 @@ cp .env.example .env                      # then fill in OPENROUTER_API_KEY
 uv sync
 uv run python -m eventindex.db.migrate    # apply db/migrations/*.sql
 uv run python -m eventindex.jobs.worker   # the worker loop (--once to drain and exit)
+uv run python -m eventindex.jobs.schedule # enqueue due crawls (cron every 15 min)
 uv run python -m eventindex.jobs.digest   # write today's digest to var/digests/
+
+# crontab for a self-sustaining index (worker runs as its own process/service):
+#   */15 * * * *  cd <repo> && uv run python -m eventindex.jobs.schedule
+#   55 23 * * *   cd <repo> && uv run python -m eventindex.jobs.digest
 uv run pytest                             # tests (use the eventindex_test db)
 ```
 

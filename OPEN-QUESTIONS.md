@@ -8,7 +8,6 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 5. **Agent harness** - you mentioned you have a Python agent harness; repo/path so the onboarding agent (phase 3) builds on it instead of a new one?
 7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
 9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
-10. **Gold-set labeling session** - `db/gold/candidates.csv` has 123 scored claim pairs ready; fill the `label` column (s/d/?), save as `db/gold/gold_set.csv`, and precision@merge becomes a permanent regression test (~1-2h, one sitting).
 11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).
 ## Answered
 
@@ -17,3 +16,4 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 3. **Crawler contact identity** → alexander.krauck@gmail.com for now; may switch to a dedicated address later. *(2026-07-03)*
 6. **Repo home** → git init in the local folder; GitHub remote deferred. *(2026-07-03)*
 8. **OpenRouter API key** → provided in `.env`; verified with a live structured-output call (dummy crawl, €0.0004 recorded in ledger). *(2026-07-03)*
+10. **Gold-set labeling** → Alexander delegated to a labeling agent (his call, 2026-07-05): all 123 pairs labeled with DB/web research, zero undecidable. Deviation from H2 "hand-labeled" signed off in chat; borderline product-calls (hall-naming = same, separate showtimes = different) locked as label policy. precision@merge = 16/16 = 1.0 ≥ 0.98 → **Phase 2 criterion (d) met**. *(2026-07-05)*

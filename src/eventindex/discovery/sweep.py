@@ -107,10 +107,62 @@ def sweep_backlinks(tx, job_id=None) -> list[str]:
     return sorted(urls)
 
 
+# §4d search fan-out: the main net for niche/placeless sources (run clubs,
+# communities, meetups) that Places/OSM structurally cannot see.
+SEARCH_TERMS = [
+    "run club", "lauftreff", "yoga", "klettern bouldern", "salsa tanzen",
+    "schachverein", "flohmarkt", "repair cafe", "brettspiele treff",
+    "sprachaustausch language exchange", "sip and paint", "töpfern workshop",
+    "community club", "stammtisch verein", "krafttraining kurse",
+    "volleyball hobby", "wandern gruppe", "fotografie workshop",
+    "kochkurs", "chor singen",
+]
+SEARCH_AREAS = ["Linz", "Linz Urfahr", "Leonding", "Traun"]
+MAX_SEARCHES_PER_SWEEP = 40  # matrix rotates; monthly cadence covers it all
+_PORTAL_NOISE = (
+    "linztermine", "facebook.", "instagram.", "eventbrite", "meetup.com",
+    "tiktok.", "youtube.", "google.", "tripadvisor", "yelp.", "linkedin.",
+    "wikipedia.", "herold.at", "firmenabc", "willhaben",
+)
+
+
+def sweep_search(tx, job_id=None) -> list[str]:
+    """Brave Search API over the query matrix; rotates through the matrix
+    across sweeps (offset persisted in a tiny state row)."""
+    if not config.BRAVE_SEARCH_API_KEY:
+        raise RuntimeError("BRAVE_SEARCH_API_KEY not set (OPEN-QUESTIONS #12)")
+    matrix = [f"{term} {area}" for term in SEARCH_TERMS for area in SEARCH_AREAS]
+    offset_row = tx.execute(
+        "SELECT count(*) AS n FROM crawl_log WHERE detail LIKE 'discover[search]%'"
+    ).fetchone()
+    start = (offset_row["n"] * MAX_SEARCHES_PER_SWEEP) % len(matrix)
+    queries = (matrix + matrix)[start : start + MAX_SEARCHES_PER_SWEEP]
+
+    urls: list[str] = []
+    for query in queries:
+        resp = httpx.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": 10, "country": "at"},
+            headers={"X-Subscription-Token": config.BRAVE_SEARCH_API_KEY,
+                     "Accept": "application/json"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            log.warning("brave search %r -> %s", query, resp.status_code)
+            continue
+        for hit in resp.json().get("web", {}).get("results", []):
+            url = hit.get("url", "")
+            if url and not any(noise in url for noise in _PORTAL_NOISE):
+                urls.append(url)
+        time.sleep(1.1)  # free-tier rate limit
+    return urls
+
+
 CHANNELS = {
     "google_places": sweep_google_places,
     "osm": sweep_osm,
     "backlinks": sweep_backlinks,
+    "search": sweep_search,
 }
 
 

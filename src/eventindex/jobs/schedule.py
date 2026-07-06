@@ -105,10 +105,15 @@ def main() -> None:
     with db.connect() as conn:
         print(f"enqueued {schedule(conn)} crawl jobs")
         if args.discover:
+            from eventindex import config
+
+            channels = ["google_places", "osm", "backlinks"]
+            if config.BRAVE_SEARCH_API_KEY:
+                channels.append("search")
             with conn.transaction():
-                for channel in ("google_places", "osm", "backlinks"):
+                for channel in channels:
                     enqueue(conn, "discover", {"channel": channel})
-            print("enqueued 3 discovery sweeps")
+            print(f"enqueued {len(channels)} discovery sweeps")
 
 
 if __name__ == "__main__":

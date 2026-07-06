@@ -4,6 +4,8 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
+12. **Brave Search API key** - the §4d search fan-out (the channel that finds placeless sources like howwasyourdayclub automatically) is built and wired into the Monday sweep, but needs `BRAVE_SEARCH_API_KEY` in `.env`. Free tier (2k queries/month) is ample - we use ~160/month. Sign up at brave.com/search/api, or name a different search API and I'll swap the ~20 lines.
+
 7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
 9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
 11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).

@@ -126,12 +126,34 @@ _PORTAL_NOISE = (
 )
 
 
+def search_web(tx, query: str, job_id=None) -> list[str]:
+    """One web search via the OpenRouter web plugin (Exa engine): result
+    URLs arrive as url_citation annotations - machine-readable, budget-
+    ledgered through the one LLM client, no extra account or key.
+    (Google CSE: whole-web deprecated for new engines, dead Jan 2027.
+    Gemini grounding: ToS forbids using links for crawling. Brave: vetoed.)"""
+    from eventindex import llm
+
+    msg = llm.chat(
+        tx,
+        [{"role": "user", "content": f"Suche im Web: {query}"}],
+        model=config.MODEL_MINI,
+        job_id=job_id,
+        plugins=[{"id": "web", "engine": "exa", "max_results": 10}],
+    )
+    annotations = getattr(msg, "annotations", None) or []
+    urls = []
+    for a in annotations:
+        a = a if isinstance(a, dict) else a.model_dump()
+        if a.get("type") == "url_citation":
+            if url := a.get("url_citation", {}).get("url"):
+                urls.append(url)
+    return urls
+
+
 def sweep_search(tx, job_id=None) -> list[str]:
-    """Google Custom Search over the query matrix; rotates through the
-    matrix across sweeps so the monthly cadence covers all combinations.
-    Free tier: 100 queries/day - we use MAX_SEARCHES_PER_SWEEP weekly."""
-    if not (config.GOOGLE_SEARCH_API_KEY and config.GOOGLE_CSE_ID):
-        raise RuntimeError("GOOGLE_CSE_ID not set (OPEN-QUESTIONS #12)")
+    """§4d fan-out over the query matrix, rotating across sweeps so the
+    monthly cadence covers all combinations."""
     matrix = [f"{term} {area}" for term in SEARCH_TERMS for area in SEARCH_AREAS]
     offset_row = tx.execute(
         "SELECT count(*) AS n FROM crawl_log WHERE detail LIKE 'discover[search]%'"
@@ -141,21 +163,12 @@ def sweep_search(tx, job_id=None) -> list[str]:
 
     urls: list[str] = []
     for query in queries:
-        resp = httpx.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={"key": config.GOOGLE_SEARCH_API_KEY, "cx": config.GOOGLE_CSE_ID,
-                    "q": query, "num": 10, "gl": "at", "hl": "de"},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            log.warning("google search %r -> %s %s", query, resp.status_code,
-                        resp.text[:150])
+        try:
+            hits = search_web(tx, query, job_id=job_id)
+        except Exception as e:
+            log.warning("search %r failed: %s", query, e)
             continue
-        for hit in resp.json().get("items", []):
-            url = hit.get("link", "")
-            if url and not any(noise in url for noise in _PORTAL_NOISE):
-                urls.append(url)
-        time.sleep(0.5)
+        urls += [u for u in hits if not any(n in u for n in _PORTAL_NOISE)]
     return urls
 
 

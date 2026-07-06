@@ -107,9 +107,7 @@ def main() -> None:
         if args.discover:
             from eventindex import config
 
-            channels = ["google_places", "osm", "backlinks"]
-            if config.GOOGLE_CSE_ID:
-                channels.append("search")
+            channels = ["google_places", "osm", "backlinks", "search"]
             with conn.transaction():
                 for channel in channels:
                     enqueue(conn, "discover", {"channel": channel})

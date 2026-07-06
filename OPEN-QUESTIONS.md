@@ -4,12 +4,13 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
-12. **Google Custom Search setup** - the §4d search fan-out (finds placeless sources like howwasyourdayclub automatically) is built and wired into the Monday sweep. Two clicks needed in your existing Google account: (a) enable "Custom Search API" in the same Cloud project as the Places key, (b) create a Programmable Search Engine at programmablesearchengine.google.com with "search the entire web" and put its id in `.env` as `GOOGLE_CSE_ID`. Free tier 100 queries/day; we use ~40/week.
 
 7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
 9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
 11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).
 ## Answered
+
+12. **Search API for §4d fan-out** → resolved with NO new account: OpenRouter web plugin (Exa engine), URLs via url_citation annotations, ~€1/month for 160 queries, budget-ledgered through the one LLM client. Research trail: Google CSE closed to new customers & dead 2027-01 (Alexander's screenshot confirmed); Gemini grounding free but ToS forbids using links for crawling; Brave vetoed by Alexander. Smoke test: "run club linz" → howwasyourdayclub.com at rank 2. *(2026-07-06)*
 
 1. **LLM provider/key** → OpenRouter. Key itself still pending (→ #8). *(2026-07-03)*
 2. **Runtime target for phases 0-2** → local, Postgres 16 + PostGIS + pgvector as a single Docker container (dev DB only; deploy target stays VPS+systemd per DECISIONS.md). *(2026-07-03)*

@@ -51,19 +51,24 @@ def chat(
     model: str = config.MODEL_MINI,
     source_id: UUID | None = None,
     job_id: UUID | None = None,
+    plugins: list[dict] | None = None,
 ):
-    """One raw chat turn (optionally with tools): budget-checked, ledgered.
-    Returns the assistant message. The agent loop (discovery/onboard.py)
-    builds on this - like complete(), it cannot bypass the budget."""
+    """One raw chat turn (optionally with tools / OpenRouter plugins):
+    budget-checked, ledgered. Returns the assistant message. The agent loop
+    and the search fan-out build on this - like complete(), it cannot bypass
+    the budget."""
     check_budget(tx, source_id=source_id)
     kwargs: dict = {}
     if tools:
         kwargs["tools"] = tools
+    extra_body: dict = {"usage": {"include": True}}
+    if plugins:
+        extra_body["plugins"] = plugins
     response = _get_client().chat.completions.create(
         model=model,
         messages=messages,
         max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
-        extra_body={"usage": {"include": True}},
+        extra_body=extra_body,
         **kwargs,
     )
     cost, tokens_in, tokens_out = _cost_eur(response.usage)

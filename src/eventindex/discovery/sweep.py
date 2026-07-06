@@ -130,7 +130,7 @@ def sweep_search(tx, job_id=None) -> list[str]:
     """Google Custom Search over the query matrix; rotates through the
     matrix across sweeps so the monthly cadence covers all combinations.
     Free tier: 100 queries/day - we use MAX_SEARCHES_PER_SWEEP weekly."""
-    if not (config.GOOGLE_PLACES_API_KEY and config.GOOGLE_CSE_ID):
+    if not (config.GOOGLE_SEARCH_API_KEY and config.GOOGLE_CSE_ID):
         raise RuntimeError("GOOGLE_CSE_ID not set (OPEN-QUESTIONS #12)")
     matrix = [f"{term} {area}" for term in SEARCH_TERMS for area in SEARCH_AREAS]
     offset_row = tx.execute(
@@ -143,7 +143,7 @@ def sweep_search(tx, job_id=None) -> list[str]:
     for query in queries:
         resp = httpx.get(
             "https://www.googleapis.com/customsearch/v1",
-            params={"key": config.GOOGLE_PLACES_API_KEY, "cx": config.GOOGLE_CSE_ID,
+            params={"key": config.GOOGLE_SEARCH_API_KEY, "cx": config.GOOGLE_CSE_ID,
                     "q": query, "num": 10, "gl": "at", "hl": "de"},
             timeout=20,
         )

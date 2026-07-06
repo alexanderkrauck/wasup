@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 from eventindex import config, fetch, llm
 from eventindex.budget import record_spend
 from eventindex.extract import extract, parse_dt
+from eventindex.fetch.recipe import Recipe, run_recipe
 from eventindex.resolve.fingerprint import fingerprint
 from eventindex.resolve.rebuild import rebuild
 
@@ -64,6 +65,9 @@ def crawl(job: dict, tx) -> list[dict]:
     ).fetchone()
     crawl_id = uuid.uuid4()
 
+    if source["recipe"]:
+        return _crawl_recipe(job, tx, source, crawl_id)
+
     result = fetch.fetch_source(source)
 
     if result.status == fetch.BLOCKED:
@@ -80,43 +84,12 @@ def crawl(job: dict, tx) -> list[dict]:
 
     method, payloads = extract(source, result, tx, job_id=job["id"])
 
-    for payload in payloads:
-        starts = parse_dt(payload["starts_at"]["value"])
-        lat = payload.get("lat", {}).get("value")
-        lon = payload.get("lon", {}).get("value")
-        fp = fingerprint(
-            payload["title"]["value"], starts,
-            lat=lat if lat is not None else source["lat"],
-            lon=lon if lon is not None else source["lon"],
-        )
-        tx.execute(
-            "INSERT INTO event_claim (source_id, crawl_id, fingerprint, payload) "
-            "VALUES (%s, %s, %s, %s)",
-            (source_id, crawl_id, fp, Jsonb(payload)),
-        )
-
+    _insert_claims(tx, source, crawl_id, payloads)
+    _update_source_stats(tx, job, source, len(payloads), method)
     tx.execute(
-        """
-        UPDATE source SET
-            last_crawled = now(),
-            last_yield = %(n)s,
-            yield_ema = yield_ema * (1 - %(alpha)s) + %(n)s * %(alpha)s,
-            last_content_hash = %(hash)s,
-            http_etag = %(etag)s,
-            http_last_modified = %(lm)s,
-            extraction_hint = coalesce(extraction_hint, '{}'::jsonb)
-                              || jsonb_build_object('method', %(method)s::text)
-        WHERE id = %(id)s
-        """,
-        {
-            "n": len(payloads),
-            "alpha": YIELD_EMA_ALPHA,
-            "hash": result.content_hash,
-            "etag": result.etag,
-            "lm": result.last_modified,
-            "method": method,
-            "id": source_id,
-        },
+        "UPDATE source SET last_content_hash = %s, http_etag = %s, "
+        "http_last_modified = %s WHERE id = %s",
+        (result.content_hash, result.etag, result.last_modified, source_id),
     )
     _log_crawl(
         tx, crawl_id, job, source_id, "ok",
@@ -129,6 +102,84 @@ def crawl(job: dict, tx) -> list[dict]:
         "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
     ).fetchone()
     return [] if pending else [{"kind": "resolve", "payload": {}}]
+
+
+def _insert_claims(tx, source, crawl_id, payloads) -> None:
+    for payload in payloads:
+        starts = parse_dt(payload["starts_at"]["value"])
+        lat = payload.get("lat", {}).get("value")
+        lon = payload.get("lon", {}).get("value")
+        fp = fingerprint(
+            payload["title"]["value"], starts,
+            lat=lat if lat is not None else source["lat"],
+            lon=lon if lon is not None else source["lon"],
+        )
+        tx.execute(
+            "INSERT INTO event_claim (source_id, crawl_id, fingerprint, payload) "
+            "VALUES (%s, %s, %s, %s)",
+            (source["id"], crawl_id, fp, Jsonb(payload)),
+        )
+
+
+def _update_source_stats(tx, job, source, n_payloads: int, method: str) -> None:
+    tx.execute(
+        """
+        UPDATE source SET
+            last_crawled = now(),
+            last_yield = %(n)s,
+            yield_ema = yield_ema * (1 - %(a)s) + %(n)s * %(a)s,
+            cost_ema = cost_ema * (1 - %(a)s) + %(a)s * coalesce(
+                (SELECT sum(amount_eur) FROM budget_spend WHERE job_id = %(job_id)s), 0),
+            extraction_hint = coalesce(extraction_hint, '{}'::jsonb)
+                              || jsonb_build_object('method', %(method)s::text)
+        WHERE id = %(id)s
+        """,
+        {"n": n_payloads, "a": YIELD_EMA_ALPHA, "job_id": job["id"],
+         "method": method, "id": source["id"]},
+    )
+
+
+def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
+    """Recipe-driven crawl (§5b) with the self-healing contract: validation
+    failure OR >80% yield drop vs EMA, twice in a row -> degraded + re-onboard."""
+    recipe = Recipe.model_validate(source["recipe"])
+    payloads, validation = run_recipe(recipe, source, tx, job_id=job["id"])
+    payloads = [p for p in payloads if "starts_at" in p and parse_dt(p["starts_at"]["value"])]
+
+    yield_dropped = (
+        source["yield_ema"] > 5 and len(payloads) < 0.2 * source["yield_ema"]
+    )
+    healthy = validation.ok and not yield_dropped
+    hint = source["extraction_hint"] or {}
+    degraded_count = 0 if healthy else hint.get("degraded_count", 0) + 1
+    tx.execute(
+        "UPDATE source SET extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
+        "|| jsonb_build_object('degraded_count', %s::int) WHERE id = %s",
+        (degraded_count, source["id"]),
+    )
+
+    _insert_claims(tx, source, crawl_id, payloads)
+    _update_source_stats(tx, job, source, len(payloads), "recipe")
+    detail = f"method=recipe v{source['recipe_version']}"
+    if not healthy:
+        detail += f" UNHEALTHY({degraded_count}): " + "; ".join(validation.reasons)[:200]
+    _log_crawl(tx, crawl_id, job, source["id"], "ok" if healthy else "error",
+               events_found=len(payloads), detail=detail)
+
+    jobs = []
+    if degraded_count >= 2:
+        tx.execute("UPDATE source SET status = 'degraded' WHERE id = %s", (source["id"],))
+        jobs.append({"kind": "onboard", "payload": {
+            "source_id": str(source["id"]),
+            "reason": f"self-heal: {'; '.join(validation.reasons)[:300]}",
+        }})
+    if payloads:
+        pending = tx.execute(
+            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+        ).fetchone()
+        if not pending:
+            jobs.append({"kind": "resolve", "payload": {}})
+    return jobs
 
 
 def resolve(job: dict, tx) -> list[dict]:
@@ -144,4 +195,58 @@ def resolve(job: dict, tx) -> list[dict]:
     return []
 
 
-HANDLERS = {"crawl": crawl, "resolve": resolve}
+def onboard(job: dict, tx) -> list[dict]:
+    """Recipe synthesis (§5b): one agent session; escalation ladder = worker
+    retries (attempt 1 mini, later attempts mid model)."""
+    from eventindex.discovery.onboard import onboard_source
+
+    source = tx.execute(
+        "SELECT *, ST_Y(geo) AS lat, ST_X(geo) AS lon FROM source WHERE id = %s",
+        (job["payload"]["source_id"],),
+    ).fetchone()
+    model = config.MODEL_MINI if job["attempts"] <= 1 else config.MODEL_MID
+    recipe = onboard_source(tx, source, job["id"], model)
+    tx.execute(
+        "UPDATE source SET recipe = %s, recipe_version = recipe_version + 1, "
+        "status = 'active', extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
+        "|| '{\"degraded_count\": 0}'::jsonb WHERE id = %s",
+        (Jsonb(recipe.model_dump()), source["id"]),
+    )
+    return [{"kind": "crawl", "payload": {"source_id": str(source["id"])}}]
+
+
+def probe(job: dict, tx) -> list[dict]:
+    from eventindex.discovery.probe import probe_url
+
+    result = probe_url(
+        tx, job["payload"]["url"], job["payload"].get("discovered_via", "unknown"),
+        job_id=job["id"],
+    )
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, detail) "
+        "VALUES (%s, now(), 'ok', %s)",
+        (job["id"], f"probe {job['payload']['url'][:120]} -> {result['outcome']} "
+                    f"{result.get('detail', '')}"[:400]),
+    )
+    if result["outcome"] == "registered":
+        return [{"kind": "onboard", "payload": {"source_id": str(result["source_id"])}}]
+    return []
+
+
+def discover(job: dict, tx) -> list[dict]:
+    from eventindex.discovery.sweep import discover as run_sweep
+
+    channel = job["payload"]["channel"]
+    seen, enqueued = run_sweep(tx, channel, job_id=job["id"])
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, detail) "
+        "VALUES (%s, now(), 'ok', %s)",
+        (job["id"], f"discover[{channel}]: {seen} candidates, {enqueued} probes enqueued"),
+    )
+    return []
+
+
+HANDLERS = {
+    "crawl": crawl, "resolve": resolve,
+    "onboard": onboard, "probe": probe, "discover": discover,
+}

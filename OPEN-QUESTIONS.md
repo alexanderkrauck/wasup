@@ -4,8 +4,6 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
-4. **Google Places API** - OK to create a key with billing (discovery sweep, ~€0-50 one-time within free credit)? Alternative: OSM-only start (free, ~80% of venue coverage).
-5. **Agent harness** - you mentioned you have a Python agent harness; repo/path so the onboarding agent (phase 3) builds on it instead of a new one?
 7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
 9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
 11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).
@@ -17,3 +15,5 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 6. **Repo home** → git init in the local folder; GitHub remote deferred. *(2026-07-03)*
 8. **OpenRouter API key** → provided in `.env`; verified with a live structured-output call (dummy crawl, €0.0004 recorded in ledger). *(2026-07-03)*
 10. **Gold-set labeling** → Alexander delegated to a labeling agent (his call, 2026-07-05): all 123 pairs labeled with DB/web research, zero undecidable. Deviation from H2 "hand-labeled" signed off in chat; borderline product-calls (hall-naming = same, separate showtimes = different) locked as label policy. precision@merge = 16/16 = 1.0 ≥ 0.98 → **Phase 2 criterion (d) met**. *(2026-07-05)*
+4. **Google Places API** → key provided in `.env` as `GOOGLE_PLACES_API_KEY`. *(2026-07-06)*
+5. **Agent harness** → assessed god-in-a-box (Alexander: DASC/"SN" experimental = excluded; "variation of codact" = tool-calling loop). Verdict: don't embed - no sandbox/turn-cap/cost-cap on the codeact path, heavy deps, invasive side effects, untested loop; instead a purpose-built ~400-line browser-tool loop in eventindex, harvesting its graceful-timeout + trajectory patterns. **Decided provisionally by the agent while Alexander was AFK - veto here if wrong.** *(2026-07-06)*

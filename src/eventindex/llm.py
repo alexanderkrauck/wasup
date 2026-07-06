@@ -43,6 +43,37 @@ def _cost_eur(usage) -> tuple[float, int, int]:
     return est, tokens_in, tokens_out
 
 
+def chat(
+    tx,
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    model: str = config.MODEL_MINI,
+    source_id: UUID | None = None,
+    job_id: UUID | None = None,
+):
+    """One raw chat turn (optionally with tools): budget-checked, ledgered.
+    Returns the assistant message. The agent loop (discovery/onboard.py)
+    builds on this - like complete(), it cannot bypass the budget."""
+    check_budget(tx, source_id=source_id)
+    kwargs: dict = {}
+    if tools:
+        kwargs["tools"] = tools
+    response = _get_client().chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
+        extra_body={"usage": {"include": True}},
+        **kwargs,
+    )
+    cost, tokens_in, tokens_out = _cost_eur(response.usage)
+    record_spend(
+        cost, "llm", source_id=source_id, job_id=job_id, model=model,
+        tokens_in=tokens_in, tokens_out=tokens_out,
+    )
+    return response.choices[0].message
+
+
 def complete(
     tx,
     prompt: str,

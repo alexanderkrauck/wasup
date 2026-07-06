@@ -18,6 +18,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://eventindex:eventindex@localhost:5432/eventindex"
 )
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
 # LLM (DECISIONS.md: one provider = OpenRouter; model names live here)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -32,6 +33,12 @@ GLOBAL_DAILY_LLM_CAP_EUR = 5.0
 MONTHLY_BUDGET_EUR_BY_TIER = {1: 2.0, 2: 1.0, 3: 1.0, 4: 3.0}
 # Fallback when OpenRouter omits cost in the response: deliberately pessimistic.
 FALLBACK_EUR_PER_1K_TOKENS = 0.005
+
+# Onboarding agent (§5b / §harness): budget enforced by the loop, not the model
+ONBOARD_MAX_TURNS = 25
+ONBOARD_SESSION_CAP_EUR = 0.60  # H3.5: one-time per source; hard sites cost more
+ONBOARD_WALL_CLOCK_S = 600
+TRAJECTORY_DIR = VAR_DIR / "trajectories"
 
 # Worker
 JOB_MAX_ATTEMPTS = 3

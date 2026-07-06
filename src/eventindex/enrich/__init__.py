@@ -37,15 +37,15 @@ class _BoolEst(BaseModel):
 
 class Enrichment(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # descriptions live in the prompt: strict schema mode forbids
+    # annotations on $ref fields
     age_min: _Est
     age_max: _Est
-    gender_split: _Est = Field(description="0=all male .. 1=all female")
+    gender_split: _Est
     expected_attendance: _Est
     language: Literal["de", "en", "other"] | None
     kid_friendly: _BoolEst
-    newcomer_friendly: _BoolEst = Field(
-        description="open to strangers vs members-only circles"
-    )
+    newcomer_friendly: _BoolEst
     outdoor: _BoolEst
     energy: Literal["low", "medium", "high"] | None
     vibe_tags: list[str] = Field(description="3-6 short lowercase vibe words")
@@ -85,7 +85,9 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         f"category prior and ADJUST ONLY where the text itself gives explicit "
         f"evidence - never invent. No evidence = keep the prior with low "
         f"confidence ({PRIOR_CONFIDENCE}). With explicit evidence, confidence "
-        f"may rise to {CONFIDENCE_CAP} at most.\n\n"
+        f"may rise to {CONFIDENCE_CAP} at most.\n"
+        "gender_split: 0=all male .. 1=all female. newcomer_friendly: open to "
+        "strangers vs members-only circles.\n\n"
         f"CATEGORY PRIOR: {prior}\n"
         f"TITLE: {event.get('title')}\n"
         f"DESCRIPTION: {(event.get('description') or '')[:1200]}\n"

@@ -135,6 +135,42 @@ def occurrences(
     }
 
 
+@app.get("/v1/search")
+def search(q: str, limit: int = Query(20, le=100, ge=1)):
+    """Agent search: LLM-parsed hard filters + vibe ranking (never the
+    other way around). The parsed filters are echoed for transparency."""
+    from eventindex.api.search import build_sql, parse_query, rank
+
+    with db.connect() as conn:
+        filters = parse_query(conn, q)
+        conn.commit()  # the parse's budget ledger entry
+        where, params = build_sql(filters)
+        params["limit"] = limit * 3  # fetch extra, rank, cut
+        rows = conn.execute(
+            f"""
+            SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
+                   e.title, e.category, e.price_min, e.price_max, e.url,
+                   e.inferred->'vibe_tags' AS vibe_tags,
+                   e.expected_age_range AS age_range,
+                   ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
+                   ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
+                   ({_PROVENANCE_SQL}) AS provenance_summary
+            FROM occurrence o JOIN event e ON e.id = o.event_id
+            WHERE {where}
+            ORDER BY o.starts_at LIMIT %(limit)s
+            """,
+            params,
+        ).fetchall()
+        freshness = _data_freshness(conn)
+    for r in rows:
+        r["age_range"] = str(r["age_range"]) if r["age_range"] else None
+    return {
+        "data_freshness": freshness,
+        "parsed_filters": filters.model_dump(),
+        "occurrences": rank(rows, filters.vibe_terms)[:limit],
+    }
+
+
 @app.get("/v1/events/{event_id}")
 def event(event_id: UUID):
     with db.connect() as conn:

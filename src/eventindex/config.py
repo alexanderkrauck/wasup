@@ -41,6 +41,14 @@ MONTHLY_BUDGET_EUR_BY_TIER = {1: 2.0, 2: 1.0, 3: 1.0, 4: 3.0}
 # Fallback when OpenRouter omits cost in the response: deliberately pessimistic.
 FALLBACK_EUR_PER_1K_TOKENS = 0.005
 
+# Completeness contract (Alexander 2026-07-07: if events are findable
+# without a login wall, we get them - incomplete feeds get an agent thrown
+# at the site): productive sources whose yield horizon stays short are
+# flagged and escalated once.
+COMPLETENESS_MIN_YIELD = 10       # only productive sources can be "capped"
+HORIZON_CAPPED_DAYS = 10          # yield never reaching past this = suspicious
+RECIPE_MIN_HORIZON_DAYS = 21      # escalated recipes must reach at least this
+
 # Onboarding agent (§5b / §harness): budget enforced by the loop, not the model
 ONBOARD_MAX_TURNS = 25
 ONBOARD_SESSION_CAP_EUR = 0.60  # H3.5: one-time per source; hard sites cost more

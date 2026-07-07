@@ -35,7 +35,66 @@ def park_dormant(conn) -> int:
         return cur.rowcount
 
 
+def completeness_escalation(conn) -> int:
+    """Completeness contract (2026-07-07): a productive source whose yield
+    horizon never reaches past ~10 days is a capped feed (the linztermine XML
+    is a hard 7-day window while the site publishes months ahead). Feeds get
+    a companion WEBSITE source with the onboarding agent thrown at it;
+    website sources get re-onboarded with depth orders. Once per source."""
+    from urllib.parse import urlparse
+
+    from eventindex import config
+
+    rows = conn.execute(
+        """
+        SELECT id, name, url, kind FROM source
+        WHERE status = 'active'
+          AND yield_ema >= %s
+          AND (extraction_hint->>'horizon_days')::float <= %s
+          AND extraction_hint->>'completeness_escalated' IS NULL
+        """,
+        (config.COMPLETENESS_MIN_YIELD, config.HORIZON_CAPPED_DAYS),
+    ).fetchall()
+    escalated = 0
+    for r in rows:
+        with conn.transaction():
+            reason = (f"completeness escalation: source is productive but its yield "
+                      f"never reaches past {config.HORIZON_CAPPED_DAYS} days - the "
+                      f"real site publishes further ahead; build a recipe that digs "
+                      f"deep (calendar months, date ranges).")
+            if r["kind"] in ("api", "ics", "rss"):
+                host = urlparse(r["url"]).netloc
+                site_url = f"https://{host}/"
+                companion = conn.execute(
+                    """
+                    INSERT INTO source (name, url, kind, entity_type, tier, trust,
+                                        monthly_budget_eur, discovered_via)
+                    VALUES (%s, %s, 'website', 'portal', 2, 0.8, %s,
+                            'completeness_escalation')
+                    ON CONFLICT (url) DO NOTHING RETURNING id
+                    """,
+                    (f"{r['name']} (site, deep)", site_url,
+                     config.MONTHLY_BUDGET_EUR_BY_TIER[2]),
+                ).fetchone()
+                target = companion["id"] if companion else None
+            else:
+                target = r["id"]
+            if target is not None:
+                enqueue(conn, "onboard",
+                        {"source_id": str(target), "reason": reason})
+                escalated += 1
+            conn.execute(
+                "UPDATE source SET extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
+                "|| '{\"completeness_escalated\": true}'::jsonb WHERE id = %s",
+                (r["id"],),
+            )
+    return escalated
+
+
 def schedule(conn) -> int:
+    flagged = completeness_escalation(conn)
+    if flagged:
+        print(f"completeness escalation: {flagged} capped sources sent to onboarding")
     parked = park_dormant(conn)
     if parked:
         print(f"parked {parked} yieldless sources as dormant")

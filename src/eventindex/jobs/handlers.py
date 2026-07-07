@@ -80,7 +80,7 @@ def crawl(job: dict, tx) -> list[dict]:
     method, payloads = extract(source, result, tx, job_id=job["id"])
 
     _insert_claims(tx, source, crawl_id, payloads)
-    _update_source_stats(tx, job, source, len(payloads), method)
+    _update_source_stats(tx, job, source, payloads, method)
     tx.execute(
         "UPDATE source SET last_content_hash = %s, http_etag = %s, "
         "http_last_modified = %s WHERE id = %s",
@@ -116,7 +116,20 @@ def _insert_claims(tx, source, crawl_id, payloads) -> None:
         )
 
 
-def _update_source_stats(tx, job, source, n_payloads: int, method: str) -> None:
+def _claim_horizon_days(payloads: list[dict]) -> float | None:
+    """How far into the future this crawl's yield reaches (completeness
+    contract: a productive source stuck at a short horizon = capped feed)."""
+    from datetime import datetime, timezone
+
+    dates = [parse_dt(p["starts_at"]["value"]) for p in payloads if "starts_at" in p]
+    dates = [d for d in dates if d is not None]
+    if not dates:
+        return None
+    return round((max(dates) - datetime.now(timezone.utc)).total_seconds() / 86400, 1)
+
+
+def _update_source_stats(tx, job, source, payloads: list, method: str) -> None:
+    horizon = _claim_horizon_days(payloads)
     tx.execute(
         """
         UPDATE source SET
@@ -127,10 +140,12 @@ def _update_source_stats(tx, job, source, n_payloads: int, method: str) -> None:
                 (SELECT sum(amount_eur) FROM budget_spend WHERE job_id = %(job_id)s), 0),
             extraction_hint = coalesce(extraction_hint, '{}'::jsonb)
                               || jsonb_build_object('method', %(method)s::text)
+                              || CASE WHEN %(horizon)s::float IS NULL THEN '{}'::jsonb
+                                 ELSE jsonb_build_object('horizon_days', %(horizon)s::float) END
         WHERE id = %(id)s
         """,
-        {"n": n_payloads, "a": YIELD_EMA_ALPHA, "job_id": job["id"],
-         "method": method, "id": source["id"]},
+        {"n": len(payloads), "a": YIELD_EMA_ALPHA, "job_id": job["id"],
+         "method": method, "id": source["id"], "horizon": horizon},
     )
 
 
@@ -154,7 +169,7 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     )
 
     _insert_claims(tx, source, crawl_id, payloads)
-    _update_source_stats(tx, job, source, len(payloads), "recipe")
+    _update_source_stats(tx, job, source, payloads, "recipe")
     detail = f"method=recipe v{source['recipe_version']}"
     if not healthy:
         detail += f" UNHEALTHY({degraded_count}): " + "; ".join(validation.reasons)[:200]
@@ -225,7 +240,11 @@ def onboard(job: dict, tx) -> list[dict]:
         (job["payload"]["source_id"],),
     ).fetchone()
     model = config.MODEL_MINI if job["attempts"] <= 1 else config.MODEL_MID
-    recipe = onboard_source(tx, source, job["id"], model)
+    reason = job["payload"].get("reason")
+    min_horizon = (config.RECIPE_MIN_HORIZON_DAYS
+                   if reason and "completeness" in reason else None)
+    recipe = onboard_source(tx, source, job["id"], model,
+                            task_reason=reason, min_horizon_days=min_horizon)
     tx.execute(
         "UPDATE source SET recipe = %s, recipe_version = recipe_version + 1, "
         "status = 'active', extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "

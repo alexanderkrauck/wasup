@@ -19,9 +19,11 @@ from eventindex import config
 
 log = logging.getLogger("eventindex.recipe")
 
-# per-crawl hard caps (§cost-governance ring 1), recipe values are clamped
-MAX_PAGES_HARD = 30
-MAX_DETAIL_FETCHES = 40
+# per-crawl hard caps (§cost-governance ring 1), recipe values are clamped.
+# Deliberately generous (completeness > thrift; per-source budgets are the
+# real governor): pagination depth must never be why we miss events.
+MAX_PAGES_HARD = 60
+MAX_DETAIL_FETCHES = 60
 PAGINATION_TYPES = Literal[
     "url_param", "next_link", "load_more_click", "infinite_scroll",
     "calendar_nav", "date_range_param", "form_post", "none",
@@ -37,6 +39,9 @@ class Pagination(BaseModel):
     next_selector: str | None = Field(None, description="next_link: CSS for the next <a>")
     click_selector: str | None = Field(None, description="load_more_click: CSS for the button")
     months_ahead: int = Field(3, description="calendar_nav/date_range_param horizon")
+
+
+MAX_MONTHS_AHEAD = 12
 
 
 class Validation(BaseModel):
@@ -89,7 +94,7 @@ def page_urls(recipe: Recipe, now: datetime | None = None) -> list[str]:
         if p.type == "url_param" and "{n}" in entry:
             urls += [entry.replace("{n}", str(n)) for n in range(p.start, p.start + max_pages)]
         elif p.type in ("calendar_nav", "date_range_param"):
-            months = min(p.months_ahead, 6)
+            months = min(p.months_ahead, MAX_MONTHS_AHEAD)
             if "{year}" in entry or "{month}" in entry:
                 y, m = now.year, now.month
                 for _ in range(months):

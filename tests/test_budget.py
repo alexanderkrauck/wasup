@@ -4,11 +4,14 @@ from eventindex import config
 from eventindex.budget import BudgetExceeded, check_budget, record_spend
 
 
+import uuid
+
+
 def _make_source(conn, monthly_budget_eur):
     return conn.execute(
         "INSERT INTO source (name, url, kind, tier, trust, monthly_budget_eur) "
-        "VALUES ('t', 'http://x', 'website', 3, 0.65, %s) RETURNING id",
-        (monthly_budget_eur,),
+        "VALUES ('t', %s, 'website', 3, 0.65, %s) RETURNING id",
+        (f"http://{uuid.uuid4().hex[:10]}.test", monthly_budget_eur),
     ).fetchone()["id"]
 
 

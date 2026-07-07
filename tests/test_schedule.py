@@ -1,4 +1,6 @@
-from eventindex.jobs.schedule import park_dormant, schedule
+from psycopg.types.json import Jsonb
+
+from eventindex.jobs.schedule import completeness_escalation, park_dormant, schedule
 
 
 def _source(conn, name, last_crawled_sql, status="active", interval="1 day",
@@ -29,6 +31,36 @@ def test_due_and_never_crawled_enqueued_once(conn):
         )
     }
     assert names == {"due", "never"}
+
+
+def test_capped_feed_gets_companion_site_and_agent_once(conn):
+    conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, yield_ema, extraction_hint) "
+        "VALUES ('CityFeed', 'https://feed.example.at/export.php', 'api', 1, 0.9, "
+        "50, %s)", (Jsonb({"horizon_days": 7.0}),),
+    )
+    # productive website with a healthy horizon: must NOT escalate
+    conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, yield_ema, extraction_hint) "
+        "VALUES ('DeepSite', 'https://deep.example.at/', 'website', 2, 0.8, "
+        "50, %s)", (Jsonb({"horizon_days": 45.0}),),
+    )
+    conn.commit()
+
+    assert completeness_escalation(conn) == 1
+    conn.commit()
+    companion = conn.execute(
+        "SELECT * FROM source WHERE discovered_via = 'completeness_escalation'"
+    ).fetchone()
+    assert companion["url"] == "https://feed.example.at/"
+    assert companion["kind"] == "website"
+    onboard = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'onboard'"
+    ).fetchone()
+    assert onboard["payload"]["source_id"] == str(companion["id"])
+    assert "completeness" in onboard["payload"]["reason"]
+    # one-shot: second run does nothing
+    assert completeness_escalation(conn) == 0
 
 
 def test_yieldless_sources_park_dormant_with_monthly_pulse(conn):

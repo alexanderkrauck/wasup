@@ -46,6 +46,16 @@ Confidence wiring end-to-end (source trust EMA, compound event confidence, stale
 
 socials (trigger: ≥20 Instagram-only sources identified) · vision/PDF (≥10 high-value PDF sources queued) · tier-D (≥5 sources defeat recipes) · demographics inference (product demand) · takedown self-service (first real request) · frontend (v1 proves usage via API/.ics first) · multi-city (Linz coverage bar demonstrably met).
 
+## Red-team backlog (2026-07-07, two audit rounds - ordered by leverage)
+
+1. **Implicit-series forward projection** - THE structural gap. linztermine's XML export is a hard 7-day rolling window (verified: no date params work), so all aggregator-relayed weeklies (Sommerkino, TCG, Flohmärkte, Musikpavillon) truncate at now+7d. Design: when >=3 weekly repetitions of (title, venue, weekday, time) accumulate across crawls, synthesize a Recurrence and expand 8 weeks; verify-call gates it. Also: parse "jeden Mittwoch 3.6.-26.8." free-text in aggregator descriptions into the recurrence schema.
+2. **Marquee duplication regressed** - multi-source variant titles (Pretty Woman ×3-4/day, Grossstadtgeflüster ×3). Adjudicator declines thin-evidence merges (precision-first, per design) - next tool: mid-model escalation for twice-grey pairs (§model-routing) + venue-alias hygiene.
+3. **Registered != yielding**: digest should flag sources with 0 claims after N crawls (HWYD Wix, strom.stwst.at). Also: sub-page probes for known domains with low yield (posthof.at/festivals case).
+4. **Extraction quality**: times lost to 00:00 when source states them (Chet Faker 19:30); "F.I.T.C.: Pflasterspektakel Tag 1" mislabeling; Einlass/Beginn rule shipped but old claims persist until re-crawl.
+5. **Vision/PDF fence trigger evidence**: Aktiv-Tage Linz (city Ferienprogramm) is a PDF brochure; count such high-value PDF sources toward the >=10 trigger (currently ~2).
+6. **Socials fence**: ~8 suspected IG-first sources found in one 2-week window (trigger: >=20 confirmed). Start tracking suspected_ig_only on sources.
+7. Special-handling sources: oeticket (DataDome bot protection - maybe skip, linztermine overlaps), meetup.com (JS/API), casinos.at (JS). Structural no-source-yet: beach volleyball, Salonschiff, Plus City, Biergarten live music.
+
 ## Standing rules
 
 - Every phase ends with: update DECISIONS changelog, batch open questions, post done-criterion evidence.

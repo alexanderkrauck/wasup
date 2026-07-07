@@ -9,7 +9,8 @@ from datetime import datetime
 from eventindex.resolve.fingerprint import geo_cell, normalize_title
 
 AUTO_MERGE = 0.80
-GREY_ZONE = 0.55
+GREY_ZONE = 0.50  # H2.3: keep the grey zone wide - adjudication is cheap,
+                  # a silent near-miss duplicate is not (red-team: 0.542)
 
 MERGE = "merge"
 ADJUDICATE = "adjudicate"
@@ -37,10 +38,21 @@ def _trigrams(s: str) -> set[str]:
 
 
 def title_similarity(a: str, b: str) -> float:
-    ta, tb = _trigrams(normalize_title(a)), _trigrams(normalize_title(b))
+    na, nb = normalize_title(a), normalize_title(b)
+    ta, tb = _trigrams(na), _trigrams(nb)
     if not ta or not tb:
         return 0.0
-    return len(ta & tb) / len(ta | tb)
+    trigram = len(ta & tb) / len(ta | tb)
+    # series-prefix variants ("Erwin Schrott" vs "Klassik am Dom 2026 -
+    # Erwin Schrott") dilute trigram overlap; word containment restores
+    # enough signal to reach the adjudicator - deliberately capped so
+    # containment alone can never auto-merge (precision stays LLM-gated)
+    wa, wb = set(na.split()), set(nb.split())
+    shorter = min(len(wa), len(wb))
+    containment = len(wa & wb) / shorter if shorter else 0.0
+    # 0.72: even perfect containment + perfect venue/time stays < 0.80
+    cap = 0.60 if shorter == 1 else 0.72
+    return max(trigram, containment * cap)
 
 
 def _time_overlap(a: Candidate, b: Candidate) -> float:

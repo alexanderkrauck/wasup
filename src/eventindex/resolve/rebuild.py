@@ -122,6 +122,11 @@ def _load_claims(tx) -> list[Claim]:
         ORDER BY c.source_id, c.fingerprint, c.extracted_at DESC
         """
     ).fetchall()
+    from eventindex.extract import is_placeholder_title
+
+    source_names = {
+        r["id"]: r["name"] for r in tx.execute("SELECT id, name FROM source")
+    }
     claims = []
     for r in rows:
         c = Claim(**r)
@@ -131,6 +136,13 @@ def _load_claims(tx) -> list[Claim]:
         c.lat = c.value("lat")
         c.lon = c.value("lon")
         if not c.title or c.starts_at is None:
+            continue
+        # claims are immutable, so legacy placeholder rows ("Sandburg
+        # Events") must also be skipped at rebuild time - checked against
+        # both the source name AND the claim's own venue (aggregator feeds
+        # carry venue programs as placeholder items too)
+        against = f'{source_names.get(c.source_id, "")} {c.value("venue_name") or ""}'
+        if is_placeholder_title(c.title, against):
             continue
         claims.append(c)
     return claims
@@ -226,9 +238,11 @@ def _group_claims(tx, claims: list[Claim]) -> list[dict]:
     for c in remaining:
         day = c.starts_at.astimezone(VIENNA).date()
         blocks[("v", day, _venue_key(c))][c.fingerprint].append(c)
-        prefix = " ".join(normalize_title(c.title).split()[:2])
-        if prefix:
-            blocks[("t", day, prefix)][c.fingerprint].append(c)
+        # word-level: "Klassik am Dom 2026 - Erwin Schrott" must block with
+        # "Erwin Schrott" - any shared informative word on the same day
+        for word in set(normalize_title(c.title).split()):
+            if len(word) > 3:
+                blocks[("t", day, word)][c.fingerprint].append(c)
         by_fp[c.fingerprint].append(c)
 
     parent = {fp: fp for fp in by_fp}
@@ -239,8 +253,11 @@ def _group_claims(tx, claims: list[Claim]) -> list[dict]:
             x = parent[x]
         return x
 
+    MAX_BLOCK = 20  # common-word blocks ("sommer") explode quadratically
     compared: set = set()
     for block in blocks.values():
+        if len(block) > MAX_BLOCK:
+            continue
         fps = sorted(block.keys())
         for i in range(len(fps)):
             for j in range(i + 1, len(fps)):
@@ -319,7 +336,8 @@ def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
 
     def fmt(c: Claim) -> str:
         local = c.starts_at.astimezone(VIENNA)
-        return (f"'{c.title}' am {local:%Y-%m-%d %H:%M}, "
+        time = "Uhrzeit unbekannt" if not c.has_time else f"{local:%H:%M}"
+        return (f"'{c.title}' am {local:%Y-%m-%d} ({time}), "
                 f"Ort: {c.value('venue_name') or 'unbekannt'}, "
                 f"Veranstalter: {c.value('organizer') or 'unbekannt'}")
 
@@ -328,8 +346,13 @@ def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
             tx,
             "Two event listings from different websites (Linz, Austria):\n"
             f"A: {fmt(a)}\nB: {fmt(b)}\n"
-            "Do A and B describe the SAME real-world event (not merely "
-            "similar events or two shows of a run on different days)?",
+            "Do A and B describe the SAME real-world happening? Guidance: "
+            "series/festival naming vs. act naming is the SAME event "
+            "('Klassik am Dom: X' = 'X' on that date); a festival's headline "
+            "act on the same evening is the festival concert itself; unknown "
+            "venue or time is missing data, not evidence of difference. "
+            "DIFFERENT means: genuinely separate happenings (two films, two "
+            "shows at different times, different acts).",
             SameEvent,
         ).same_event
     except Exception:

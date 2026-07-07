@@ -242,6 +242,13 @@ def probe(job: dict, tx) -> list[dict]:
         tx, job["payload"]["url"], job["payload"].get("discovered_via", "unknown"),
         job_id=job["id"],
     )
+    if result["outcome"] == "error":
+        # network/DNS/timeouts are retryable, NOT terminal - a transient
+        # outage silently wiped a whole discovery batch (red-team 2,
+        # 2026-07-07: 18/19 probes lost, logged as 'ok')
+        raise RuntimeError(
+            f"probe fetch failed for {job['payload']['url']}: {result.get('detail')}"
+        )
     tx.execute(
         "INSERT INTO crawl_log (job_id, finished_at, status, detail) "
         "VALUES (%s, now(), 'ok', %s)",

@@ -70,6 +70,19 @@ def run_job(conn, job: dict) -> None:
         log.info("job %s (%s) done, enqueued %d", job["id"], job["kind"], len(new_jobs))
     except Exception:
         error = traceback.format_exc(limit=20)
+        if "Insufficient credits" in error or "Error code: 402" in error:
+            # credit outage is a system condition, not a job failure: pause
+            # the job an hour without burning an attempt (learned 2026-07-07:
+            # an empty OpenRouter balance mass-failed 5k jobs overnight)
+            with conn.transaction():
+                conn.execute(
+                    "UPDATE jobs SET status = 'pending', attempts = attempts - 1, "
+                    "run_after = now() + interval '1 hour', last_error = 'credits empty' "
+                    "WHERE id = %s",
+                    (job["id"],),
+                )
+            log.warning("credits empty - job %s paused 1h, worker exiting", job["id"])
+            raise SystemExit(0)
         with conn.transaction():
             if job["attempts"] >= config.JOB_MAX_ATTEMPTS:
                 conn.execute(

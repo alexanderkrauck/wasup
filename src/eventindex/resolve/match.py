@@ -11,6 +11,7 @@ from eventindex.resolve.fingerprint import geo_cell, normalize_title
 AUTO_MERGE = 0.80
 GREY_ZONE = 0.50  # H2.3: keep the grey zone wide - adjudication is cheap,
                   # a silent near-miss duplicate is not (red-team: 0.542)
+MID_ESCALATION = 0.65  # mini says "different" above this -> one mid-model re-ask
 
 MERGE = "merge"
 ADJUDICATE = "adjudicate"

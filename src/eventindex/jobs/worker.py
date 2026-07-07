@@ -70,6 +70,21 @@ def run_job(conn, job: dict) -> None:
         log.info("job %s (%s) done, enqueued %d", job["id"], job["kind"], len(new_jobs))
     except Exception:
         error = traceback.format_exc(limit=20)
+        if "BudgetExceeded: global daily cap" in error:
+            # the daily envelope is spent - system condition, not job failure:
+            # park the job until the Vienna midnight reset, no attempt burned
+            with conn.transaction():
+                conn.execute(
+                    "UPDATE jobs SET status = 'pending', attempts = attempts - 1, "
+                    "run_after = (date_trunc('day', now() AT TIME ZONE %s) "
+                    "  + interval '1 day 5 minutes') AT TIME ZONE %s, "
+                    "last_error = 'daily budget cap - waiting for reset' "
+                    "WHERE id = %s",
+                    (config.TIMEZONE, config.TIMEZONE, job["id"]),
+                )
+            log.warning("daily cap reached - job %s parked until midnight, worker exiting",
+                        job["id"])
+            raise SystemExit(0)
         if "Insufficient credits" in error or "Error code: 402" in error:
             # credit outage is a system condition, not a job failure: pause
             # the job an hour without burning an attempt (learned 2026-07-07:

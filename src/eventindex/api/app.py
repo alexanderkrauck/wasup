@@ -1,22 +1,23 @@
-"""REST API (§9), phase 1 slice: /v1/occurrences + /v1/events/{id}.
+"""REST API (§9): occurrences, agent search, events, .ics feed, reports,
+changes. One middleware-style dependency for API keys, no auth framework.
 
-Hard contracts already in force: null means unknown (a category filter never
-matches events with unknown category, by SQL semantics of && on arrays);
-data_freshness in every response. Staleness decay, auth, and semantic search
-come in later phases.
+Hard contracts in force: null means unknown (a category filter never matches
+events with unknown category, by SQL semantics of && on arrays);
+data_freshness in every response; projected occurrences are labeled.
+Bootstrap rule: while the api_key table has no active row, the API is open.
 
 Run: uv run uvicorn eventindex.api.app:app
 """
 
 import re
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from pydantic import BaseModel
 
 from eventindex import db
-
-app = FastAPI(title="eventindex", version="v1")
 
 MAX_LIMIT = 200
 
@@ -38,6 +39,21 @@ _EFFECTIVE_CONFIDENCE_SQL = """
 """
 
 
+def _require_api_key(request: Request) -> None:
+    with db.connect() as conn:
+        if conn.execute("SELECT 1 FROM api_key WHERE active LIMIT 1").fetchone() is None:
+            return  # bootstrap: no keys registered yet -> open
+        key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+        if not key or conn.execute(
+            "SELECT 1 FROM api_key WHERE key = %s AND active", (key,)
+        ).fetchone() is None:
+            raise HTTPException(401, "missing or invalid API key")
+
+
+app = FastAPI(title="eventindex", version="v1",
+              dependencies=[Depends(_require_api_key)])
+
+
 def _data_freshness(conn) -> datetime | None:
     return conn.execute(
         "SELECT max(started_at) AS ts FROM crawl_log "
@@ -54,26 +70,18 @@ def _parse_radius(radius: str) -> float:
 
 def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
     try:
-        ts, occ_id = cursor.split("|", 1)
-        return datetime.fromisoformat(ts), UUID(occ_id)
+        ts, row_id = cursor.split("|", 1)
+        return datetime.fromisoformat(ts), UUID(row_id)
     except ValueError:
         raise HTTPException(422, "invalid cursor")
 
 
-@app.get("/v1/occurrences")
-def occurrences(
-    from_: datetime | None = Query(None, alias="from"),
-    to: datetime | None = None,
-    near: str | None = Query(None, description="lat,lon"),
-    radius: str = "5km",
-    bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
-    category: str | None = Query(None, description="comma-separated"),
-    min_confidence: float | None = None,
-    limit: int = Query(50, le=MAX_LIMIT, ge=1),
-    cursor: str | None = None,
-):
+def _occurrence_filters(
+    from_, to, near, radius, bbox, category, min_confidence
+) -> tuple[list[str], dict]:
+    """The shared filter set of /v1/occurrences and /v1/feed.ics."""
     conditions = ["o.starts_at >= %(from)s", "o.status != 'cancelled'"]
-    params: dict = {"from": from_ or datetime.now(timezone.utc), "limit": limit}
+    params: dict = {"from": from_ or datetime.now(timezone.utc)}
 
     if to is not None:
         conditions.append("o.starts_at <= %(to)s")
@@ -102,13 +110,32 @@ def occurrences(
     if min_confidence is not None:
         conditions.append(f"({_EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
         params["min_conf"] = min_confidence
+    return conditions, params
+
+
+@app.get("/v1/occurrences")
+def occurrences(
+    from_: datetime | None = Query(None, alias="from"),
+    to: datetime | None = None,
+    near: str | None = Query(None, description="lat,lon"),
+    radius: str = "5km",
+    bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
+    category: str | None = Query(None, description="comma-separated"),
+    min_confidence: float | None = None,
+    limit: int = Query(50, le=MAX_LIMIT, ge=1),
+    cursor: str | None = None,
+):
+    conditions, params = _occurrence_filters(
+        from_, to, near, radius, bbox, category, min_confidence
+    )
+    params["limit"] = limit
     if cursor is not None:
         after_ts, after_id = _parse_cursor(cursor)
         conditions.append("(o.starts_at, o.id) > (%(after_ts)s, %(after_id)s)")
         params.update(after_ts=after_ts, after_id=after_id)
 
     sql = f"""
-        SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
+        SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status, o.projected,
                o.availability, o.last_confirmed_at,
                e.title, e.category, e.price_min, e.price_max, e.url,
                ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
@@ -135,6 +162,54 @@ def occurrences(
     }
 
 
+@app.get("/v1/feed.ics")
+def feed_ics(
+    from_: datetime | None = Query(None, alias="from"),
+    to: datetime | None = None,
+    near: str | None = Query(None, description="lat,lon"),
+    radius: str = "5km",
+    bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
+    category: str | None = Query(None, description="comma-separated"),
+    min_confidence: float | None = None,
+    limit: int = Query(500, le=1000, ge=1),
+):
+    """Any filter combo as a calendar subscription (§9)."""
+    from icalendar import Calendar, Event as ICalEvent
+
+    conditions, params = _occurrence_filters(
+        from_, to, near, radius, bbox, category, min_confidence
+    )
+    params["limit"] = limit
+    sql = f"""
+        SELECT o.id, o.starts_at, o.ends_at, o.projected,
+               e.title, e.url, v.name AS venue_name
+        FROM occurrence o JOIN event e ON e.id = o.event_id
+        LEFT JOIN venue v ON v.id = e.venue_id
+        WHERE {" AND ".join(conditions)}
+        ORDER BY o.starts_at, o.id
+        LIMIT %(limit)s
+    """
+    with db.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    cal = Calendar()
+    cal.add("prodid", "-//eventindex//linz//")
+    cal.add("version", "2.0")
+    for r in rows:
+        ev = ICalEvent()
+        ev.add("uid", f"{r['id']}@eventindex")
+        ev.add("summary", r["title"] + (" (unbestätigt)" if r["projected"] else ""))
+        ev.add("dtstart", r["starts_at"])
+        if r["ends_at"]:
+            ev.add("dtend", r["ends_at"])
+        if r["venue_name"]:
+            ev.add("location", r["venue_name"])
+        if r["url"]:
+            ev.add("url", r["url"])
+        cal.add_component(ev)
+    return Response(content=cal.to_ical(), media_type="text/calendar")
+
+
 @app.get("/v1/search")
 def search(q: str, limit: int = Query(20, le=100, ge=1)):
     """Agent search: LLM-parsed hard filters + vibe ranking (never the
@@ -149,6 +224,7 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
         rows = conn.execute(
             f"""
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
+                   o.projected,
                    e.title, e.category, e.price_min, e.price_max, e.url,
                    e.inferred->'vibe_tags' AS vibe_tags,
                    e.expected_age_range AS age_range,
@@ -186,7 +262,7 @@ def event(event_id: UUID):
             raise HTTPException(404, "event not found")
         del row["geo"], row["vibe_embedding"]
         occurrences = conn.execute(
-            "SELECT id, starts_at, ends_at, status, availability, "
+            "SELECT id, starts_at, ends_at, status, projected, availability, "
             "last_confirmed_at FROM occurrence WHERE event_id = %s "
             "ORDER BY starts_at",
             (event_id,),
@@ -209,3 +285,56 @@ def event(event_id: UUID):
         "occurrences": occurrences,
         "claims": claims,
     }
+
+
+class Report(BaseModel):
+    occurrence_id: UUID
+    reason: Literal["wrong", "cancelled", "duplicate"]
+    note: str | None = None
+
+
+@app.post("/v1/reports", status_code=202)
+def report(body: Report):
+    """User feedback -> QA queue -> source trust (§9)."""
+    from eventindex.jobs.worker import enqueue
+
+    with db.connect() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM occurrence WHERE id = %s", (body.occurrence_id,)
+        ).fetchone()
+        if exists is None:
+            raise HTTPException(404, "occurrence not found")
+        conn.execute(
+            "INSERT INTO report (occurrence_id, reason, note) VALUES (%s, %s, %s)",
+            (body.occurrence_id, body.reason, body.note),
+        )
+        enqueue(conn, "qa_check", {"occurrence_id": str(body.occurrence_id)})
+        conn.commit()
+    return {"status": "queued for verification"}
+
+
+@app.get("/v1/changes")
+def changes(since: str | None = None, limit: int = Query(100, le=500, ge=1)):
+    """Delta stream for downstream consumers/agents (§9): keyset cursor over
+    event.updated_at."""
+    conditions, params = ["true"], {"limit": limit}
+    if since is not None:
+        after_ts, after_id = _parse_cursor(since)
+        conditions = ["(e.updated_at, e.id) > (%(after_ts)s, %(after_id)s)"]
+        params.update(after_ts=after_ts, after_id=after_id)
+    with db.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.id, e.title, e.status, e.category, e.url, e.confidence,
+                   e.updated_at
+            FROM event e WHERE {" AND ".join(conditions)}
+            ORDER BY e.updated_at, e.id LIMIT %(limit)s
+            """,
+            params,
+        ).fetchall()
+        freshness = _data_freshness(conn)
+    next_cursor = None
+    if len(rows) == limit:
+        last = rows[-1]
+        next_cursor = f"{last['updated_at'].isoformat()}|{last['id']}"
+    return {"data_freshness": freshness, "events": rows, "next_cursor": next_cursor}

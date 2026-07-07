@@ -15,17 +15,19 @@ swap + confirmation sweep.
 
 import hashlib
 import logging
+import re
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime, time as time_t
+from datetime import date, datetime, time as time_t, timedelta
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from eventindex import config, llm
+from eventindex.budget import BudgetExceeded
 from eventindex.extract import parse_dt
-from eventindex.resolve import match, recurrence
+from eventindex.resolve import match, projection, recurrence
 from eventindex.resolve.fingerprint import VIENNA, geo_cell, normalize_title
 from eventindex.resolve.recurrence import Recurrence, series_fingerprint
 from eventindex.resolve.venues import VenueResolver
@@ -54,6 +56,8 @@ class Claim:
     source_url: str
     source_lat: float | None
     source_lon: float | None
+    source_name: str = ""
+    source_hint: dict | None = None
     crawl_interval: object = None
     title: str = ""
     starts_at: datetime | None = None
@@ -117,6 +121,7 @@ def _load_claims(tx) -> list[Claim]:
         SELECT DISTINCT ON (c.source_id, c.fingerprint)
                c.id, c.source_id, c.fingerprint, c.extracted_at, c.payload,
                s.trust, s.url AS source_url, s.crawl_interval,
+               s.name AS source_name, s.extraction_hint AS source_hint,
                ST_Y(s.geo) AS source_lat, ST_X(s.geo) AS source_lon
         FROM event_claim c JOIN source s ON s.id = c.source_id
         ORDER BY c.source_id, c.fingerprint, c.extracted_at DESC
@@ -124,9 +129,6 @@ def _load_claims(tx) -> list[Claim]:
     ).fetchall()
     from eventindex.extract import is_placeholder_title
 
-    source_names = {
-        r["id"]: r["name"] for r in tx.execute("SELECT id, name FROM source")
-    }
     claims = []
     for r in rows:
         c = Claim(**r)
@@ -141,7 +143,7 @@ def _load_claims(tx) -> list[Claim]:
         # Events") must also be skipped at rebuild time - checked against
         # both the source name AND the claim's own venue (aggregator feeds
         # carry venue programs as placeholder items too)
-        against = f'{source_names.get(c.source_id, "")} {c.value("venue_name") or ""}'
+        against = f'{c.source_name} {c.value("venue_name") or ""}'
         if is_placeholder_title(c.title, against):
             continue
         claims.append(c)
@@ -179,8 +181,7 @@ _REC_DEFAULTS = {
 }
 
 
-def _recurrence_of(c: Claim) -> Recurrence | None:
-    raw = c.value("recurrence")
+def _recurrence_of_raw(raw) -> Recurrence | None:
     if not raw:
         return None
     try:
@@ -190,9 +191,69 @@ def _recurrence_of(c: Claim) -> Recurrence | None:
         return None
 
 
+def _recurrence_of(c: Claim) -> Recurrence | None:
+    return _recurrence_of_raw(c.value("recurrence"))
+
+
+# German recurrence wording in free-text descriptions (aggregators often bury
+# "jeden Mittwoch 3.6.-26.8." in prose the extractor stored as a one-off).
+_TEXT_REC_RE = re.compile(
+    r"\b(jede[nrm]?\s|wöchentlich|monatlich|täglich|vierzehntägig|14-?tägig"
+    r"|alle\s+(zwei|drei|vier|zwölf|14)\s"
+    r"|(montags|dienstags|mittwochs|donnerstags|freitags|samstags|sonntags))",
+    re.IGNORECASE,
+)
+
+
+def _cache_text_recurrence(content_key: str, rec: Recurrence | None) -> None:
+    """Own connection, like adjudication verdicts: the call cost money."""
+    from eventindex import db
+
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO text_recurrence (content_key, recurrence) "
+            "VALUES (%s, %s) ON CONFLICT (content_key) DO NOTHING",
+            (content_key, Jsonb(rec.model_dump()) if rec else None),
+        )
+        conn.commit()
+
+
+def _text_recurrence(tx, c: Claim) -> Recurrence | None:
+    """Regex-gated free-text recurrence: only descriptions that literally use
+    recurrence wording trigger an LLM call; verdicts are content-cached so
+    rebuilds stay free."""
+    desc = c.value("description")
+    if not desc or not _TEXT_REC_RE.search(desc):
+        return None
+    content_key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    cached = tx.execute(
+        "SELECT recurrence FROM text_recurrence WHERE content_key = %s",
+        (content_key,),
+    ).fetchone()
+    if cached is not None:
+        return _recurrence_of_raw(cached["recurrence"])
+    try:
+        rec = llm.complete(
+            tx,
+            "This event description (German, Linz) may state a recurrence "
+            "rule. Fill the schema from the TEXT ONLY - no guessing. If the "
+            "text does not clearly state a repeating schedule, set freq to "
+            f"'once'. The event's known date: {c.starts_at:%Y-%m-%d %H:%M}.\n\n"
+            f"TEXT: {desc[:1500]}",
+            Recurrence,
+            source_id=c.source_id,
+        )
+    except Exception:
+        return None  # not cached: transient failures may retry next rebuild
+    if rec.freq in ("once", "irregular"):
+        rec = None
+    _cache_text_recurrence(content_key, rec)
+    return rec
+
+
 # ---------------------------------------------------------------- grouping
 
-def _group_claims(tx, claims: list[Claim]) -> list[dict]:
+def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]:
     """Returns groups: {"key": identity key, "claims": [...], "series": ...}."""
     groups: dict[str, dict] = {}
     oneoffs: list[Claim] = []
@@ -201,6 +262,8 @@ def _group_claims(tx, claims: list[Claim]) -> list[dict]:
     for c in claims:
         rec = _recurrence_of(c)
         rrule_raw = c.value("rrule_raw")
+        if rec is None and rrule_raw is None:
+            rec = _text_recurrence(tx, c)
         if rec is None and rrule_raw is None:
             oneoffs.append(c)
             continue
@@ -271,6 +334,8 @@ def _group_claims(tx, claims: list[Claim]) -> list[dict]:
                 if verdict == match.ADJUDICATE:
                     same = _adjudicate(tx, a, b, score)
                     verdict = match.MERGE if same else match.DISTINCT
+                    if same:
+                        _reconcile_venues(tx, a, b, venue_notes)
                 if verdict == match.MERGE:
                     parent[find(fps[i])] = find(fps[j])
 
@@ -325,6 +390,36 @@ def _merge_shared_fingerprints(groups: list[dict]) -> list[dict]:
     return out
 
 
+VENUE_ALIAS_MAX_M = 300
+
+
+def _reconcile_venues(tx, a: Claim, b: Claim, notes: list[str]) -> None:
+    """An adjudicated merge across two DIFFERENT resolved venues means the
+    venue table has a duplicate spelling: alias it when the geos agree
+    (<300m), otherwise leave it for the human review dump."""
+    if not a.venue_id or not b.venue_id or a.venue_id == b.venue_id:
+        return
+    keep, drop = (a, b) if a.trust >= b.trust else (b, a)
+    alias = (drop.value("venue_name") or "").strip()
+    dist = tx.execute(
+        "SELECT ST_Distance(a.geo::geography, b.geo::geography) AS m "
+        "FROM venue a, venue b WHERE a.id = %s AND b.id = %s",
+        (keep.venue_id, drop.venue_id),
+    ).fetchone()
+    if alias and dist and dist["m"] is not None and dist["m"] < VENUE_ALIAS_MAX_M:
+        tx.execute(
+            "UPDATE venue SET aliases = array_append(aliases, %(n)s) "
+            "WHERE id = %(id)s AND NOT (%(n)s = ANY(aliases)) "
+            "AND lower(name) != lower(%(n)s)",
+            {"n": alias, "id": keep.venue_id},
+        )
+    else:
+        notes.append(
+            f"merged across venues (geo unknown or apart): "
+            f"'{keep.value('venue_name')}' vs '{alias}' for '{a.title}'"
+        )
+
+
 def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
     fp_a, fp_b = sorted((a.fingerprint, b.fingerprint))
     pair_key = hashlib.md5(f"{fp_a}|{fp_b}".encode()).hexdigest()
@@ -337,27 +432,44 @@ def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
     def fmt(c: Claim) -> str:
         local = c.starts_at.astimezone(VIENNA)
         time = "Uhrzeit unbekannt" if not c.has_time else f"{local:%H:%M}"
+        desc = " ".join((c.value("description") or "").split())[:200]
+        price = c.value("price_min")
         return (f"'{c.title}' am {local:%Y-%m-%d} ({time}), "
                 f"Ort: {c.value('venue_name') or 'unbekannt'}, "
-                f"Veranstalter: {c.value('organizer') or 'unbekannt'}")
+                f"Veranstalter: {c.value('organizer') or 'unbekannt'}, "
+                f"Quelle: {c.source_name}, "
+                f"URL: {c.value('url') or '-'}, "
+                f"Preis: {price if price is not None else '?'}, "
+                f"Beschreibung: {desc or '-'}")
 
+    prompt = (
+        "Two event listings from different websites (Linz, Austria):\n"
+        f"A: {fmt(a)}\nB: {fmt(b)}\n"
+        "Do A and B describe the SAME real-world happening? Guidance: "
+        "series/festival naming vs. act naming is the SAME event "
+        "('Klassik am Dom: X' = 'X' on that date); a festival's headline "
+        "act on the same evening is the festival concert itself; unknown "
+        "venue or time is missing data, not evidence of difference. "
+        "DIFFERENT means: genuinely separate happenings (two films, two "
+        "shows at different times, different acts)."
+    )
+    decided_by = "llm"
     try:
-        verdict = llm.complete(
-            tx,
-            "Two event listings from different websites (Linz, Austria):\n"
-            f"A: {fmt(a)}\nB: {fmt(b)}\n"
-            "Do A and B describe the SAME real-world happening? Guidance: "
-            "series/festival naming vs. act naming is the SAME event "
-            "('Klassik am Dom: X' = 'X' on that date); a festival's headline "
-            "act on the same evening is the festival concert itself; unknown "
-            "venue or time is missing data, not evidence of difference. "
-            "DIFFERENT means: genuinely separate happenings (two films, two "
-            "shows at different times, different acts).",
-            SameEvent,
-        ).same_event
+        verdict = llm.complete(tx, prompt, SameEvent).same_event
+        if not verdict and score >= match.MID_ESCALATION:
+            # a high-score pair the mini model keeps apart is exactly where
+            # marquee duplicates hide - one mid-model second opinion, cached
+            verdict = llm.complete(
+                tx, prompt, SameEvent, model=config.MODEL_MID
+            ).same_event
+            decided_by = "llm_mid"
+    except BudgetExceeded:
+        raise  # no verdicts without money - park the rebuild, don't guess
     except Exception:
-        verdict = False  # unadjudicable -> keep distinct (precision first)
-    _cache_verdict(pair_key, fp_a, fp_b, a.title, b.title, score, verdict, "llm")
+        # unadjudicable -> keep distinct (precision first), but do NOT cache
+        # a failure as a verdict: the next rebuild gets to retry
+        return False
+    _cache_verdict(pair_key, fp_a, fp_b, a.title, b.title, score, verdict, decided_by)
     return verdict
 
 
@@ -485,8 +597,43 @@ def _verified(tx, key: str, rec: Recurrence, occs: list[datetime]) -> bool:
 
 # ---------------------------------------------------------------- canon
 
-def _occurrences_for(tx, g: dict, holidays, now: datetime) -> tuple[list, bool, str | None]:
-    """Returns ([(starts, ends)], tentative, rrule_text)."""
+def _coverage_edge(claims: list[Claim], last_observed: date) -> date:
+    """How far the claims' sources demonstrably see into the future: a date
+    inside this edge that the feeds did NOT show is evidence of absence, so
+    projection may only start beyond it."""
+    edge = last_observed
+    for c in claims:
+        horizon = (c.source_hint or {}).get("horizon_days")
+        if horizon is not None:
+            reach = c.extracted_at.astimezone(VIENNA).date() + timedelta(
+                days=float(horizon)
+            )
+            edge = max(edge, reach)
+    return edge
+
+
+def _project_series(g: dict, pairs: list) -> list:
+    """Completeness contract: continue a regular implicit series past its
+    sources' feed horizon (flagged, capped at PROJECTION_WEEKS)."""
+    days = sorted({p[0].astimezone(VIENNA).date() for p in pairs})
+    cadence = projection.detect_cadence(days)
+    if cadence is None:
+        return []
+    edge = _coverage_edge(g["claims"], days[-1])
+    at = Counter(p[0].astimezone(VIENNA).timetz() for p in pairs).most_common(1)[0][0]
+    durations = Counter(p[1] - p[0] for p in pairs if p[1] is not None)
+    duration = durations.most_common(1)[0][0] if durations else None
+    return [
+        (starts, starts + duration if duration else None)
+        for d in projection.project(days, cadence, edge)
+        for starts in [datetime.combine(d, at)]
+    ]
+
+
+def _occurrences_for(
+    tx, g: dict, holidays, now: datetime
+) -> tuple[list, bool, str | None, set]:
+    """Returns ([(starts, ends)], tentative, rrule_text, projected starts)."""
     rec = g["recurrence"]
     if rec is not None:
         anchor = min(c.starts_at for c in g["claims"])
@@ -495,7 +642,7 @@ def _occurrences_for(tx, g: dict, holidays, now: datetime) -> tuple[list, bool, 
             rec, pairs[0][0] if pairs else now
         )
         tentative = not _verified(tx, g["key"], rec, [p[0] for p in pairs])
-        return pairs, tentative, str(rule) if rule else None
+        return pairs, tentative, str(rule) if rule else None, set()
     if g["rrule_raw"]:
         from dateutil.rrule import rrulestr
 
@@ -511,7 +658,7 @@ def _occurrences_for(tx, g: dict, holidays, now: datetime) -> tuple[list, bool, 
                 (o, o + duration if duration else None)
                 for o in rule.between(now - recurrence.timedelta(hours=12), horizon, inc=True)
             ]
-            return pairs, False, g["rrule_raw"]
+            return pairs, False, g["rrule_raw"], set()
         except (ValueError, TypeError):
             pass
     # explicit dates: union over claims
@@ -520,12 +667,18 @@ def _occurrences_for(tx, g: dict, holidays, now: datetime) -> tuple[list, bool, 
         if c.starts_at not in seen:
             seen.add(c.starts_at)
             pairs.append((c.starts_at, c.ends_at))
-    return pairs, False, None
+    projected: set = set()
+    if g["key"].startswith("series|"):
+        extra = _project_series(g, pairs)
+        projected = {p[0] for p in extra}
+        pairs.extend(extra)
+    return pairs, False, None, projected
 
 
 def rebuild(conn, now: datetime | None = None) -> dict:
     now = now or datetime.now(VIENNA)
-    stats = {"claims": 0, "events": 0, "occurrences": 0, "venues_created": 0}
+    stats = {"claims": 0, "events": 0, "occurrences": 0, "venues_created": 0,
+             "projected": 0}
     with conn.transaction():
         previous_status = {
             r["id"]: r["status"]
@@ -536,15 +689,19 @@ def rebuild(conn, now: datetime | None = None) -> dict:
         stats["claims"] = len(claims)
         resolver = _resolve_venues(conn, claims)
         stats["venues_created"] = len(resolver.created)
-        groups = _group_claims(conn, claims)
+        venue_notes: list[str] = []
+        groups = _group_claims(conn, claims, venue_notes)
         _assign_identity(conn, groups)
 
         conn.execute("DELETE FROM occurrence")
         conn.execute("DELETE FROM event")
 
         newly_negative: list[uuid.UUID] = []
+        suppressed: list[str] = []
         for g in groups:
-            pairs, tentative, rrule_text = _occurrences_for(conn, g, holidays, now)
+            pairs, tentative, rrule_text, projected = _occurrences_for(
+                conn, g, holidays, now
+            )
             if not pairs and g["recurrence"] is None and g["rrule_raw"] is None:
                 continue
             values, provenance = _merge_fields(g)
@@ -553,6 +710,17 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             is_series = bool(g["key"].startswith("series|"))
             rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
             event_status = "tentative" if tentative else "confirmed"
+            lat, lon = rep.lat, rep.lon
+            if rep.venue_id is None and _is_private_intent(
+                values.get("address"), values.get("organizer")
+            ):
+                # §9b: technically-public != intended-public - publish the
+                # event but not the (likely residential) location
+                lat = lon = None
+                suppressed.append(
+                    f"{values.get('title', '')} | {values.get('address')} | "
+                    f"{values.get('organizer')}"
+                )
 
             conn.execute(
                 """
@@ -579,7 +747,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     "description": values.get("description"),
                     "category": [values["category"]] if values.get("category") else [],
                     "venue_id": rep.venue_id,
-                    "lat": rep.lat, "lon": rep.lon,
+                    "lat": lat, "lon": lon,
                     "is_recurring": is_series,
                     "rrule": rrule_text,
                     "price_min": values.get("price_min"),
@@ -604,18 +772,22 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                 occ_id = uuid.uuid5(OCC_NS, f"{g['event_id']}|{starts.isoformat()}")
                 conn.execute(
                     "INSERT INTO occurrence (id, event_id, starts_at, ends_at, "
-                    "status, last_confirmed_at) VALUES (%s, %s, %s, %s, %s, %s) "
+                    "status, last_confirmed_at, projected) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (id) DO NOTHING",
-                    (occ_id, g["event_id"], starts, ends, occ_status, last_seen),
+                    (occ_id, g["event_id"], starts, ends, occ_status, last_seen,
+                     starts in projected),
                 )
                 stats["occurrences"] += 1
+                stats["projected"] += starts in projected
                 if occ_status in NEGATIVE_STATUSES and \
                         previous_status.get(occ_id) not in NEGATIVE_STATUSES:
                     newly_negative.append(g["event_id"])
             stats["events"] += 1
 
         _confirmation_sweep(conn, newly_negative)
-        _dump_venue_review(resolver.created, now)
+        _dump_venue_review(resolver.created, now, venue_notes)
+        _dump_review("suppressed", suppressed, now)
         stats["enrich_pending"] = _apply_enrichment(conn)
     return stats
 
@@ -664,12 +836,42 @@ def _confirmation_sweep(tx, event_ids: list[uuid.UUID]) -> None:
         enqueue(tx, "crawl", {"source_id": str(r["source_id"])})
 
 
-def _dump_venue_review(created: list[str], now: datetime) -> None:
-    if not created:
+# §9b private-intent suppression: residential-looking address + personal-name
+# organizer + no resolved venue -> geo withheld. Deliberately conservative:
+# both signals must fire, and only the location is suppressed, never the event.
+_STREET_RE = re.compile(
+    r"\b\w+(straße|strasse|gasse|weg|platz|ring|allee)\s+\d+", re.IGNORECASE
+)
+_ORG_WORDS = {
+    "verein", "e.v.", "ev", "gmbh", "og", "kg", "club", "pfarre", "kirche",
+    "universität", "uni", "institut", "verband", "chor", "schule", "zentrum",
+    "haus", "bar", "café", "cafe", "theater", "museum", "galerie", "stadt",
+    "linz", "team", "gruppe", "band", "orchester", "kulturverein",
+}
+
+
+def _is_private_intent(address: str | None, organizer: str | None) -> bool:
+    if not address or not organizer or not _STREET_RE.search(address):
+        return False
+    words = organizer.split()
+    if not 2 <= len(words) <= 3:
+        return False
+    if any(w.lower().strip(".,()") in _ORG_WORDS for w in words):
+        return False
+    return all(w[:1].isupper() for w in words)  # looks like a personal name
+
+
+def _dump_review(prefix: str, lines: list[str], now: datetime) -> None:
+    if not lines:
         return
     review_dir = config.VAR_DIR / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
-    path = review_dir / f"venues-{now:%Y-%m-%d}.md"
-    lines = [f"- [ ] {name}" for name in sorted(set(created))]
+    path = review_dir / f"{prefix}-{now:%Y-%m-%d}.md"
+    items = [f"- [ ] {line}" for line in sorted(set(lines))]
     with path.open("a") as f:
-        f.write(f"\n## rebuild {now:%H:%M}\n" + "\n".join(lines) + "\n")
+        f.write(f"\n## rebuild {now:%H:%M}\n" + "\n".join(items) + "\n")
+
+
+def _dump_venue_review(created: list[str], now: datetime,
+                       notes: list[str] | None = None) -> None:
+    _dump_review("venues", created + (notes or []), now)

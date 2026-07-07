@@ -22,7 +22,7 @@ def no_llm(monkeypatch):
     ))
     monkeypatch.setattr(recurrence, "verify", lambda *a, **k: True)
     # file writes escape the test transaction
-    monkeypatch.setattr(rb, "_dump_venue_review", lambda *a, **k: None)
+    monkeypatch.setattr(rb, "_dump_review", lambda *a, **k: None)
 
 
 def _source(conn, name, trust, lat=48.31, lon=14.29):
@@ -146,6 +146,172 @@ def test_explicit_multidate_becomes_one_series(conn):
     assert len(events) == 1
     assert events[0]["kind"] == "series"
     assert len(occs) == 3
+
+
+def test_weekly_implicit_series_projects_beyond_feed_horizon(conn):
+    """Completeness contract: a 7-day-capped feed showing a weekly series
+    gets projected forward - but only past what the feed could have shown."""
+    sid = _source(conn, "capped-feed", 0.9)
+    conn.execute(
+        "UPDATE source SET extraction_hint = '{\"horizon_days\": 7}' WHERE id = %s",
+        (sid,),
+    )
+    for day in ("06-10", "06-17", "06-24", "07-01"):  # Wednesdays
+        _claim(conn, sid, _concert("Zumba im Park",
+                                   starts=f"2026-{day}T18:00:00+02:00",
+                                   venue="Donaupark"),
+               f"zumba|2026-{day}|x")
+    rb.rebuild(conn, now=NOW)  # NOW = Jul 5; coverage edge = Jul 5 + 7d = Jul 12
+
+    events, _ = _canon(conn)
+    assert len(events) == 1 and events[0]["kind"] == "series"
+    rows = conn.execute(
+        "SELECT starts_at, projected FROM occurrence ORDER BY starts_at"
+    ).fetchall()
+    projected = [
+        r["starts_at"].astimezone(timezone.utc).date().isoformat()
+        for r in rows if r["projected"]
+    ]
+    # Jul 8 is inside the demonstrated feed reach -> absence is evidence;
+    # Jul 15/22/29 are beyond it -> projected (cap: last observed + 4 weeks)
+    assert projected == ["2026-07-15", "2026-07-22", "2026-07-29"]
+    assert len(rows) == 7  # 4 observed + 3 projected
+
+    # a deeper crawl proves the feed reaches past the projections without
+    # showing the event again -> the projections die at the next rebuild
+    conn.execute(
+        "UPDATE source SET extraction_hint = '{\"horizon_days\": 60}' WHERE id = %s",
+        (sid,),
+    )
+    rb.rebuild(conn, now=NOW)
+    left = conn.execute(
+        "SELECT count(*) AS n FROM occurrence WHERE projected"
+    ).fetchone()
+    assert left["n"] == 0
+
+
+def test_irregular_dates_are_never_projected(conn):
+    sid = _source(conn, "portal", 0.9)
+    for day in ("06-10", "06-14", "06-29"):
+        _claim(conn, sid, _concert("Lesung", starts=f"2026-{day}T19:00:00+02:00",
+                                   venue="Stifterhaus"),
+               f"lesung|2026-{day}|x")
+    rb.rebuild(conn, now=NOW)
+    n = conn.execute("SELECT count(*) AS n FROM occurrence WHERE projected").fetchone()
+    assert n["n"] == 0
+
+
+def test_text_recurrence_regex_gate():
+    assert rb._TEXT_REC_RE.search("Salsa - jeden Dienstag um 19:00")
+    assert rb._TEXT_REC_RE.search("Treff montags im Vereinsheim")
+    assert rb._TEXT_REC_RE.search("wöchentlich, 3.6. bis 26.8.")
+    assert not rb._TEXT_REC_RE.search("Konzert am 20. Juli im Posthof")
+
+
+def test_cached_text_recurrence_makes_a_series_without_llm(conn):
+    import hashlib
+
+    sid = _source(conn, "aggregator", 0.9)
+    desc = "Salsa Social - jeden Dienstag um 19:00 im Club X"
+    key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    rec = {
+        "freq": "weekly", "weekday": "TU", "week_of_month": None, "interval": 1,
+        "time": "19:00", "duration_minutes": None, "except_holidays": [],
+        "valid_from": None, "valid_until": None,
+        "as_stated": "jeden Dienstag um 19:00",
+    }
+    conn.execute(
+        "INSERT INTO text_recurrence (content_key, recurrence) VALUES (%s, %s)",
+        (key, Jsonb(rec)),
+    )
+    _claim(conn, sid, _concert("Salsa Social", starts="2026-07-07T19:00:00+02:00",
+                               venue="Club X", description=(desc, 0.9)),
+           "salsa|2026-07-07|x")
+    rb.rebuild(conn, now=NOW)  # no_llm active: only the cache may answer
+
+    events, occs = _canon(conn)
+    assert events[0]["kind"] == "series"
+    assert len(occs) > 4  # expanded over the 8-week horizon
+
+
+def test_adjudicated_merge_aliases_nearby_venue(conn, monkeypatch):
+    monkeypatch.setattr(
+        rb.llm, "complete", lambda tx, prompt, schema, **kw: schema(same_event=True)
+    )
+    a = _source(conn, "festival-site", 0.9)
+    b = _source(conn, "venue-site", 0.8)
+    salt = uuid.uuid4().hex[:6]
+    _claim(conn, a, {
+        "title": ("Ahoi Pop: Bilderbuch", 0.9),
+        "starts_at": ("2026-07-20T20:00:00+02:00", 0.9),
+        "venue_name": ("Donaupark Bühne", 0.9),
+        "lat": (48.310, 0.9), "lon": (14.290, 0.9),
+    }, f"ahoi bilderbuch|2026-07-20|a{salt}")
+    _claim(conn, b, {
+        "title": ("Bilderbuch", 0.9),
+        "starts_at": ("2026-07-20T20:00:00+02:00", 0.9),
+        "venue_name": ("Posthof Aussenbereich", 0.9),
+        "lat": (48.311, 0.9), "lon": (14.291, 0.9),
+    }, f"bilderbuch|2026-07-20|b{salt}")
+    rb.rebuild(conn, now=NOW)
+
+    events, occs = _canon(conn)
+    assert len(events) == 1  # adjudicator merged the marquee pair
+    aliased = conn.execute(
+        "SELECT name, aliases FROM venue "
+        "WHERE 'Posthof Aussenbereich' = ANY(aliases) OR "
+        "      'Donaupark Bühne' = ANY(aliases)"
+    ).fetchone()
+    assert aliased is not None  # <300m apart -> alias, not review
+
+
+def test_high_score_different_verdict_gets_mid_second_opinion(conn, monkeypatch):
+    from eventindex import config
+
+    responses = [False, True]
+    models = []
+
+    def fake_complete(tx, prompt, schema, model=None, **kw):
+        models.append(model)
+        return schema(same_event=responses.pop(0))
+
+    monkeypatch.setattr(rb.llm, "complete", fake_complete)
+    a = _source(conn, "portal-x", 0.9)
+    b = _source(conn, "portal-y", 0.9)
+    # unique fingerprints per run: adjudication verdicts persist across test
+    # runs (own-connection writes), a reused pair would hit the cache
+    salt = uuid.uuid4().hex[:6]
+    _claim(conn, a, _concert("Tom Jones", venue="Domplatz"),
+           f"tom jones|2026-07-20|a{salt}")
+    _claim(conn, b, _concert("Tom Jones", venue="Musikpavillon Urfahr"),
+           f"tom jones|2026-07-20|b{salt}")
+    rb.rebuild(conn, now=NOW)
+
+    assert models == [None, config.MODEL_MID]  # mini said no -> mid re-asked
+    events, _ = _canon(conn)
+    assert len(events) == 1
+    verdict = conn.execute(
+        "SELECT decided_by, same_event FROM adjudication "
+        "WHERE title_a = 'Tom Jones' AND decided_by = 'llm_mid'"
+    ).fetchone()
+    assert verdict and verdict["same_event"] is True
+
+
+def test_private_intent_event_publishes_without_geo(conn):
+    sid = _source(conn, "social-like", 0.7)
+    _claim(conn, sid, {
+        "title": ("Gartenfest bei Maria", 0.9),
+        "starts_at": ("2026-07-20T15:00:00+02:00", 0.9),
+        "address": ("Wildbergstraße 18, 4040 Linz", 0.8),
+        "organizer": ("Maria Huber", 0.8),
+    }, "gartenfest|2026-07-20|x")
+    rb.rebuild(conn, now=NOW)
+
+    row = conn.execute(
+        "SELECT title, geo IS NULL AS suppressed FROM event"
+    ).fetchone()
+    assert row["title"] == "Gartenfest bei Maria"  # listed, not hidden
+    assert row["suppressed"]  # but the residential location is withheld
 
 
 def test_recurrence_claim_expands_and_skips_summer_holidays(conn):

@@ -32,6 +32,7 @@ def conn(test_db_url):
         c.rollback()
         c.execute(
             "TRUNCATE jobs, crawl_log, budget_spend, event_claim, occurrence, "
-            "identity, event, source, venue CASCADE"
+            "identity, event, source, venue, report, api_key, text_recurrence "
+            "CASCADE"
         )
         c.commit()

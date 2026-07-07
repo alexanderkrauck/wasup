@@ -26,9 +26,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # at yesterday's volume; the validation nets (pydantic schemas, recipe
 # self-validation, verify-calls, gold set) are what guarantee quality, not
 # model brand (ARCHITECTURE §model-routing).
-MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx
-MODEL_MID = "moonshotai/kimi-k2.6"          # $0.66/$3.41, agentic specialist
-MODEL_FRONTIER = "z-ai/glm-5.2"
+MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx, text-only
+MODEL_MID = "moonshotai/kimi-k2.7-code"     # $0.74/$3.50, agentic+code, text+image
+MODEL_FRONTIER = "z-ai/glm-5.2"             # text-only; fine while vision path is
+# scope-fenced. When the PDF/flyer trigger fires: kimi (mid) already sees
+# images; qwen/qwen3.6-flash ($0.19/$1.13, text+image+video) is the
+# vision-mini candidate.
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 

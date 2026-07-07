@@ -22,9 +22,13 @@ GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
 # LLM (DECISIONS.md: one provider = OpenRouter; model names live here)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-MODEL_MINI = "openai/gpt-5-mini"
-MODEL_MID = "anthropic/claude-sonnet-4.5"
-MODEL_FRONTIER = "anthropic/claude-opus-4.5"
+# swapped to open-weight models 2026-07-07 (Alexander): ~4x cheaper per day
+# at yesterday's volume; the validation nets (pydantic schemas, recipe
+# self-validation, verify-calls, gold set) are what guarantee quality, not
+# model brand (ARCHITECTURE §model-routing).
+MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx
+MODEL_MID = "moonshotai/kimi-k2.6"          # $0.66/$3.41, agentic specialist
+MODEL_FRONTIER = "z-ai/glm-5.2"
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 

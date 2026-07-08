@@ -89,3 +89,16 @@ the Mac setup keeps working until step 6, so cutover risk is near zero.
 - Scrape-posture one-pager (see GO-TO-MARKET.md).
 - Rate limits on the API (deferred until now - "before a second consumer
   exists" arrives with the first public demo).
+
+## Deployed 2026-07-08 (netcup, shared box)
+
+Reality vs. the plan above: deployed to the existing netcup VPS (Debian 13,
+12 vCPU/32GB, shared with other workloads) instead of a fresh Hetzner box.
+DB runs as the repo's own Docker image on 127.0.0.1:5433 (port 5432 was
+taken by another project; password in /root/.eventindex-dbpw). App native
+under user `eventindex` at /opt/eventindex, cloned from GitHub. systemd:
+eventindex-api (127.0.0.1:8400), eventindex-worker, timers for
+schedule/digest/discover (Europe/Vienna OnCalendar). No public exposure
+until domain+Caddy: access via `ssh -L 8400:localhost:8400 netcup`.
+Deploy = `cd /opt/eventindex && git pull && systemctl restart
+eventindex-api eventindex-worker`.

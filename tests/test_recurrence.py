@@ -109,3 +109,21 @@ def test_series_fingerprint_tolerates_30min_and_matches_weekday():
     assert series_fingerprint("Spinning", "v1", d1) != series_fingerprint(
         "Spinning", "v1", d3
     )
+
+
+def test_valid_from_accepts_datetime_strings():
+    """Models hand back datetimes where the schema asks for dates; cached
+    values persist, so the parse must be lenient or rebuilds crash forever."""
+    from datetime import datetime, timezone
+
+    from eventindex.resolve.recurrence import Recurrence, expand
+
+    rec = Recurrence(
+        freq="weekly", weekday="FR", week_of_month=None, interval=1,
+        time="08:00", duration_minutes=None, except_holidays=[],
+        valid_from="2026-07-03T08:00:00", valid_until=None,
+        as_stated="jeden Freitag ab 3.7.",
+    )
+    pairs = expand(rec, {"public_holidays": [], "school_holidays": []},
+                   now=datetime(2026, 7, 8, tzinfo=timezone.utc))
+    assert pairs and pairs[0][0].weekday() == 4  # Fridays, no crash

@@ -58,6 +58,16 @@ def _in_holiday(d: date, ranges: list[tuple[date, date]]) -> bool:
     return any(a <= d <= b for a, b in ranges)
 
 
+def _parse_date(value: str) -> date:
+    """The schema asks for an ISO date, but models occasionally hand back a
+    full datetime ('2026-07-03T08:00:00') - and cached values persist, so a
+    strict parse would crash every future rebuild. Accept both."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return datetime.fromisoformat(value).date()
+
+
 def _parse_time(value: str | None) -> time_t:
     if not value:
         return time_t(0, 0)
@@ -101,12 +111,12 @@ def expand(
     at = _parse_time(rec.time)
 
     if rec.valid_from:
-        valid_from = date.fromisoformat(rec.valid_from)
+        valid_from = _parse_date(rec.valid_from)
     elif anchor is not None:
         valid_from = anchor.astimezone(VIENNA).date()
     else:
         valid_from = now.date()
-    valid_until = date.fromisoformat(rec.valid_until) if rec.valid_until else None
+    valid_until = _parse_date(rec.valid_until) if rec.valid_until else None
 
     if rec.freq == "irregular":
         return []

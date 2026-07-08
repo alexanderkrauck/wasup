@@ -36,6 +36,9 @@ SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,
 `newcomer_friendly`, `outdoor`, `energy` (low|medium|high), `language`
 (de|en). Optional `importance`: `{attribute: 0..1}` (default 1.0 each).
+Attribute names for `importance` and `required_attributes` are: `age` (note:
+one name for the age_min/age_max pair), `gender_split_min`, `kid_friendly`,
+`newcomer_friendly`, `outdoor`, `energy`, `language`.
 
 Ranking combines **your importance x the stored certainty**, anchored at the
 coin flip: an event scores `0.5 + certainty/2` when it satisfies a

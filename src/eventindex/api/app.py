@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config, db
+from eventindex.api.search import QueryBody
 
 MAX_LIMIT = 200
 
@@ -156,6 +157,9 @@ def occurrences(
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
+    """Raw chronological listing: HARD filters only (null = unknown never
+    matches), keyset-paginated. For importance x certainty ranking over
+    audience attributes use POST /v1/query."""
     conditions, params = _occurrence_filters(
         from_, to, near, radius, bbox, category, min_confidence
     )
@@ -294,30 +298,29 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
 
 
 @app.post("/v1/query")
-def query(body: dict, limit: int = Query(20, le=100, ge=1)):
+def query(body: QueryBody, limit: int = Query(20, le=100, ge=1)):
     """Structured search for agents: send SearchFilters fields directly
     (all optional - see /llms.txt) and NO LLM runs on the index side.
 
     Semantics: exclude_*/window/categories/price and required_attributes are
     HARD set logic (null = unknown never matches them). All other audience
-    attributes are SOFT preferences ranked by importance x stored certainty
-    (unknown scores a fixed prior instead of being dropped). Optional body
-    key `importance`: {attribute: 0..1} weights, default 1.0 each.
+    attributes are SOFT preferences ranked by importance x stored certainty,
+    anchored at the coin flip (match 0.5+c/2, contradiction 0.5-c/2, unknown
+    0.45) - nothing is silently dropped; match_score exposes the weighting.
     Occurrences with projected=true are forward-projected estimates.
     """
-    from eventindex.api.search import ATTRIBUTES, FILTER_DEFAULTS, SearchFilters
+    from eventindex.api.search import SOFT_ATTRIBUTES, SearchFilters
 
-    importance = body.pop("importance", None) or {}
-    if not isinstance(importance, dict) or not all(
-        k in ATTRIBUTES and isinstance(v, (int, float)) and 0 <= v <= 1
-        for k, v in importance.items()
-    ):
+    data = body.model_dump()
+    importance = data.pop("importance")
+    if not all(k in SOFT_ATTRIBUTES and 0 <= v <= 1 for k, v in importance.items()):
         raise HTTPException(
-            422, f"importance must map attribute names {sorted(ATTRIBUTES)} to 0..1"
+            422,
+            f"importance must map attribute names {sorted(SOFT_ATTRIBUTES)} to 0..1",
         )
     try:
-        filters = SearchFilters(**(FILTER_DEFAULTS | body))
-    except (ValidationError, TypeError) as e:
+        filters = SearchFilters(**data)
+    except ValidationError as e:
         raise HTTPException(422, f"invalid filters: {e}")
     return _run_filters(filters, limit, importance)
 

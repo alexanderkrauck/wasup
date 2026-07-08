@@ -433,7 +433,11 @@ The API exposes all three. Filters accept `min_confidence`; the default feed hid
 
 **Unknown means unknown (API contract):** every nullable field's `null` means "not known", never "no". `ends_at=null` must never be read as "ends whenever you need it to". Consumers can require knowledge (`ends_before=20:00` only matches events with a known end). This is stated in the API docs as a hard semantic guarantee.
 
+> **Extended 2026-07-08 (preference model, DECISIONS):** hard filters keep this contract verbatim. Audience attributes queried as SOFT preferences score unknowns at a fixed prior (0.45) so they stay visible and honestly ranked - the contract's spirit (never fabricate knowledge) holds; only the failure mode changed from "hidden" to "ranked as uncertain".
+
 **Negative constraints are set logic, not similarity:** exclusion filters (`exclude_category=comedy`) are exact tag/category filters applied BEFORE ranking; embeddings only rank within the allowed set. A grieving user who says "nothing funny" gets a guarantee, not a probability.
+
+**Preference queries combine importance and certainty (2026-07-08):** every inferred attribute is stored with a certainty; a query states per-attribute importance. Ranking uses the importance-weighted mean of P(satisfied) = 0.5 + c/2 on a match, 0.5 - c/2 on a contradiction, 0.45 when unknown - so confident matches > weak guesses > unknowns > contradictions, and nothing is silently dropped. `required_attributes` opts an attribute back into hard set logic. Implementation + extension point: the ATTRIBUTES registry in `api/search.py`.
 
 ---
 
@@ -483,8 +487,14 @@ GET /v1/venues, /v1/venues/{id}/events
 GET /v1/search?q=...           AGENT search, not pure semantic (redefined by Alexander
                                2026-07-06, DECISIONS changelog): a mini model parses the
                                query into HARD filters (time, category, exclusions,
-                               audience, price - set logic in SQL); residual vibe terms
-                               only RANK within the allowed set. Embeddings never select.
+                               price - set logic in SQL); audience attributes are SOFT
+                               preferences (importance x certainty, see §7); residual
+                               vibe terms only RANK. Embeddings never select.
+POST /v1/query                 the same search WITHOUT the index-side LLM (added
+                               2026-07-08): callers send the filter fields directly,
+                               plus importance weights and required_attributes. The
+                               endpoint for agents; discovery via /llms.txt (llmstxt.org
+                               convention) + /.well-known/api-catalog (RFC 9727).
 GET /v1/feed.ics?{same filters}   any filter combo as a calendar subscription
 POST /v1/reports               user feedback: wrong/cancelled/duplicate → QA queue,
                                feeds source trust

@@ -110,6 +110,7 @@ The promise is not "the agent writes perfect scrapers", it's "no human writes sc
 **Solution:** Reframe: these are **ranking features, not facts**. (a) priors live in an editable `category_priors` table (30 rows, hand-seeded, defensible: "yoga skews female, techno skews young" is common knowledge, not ML); (b) LLM only *adjusts* the prior from explicit textual evidence ("Seniorenrunde", "Frauenlauf"), never invents from nothing; (c) API labels them `estimate`, confidence capped at 0.8, UI copy says "typically"; (d) they never appear without their confidence.
 
 > **(b) superseded 2026-07-06 (DECISIONS changelog):** Alexander relaxed it - attributes are ALWAYS estimated (LLM world knowledge allowed), confidence encodes guess-ness (~0.2 pure guess / ~0.35 typical / ≤0.8 evidenced), null only for truly inapplicable. (a), (c), (d) stand unchanged.
+> **Query side completed 2026-07-08:** the confidences are now consumed, not just displayed - preference queries rank by caller importance x stored certainty (ARCHITECTURE §7 preference model); hard enforcement is opt-in via required_attributes. The "ranking features, not facts" reframe is thereby end-to-end.
 
 - **H5.1 Calibration long-term.**
   → Deferred by design: if the product grows feedback (attendance reports, user corrections via `/reports`), priors get updated from data. Until then, priors-with-humility is the correct system - there is nothing to calibrate against yet, and the architecture has the slot ready. **[leaf: boring - a table update job, later]**

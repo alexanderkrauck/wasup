@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from eventindex import config, llm
 
@@ -32,6 +32,14 @@ VIENNA = ZoneInfo(config.TIMEZONE)
 # unknown .45 > weak contradiction .4 > strong contradiction .1
 UNKNOWN_PRIOR = 0.45
 ENUM_CONFIDENCE = 0.5  # energy/language are stored without their own confidence
+
+# the soft-queryable audience attributes; also the valid names for
+# required_attributes and importance. Must stay in lockstep with ATTRIBUTES
+# below (pinned by test) - note "age" here vs age_min/age_max filter fields.
+SOFT_ATTRIBUTES = frozenset({
+    "age", "gender_split_min", "kid_friendly", "newcomer_friendly",
+    "outdoor", "energy", "language",
+})
 
 
 class SearchFilters(BaseModel):
@@ -74,6 +82,16 @@ class SearchFilters(BaseModel):
         "preferences; from: age, gender_split_min, kid_friendly, "
         "newcomer_friendly, outdoor, energy, language"
     )
+
+    @field_validator("required_attributes")
+    @classmethod
+    def _known_attributes(cls, v: list[str]) -> list[str]:
+        unknown = set(v) - SOFT_ATTRIBUTES
+        if unknown:
+            raise ValueError(
+                f"unknown attributes {sorted(unknown)}; valid: {sorted(SOFT_ATTRIBUTES)}"
+            )
+        return v
     vibe_terms: list[str] = Field(
         description="residual descriptive words for RANKING only (e.g. 'dance', "
         "'high energy' -> ['dance','energetic']); never constraints"
@@ -91,6 +109,21 @@ FILTER_DEFAULTS: dict = {
     "outdoor": None, "energy": None, "language": None,
     "required_attributes": [], "vibe_terms": [],
 }
+
+# The public body of POST /v1/query: SearchFilters with every field optional
+# (derived programmatically - one source of truth) plus importance weights.
+# Window/required validation still runs via SearchFilters afterwards.
+QueryBody = create_model(
+    "QueryBody",
+    __config__=ConfigDict(extra="forbid"),
+    **{name: (f.annotation, Field(FILTER_DEFAULTS[name], description=f.description))
+       for name, f in SearchFilters.model_fields.items()},
+    importance=(dict[str, float], Field(
+        {}, description="0..1 weight per soft attribute "
+        "(age, gender_split_min, kid_friendly, newcomer_friendly, outdoor, "
+        "energy, language); default 1.0 each. Combined with each event's "
+        "stored certainty into match_score - see /llms.txt")),
+)
 
 
 # ------------------------------------------------------- attribute registry

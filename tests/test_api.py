@@ -171,6 +171,16 @@ def test_query_endpoint_rejects_garbage(client):
     assert client.post(
         "/v1/query", json={"importance": {"kid_friendly": 7}}
     ).status_code == 422
+    assert client.post(
+        "/v1/query", json={"required_attributes": ["favourite_color"]}
+    ).status_code == 422
+
+
+def test_query_body_is_documented_in_openapi(client):
+    schema = client.get("/openapi.json").json()
+    body = schema["components"]["schemas"]["QueryBody"]["properties"]
+    assert "importance" in body and "gender_split_min" in body
+    assert "certainty" in body["importance"]["description"]
 
 
 def test_discovery_surfaces_are_open_even_when_keys_exist(conn, client):

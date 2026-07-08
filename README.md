@@ -26,7 +26,7 @@ uv run python -m eventindex.db.migrate    # apply db/migrations/*.sql
 uv run python -m eventindex.jobs.worker   # the worker loop (--once to drain and exit)
 uv run python -m eventindex.jobs.schedule # enqueue due crawls + daily QA sample
 uv run python -m eventindex.jobs.digest   # write today's digest to var/digests/
-uv run uvicorn eventindex.api.app:app     # the API (/v1/occurrences, /v1/search, /v1/feed.ics, ...)
+uv run uvicorn eventindex.api.app:app     # the API; agent docs: GET /llms.txt (POST /v1/query = zero-LLM search)
 uv run python scripts/create_api_key.py <name>  # mint an API key; the API is open until the first key exists
 
 # installed crontab (self-sustaining index; `crontab -l` is the source of truth):

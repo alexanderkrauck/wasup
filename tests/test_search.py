@@ -199,6 +199,13 @@ def test_filter_defaults_cover_the_whole_model():
 
 
 def test_registry_covers_every_soft_filter_field():
+    from eventindex.api.search import SOFT_ATTRIBUTES
+
     soft = {"gender_split_min", "kid_friendly", "newcomer_friendly",
             "outdoor", "energy", "language", "age"}
-    assert soft == set(ATTRIBUTES)
+    assert soft == set(ATTRIBUTES) == SOFT_ATTRIBUTES
+
+
+def test_unknown_required_attribute_is_rejected():
+    with pytest.raises(ValidationError):
+        _filters(required_attributes=["favourite_color"])

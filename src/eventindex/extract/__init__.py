@@ -69,6 +69,21 @@ def is_placeholder_title(title: str, source_name: str) -> bool:
     return not meaningful
 
 
+def sanity_filter(claims: list[dict], source: dict) -> list[dict]:
+    """The deterministic gates every claim passes regardless of how it was
+    extracted (cascade or recipe selectors): parseable future date, no
+    placeholder title."""
+    kept = []
+    for c in claims:
+        if not is_upcoming(c):
+            continue
+        title = c.get("title", {}).get("value") or ""
+        if is_placeholder_title(title, source.get("name") or ""):
+            continue
+        kept.append(c)
+    return kept
+
+
 def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
     """Run the cascade. Returns (method, claim payloads), past events dropped."""
     ct = result.content_type.lower()
@@ -80,7 +95,7 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
         method, claims = "linztermine_xml", linztermine.parse(result.content)
     elif kind == "ics" or "calendar" in ct:
         method, claims = "ics", ics.parse(result.content)
-    elif kind == "rss" or "rss" in ct or "atom" in ct or ct.endswith("xml"):
+    elif kind == "rss" or "rss" in ct or "atom" in ct or "xml" in ct:
         claims = rss.parse(result.content)
         if claims:
             method = "rss"
@@ -99,12 +114,4 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
                 tx, llm_text.html_to_text(result.content), source, job_id=job_id
             )
 
-    kept = []
-    for c in claims:
-        if not is_upcoming(c):
-            continue
-        title = c.get("title", {}).get("value") or ""
-        if is_placeholder_title(title, source.get("name") or ""):
-            continue
-        kept.append(c)
-    return method, kept
+    return method, sanity_filter(claims, source)

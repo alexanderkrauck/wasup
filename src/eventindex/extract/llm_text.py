@@ -69,7 +69,8 @@ def html_to_text(content: bytes) -> str:
 
 
 def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
-    from datetime import date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     from eventindex.extract import field
 
@@ -77,7 +78,7 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
         return []  # JS shell or empty page; headless rendering is phase 3
 
     prompt = _PROMPT.format(
-        today=date.today().isoformat(),
+        today=datetime.now(ZoneInfo(config.TIMEZONE)).date().isoformat(),
         categories=", ".join(config.CATEGORIES),
         text=text[:MAX_CHARS],
     )
@@ -94,9 +95,11 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
         )
         if ev.category in config.CATEGORIES:
             fields["category"] = ev.category
-        if ev.recurrence is not None:
+        if ev.recurrence is not None and ev.recurrence.freq not in ("once", "irregular"):
             # full dump, nulls kept: the stored claim must round-trip through
-            # the strict Recurrence schema at resolve time
+            # the strict Recurrence schema at resolve time. once/irregular is
+            # the model saying "not actually recurring" - storing it would
+            # mint a bogus series (and a 00:00 occurrence when time is null)
             fields["recurrence"] = ev.recurrence.model_dump()
         payloads.append({k: field(v, conf) for k, v in fields.items()})
     return payloads

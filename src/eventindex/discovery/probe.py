@@ -48,7 +48,7 @@ def known_domains(tx) -> set[str]:
 
 
 def probe_url(tx, url: str, discovered_via: str, job_id=None) -> dict:
-    """Returns {"outcome": registered|review|rejected|error, ...}."""
+    """Returns {"outcome": registered|known|rejected|error, ...}."""
     if domain_of(url) in known_domains(tx):
         return {"outcome": "known"}
     time.sleep(config.CRAWL_DELAY_S)
@@ -82,7 +82,13 @@ def probe_url(tx, url: str, discovered_via: str, job_id=None) -> dict:
     if score < REGISTER:
         return {"outcome": "rejected", "score": score, "detail": verdict.suggested_name}
 
-    source_url = verdict.listing_url or str(resp.url)
+    # the model may suggest a deeper listing URL, but only ON the probed
+    # domain: page text is untrusted input, and an off-domain URL would both
+    # register an arbitrary third-party site and leave the probed domain
+    # unknown (so every future sweep re-probes it - no convergence)
+    source_url = str(resp.url)
+    if verdict.listing_url and domain_of(verdict.listing_url) == domain_of(source_url):
+        source_url = verdict.listing_url
     row = tx.execute(
         """
         INSERT INTO source (name, url, kind, entity_type, tier, trust,

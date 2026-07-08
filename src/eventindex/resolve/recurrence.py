@@ -13,7 +13,6 @@ from dateutil import rrule as rr
 from pydantic import BaseModel, ConfigDict, Field
 
 from eventindex import config
-from eventindex.budget import BudgetExceeded
 
 VIENNA = ZoneInfo(config.TIMEZONE)
 EXPANSION_WEEKS = 8
@@ -171,9 +170,6 @@ def verify(tx, rec: Recurrence, occurrences: list[datetime], **llm_kwargs) -> bo
         "Are the compiled occurrences consistent with the description? "
         "Check weekday, time and frequency."
     )
-    try:
-        return llm.complete(tx, prompt, ConsistencyCheck, **llm_kwargs).consistent
-    except BudgetExceeded:
-        raise  # a broke verifier must not cache 'tentative' forever
-    except Exception:
-        return False  # unverifiable -> caller marks tentative
+    # exceptions bubble: the caller must distinguish "LLM said inconsistent"
+    # (a verdict, cacheable) from "call failed" (transient, must NOT cache)
+    return llm.complete(tx, prompt, ConsistencyCheck, **llm_kwargs).consistent

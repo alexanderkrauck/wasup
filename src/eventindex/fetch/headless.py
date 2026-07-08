@@ -34,6 +34,7 @@ def render_page(
 ) -> bytes | None:
     """Render a page; optionally exhaust a load-more button or infinite
     scroll (bounded), then return the final DOM HTML."""
+    context = None
     try:
         context = _get_browser().new_context(user_agent=config.USER_AGENT)
         page = context.new_page()
@@ -57,9 +58,10 @@ def render_page(
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1200)
 
-        html = page.content().encode()
-        context.close()
-        return html
+        return page.content().encode()
     except Exception as e:
         log.warning("headless render failed %s: %s", url, e)
         return None
+    finally:
+        if context is not None:
+            context.close()  # failure paths must not accumulate contexts

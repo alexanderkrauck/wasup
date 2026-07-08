@@ -107,6 +107,8 @@ def _to_payload(node: dict) -> dict | None:
 
 
 def parse(content: bytes, base_url: str = "") -> list[dict]:
+    from urllib.parse import urljoin
+
     soup = BeautifulSoup(content, "html.parser")
     nodes: list[dict] = []
     for script in soup.find_all("script", type="application/ld+json"):
@@ -116,4 +118,10 @@ def parse(content: bytes, base_url: str = "") -> list[dict]:
             continue
         _walk(data, nodes)
     payloads = [p for node in nodes if (p := _to_payload(node)) is not None]
+    if base_url:
+        # schema.org url/image values are frequently relative
+        for p in payloads:
+            for key in ("url", "image_url"):
+                if key in p:
+                    p[key]["value"] = urljoin(base_url, p[key]["value"])
     return payloads

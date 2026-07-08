@@ -58,6 +58,7 @@ socials (trigger: ≥20 Instagram-only sources identified; ~8 suspected as of 20
 6. **Socials fence**: ~8 suspected IG-first sources found in one 2-week window (trigger: >=20 confirmed). Start tracking suspected_ig_only on sources.
 7. Special-handling sources: oeticket (DataDome bot protection - maybe skip, linztermine overlaps), meetup.com (JS/API), casinos.at (JS). Structural no-source-yet: beach volleyball, Salonschiff, Plus City, Biergarten live music.
 8. **Booking-schema extraction** (phase-4 leftover, found in the 2026-07-08 doc sweep): ticket URL + "Anmeldung unter..." where trivially present in already-extracted text -> `booking_url`/`registration_required` columns (exist, always null). Full §13 agent-action layer stays future.
+9. From the 2026-07-08 code review, deferred because they change product semantics (fixes needing a design call, not a patch): (a) adjudicated merges with stated times ~30-180min apart keep BOTH occurrences (19:00 vs 19:30 duplicates; auto-collapsing risks eating legit slot events like Pflasterspektakel); (b) `/v1/changes` has no tombstones - rebuild-deleted events and enrichment-only updates are invisible to consumers; (c) search's inferred-attribute filters ignore confidence (a 0.2 guess satisfies a "hard" filter) and `is_free=false` is indistinguishable from unset; (d) `event_claim.raw_excerpt` (spec'd debuggability) and `jobs.budget_ctx` are still never written - wire or drop.
 
 ## Standing rules
 

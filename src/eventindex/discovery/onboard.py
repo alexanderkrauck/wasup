@@ -11,12 +11,13 @@ to the model. Every turn is trajectory-logged for recipe distillation.
 import json
 import logging
 import time
-import uuid
 from dataclasses import dataclass, field
 
+import psycopg
 from pydantic import ValidationError
 
 from eventindex import config, llm
+from eventindex.budget import BudgetExceeded
 from eventindex.fetch.recipe import Recipe, run_recipe
 
 log = logging.getLogger("eventindex.onboard")
@@ -340,5 +341,11 @@ def _execute(name, args, browser: Browser, source, tx, job_id,
                 return f"SELF-VALIDATION FAILED: {error}\nFix the recipe and emit again."
             return recipe
         return f"unknown tool {name}"
+    except BudgetExceeded:
+        raise  # system condition: parking/backoff is the worker's job
+    except psycopg.Error:
+        # the handler tx is now aborted - feeding the error back to the
+        # model would burn the session budget against a poisoned transaction
+        raise
     except Exception as e:  # tool errors go back to the model, not up
         return f"tool error: {type(e).__name__}: {e}"

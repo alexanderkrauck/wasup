@@ -95,6 +95,51 @@ def test_next_link_following(conn):
     assert len(payloads) == 4  # followed the weiter link
 
 
+def test_calendar_expansion_survives_default_max_pages(conn):
+    """max_pages (default 10) governs next_link chains - it must never
+    truncate the pre-expanded month list (completeness contract)."""
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return LISTING_P2
+
+    r = _recipe(
+        entry_urls=["https://x.at/kalender/{year}/{month}"],
+        pagination=Pagination(type="calendar_nav", months_ahead=12),
+        validation={"min_items": 1},
+    )
+    run_recipe(r, {"id": None}, conn, fetch_page=fetch, now=NOW)
+    assert len(fetched) == 12  # all months, not max_pages=10
+
+
+def test_detail_budget_is_per_crawl(conn, monkeypatch):
+    from eventindex.fetch import recipe as recipe_mod
+
+    monkeypatch.setattr(recipe_mod, "MAX_DETAIL_FETCHES", 4)
+    detail_fetches = []
+
+    def fetch(url):
+        if "/e/" in url:
+            detail_fetches.append(url)
+            return b"<html>tiny</html>"  # <100 chars text: no LLM call
+        return LISTING.replace(b'href="/e/', b'href="/e/%d-' % len(detail_fetches))
+
+    # listing pages use selectors (no LLM); detail pages hit the cascade but
+    # are <100 chars of text, which returns [] before any LLM call
+    r = _recipe(follow_detail=True, detail_url_selector="h3 a@href")
+    run_recipe(r, {"id": None, "kind": "website", "name": "x"}, conn,
+               fetch_page=fetch, now=NOW)
+    assert len(detail_fetches) == 4  # cap holds across pages, not per page
+
+
+def test_all_seen_needs_at_least_one_parsed_item():
+    from eventindex.fetch.recipe import _all_seen
+
+    garbage = [{"title": {"value": "x", "confidence": 0.9}}]  # no date
+    assert _all_seen(garbage, set(), {}) is False  # never stop on garbage
+
+
 def test_validation_contract_detects_breakage():
     broken = [{"title": {"value": "x", "confidence": 0.9}}]  # no dates at all
     result = validate(_recipe(), broken)

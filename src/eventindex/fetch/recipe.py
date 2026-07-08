@@ -86,7 +86,9 @@ def page_urls(recipe: Recipe, now: datetime | None = None) -> list[str]:
     """Expand entry_urls + pagination into the concrete URL sequence.
     Interactive types (load_more_click, infinite_scroll) return the entry
     urls; their expansion happens in the headless fetcher."""
-    now = now or datetime.now()
+    from zoneinfo import ZoneInfo
+
+    now = now or datetime.now(ZoneInfo(config.TIMEZONE))
     p = recipe.pagination
     max_pages = min(p.max_pages, MAX_PAGES_HARD)
     urls: list[str] = []
@@ -214,19 +216,47 @@ def run_recipe(
     """
     from eventindex.extract import extract as cascade_extract, parse_dt
 
-    if fetch_page is None:
+    owns_fetcher = fetch_page is None
+    if owns_fetcher:
         fetch_page = _default_fetcher(recipe)
 
     seen_fps = _known_fingerprints(tx, source) if (
         "all_fingerprints_seen" in recipe.stop_conditions
     ) else None
 
-    payloads: list[dict] = []
     urls = page_urls(recipe, now=now)
     visited: set[str] = set()
-    pages = 0
     queue = list(urls)
-    while queue and pages < min(recipe.pagination.max_pages, MAX_PAGES_HARD):
+    # the pre-expanded URL list (calendar months x entry urls) is already
+    # bounded by MAX_MONTHS_AHEAD; max_pages must not silently truncate it -
+    # it governs dynamic next_link chains beyond the expansion
+    page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
+    detail_budget = MAX_DETAIL_FETCHES  # per CRAWL, as the §cost-governance caps promise
+    try:
+        payloads = _crawl_pages(
+            recipe, source, tx, job_id, fetch_page, queue, visited, page_cap,
+            detail_budget, seen_fps, now, cascade_extract, parse_dt,
+        )
+    finally:
+        if owns_fetcher and (close := getattr(fetch_page, "close", None)):
+            close()
+
+    # dedupe identical payloads (listing + detail double-extraction)
+    unique, keys = [], set()
+    for p in payloads:
+        key = (p.get("title", {}).get("value"), p.get("starts_at", {}).get("value"))
+        if key not in keys:
+            keys.add(key)
+            unique.append(p)
+    return unique, validate(recipe, unique)
+
+
+def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
+                 page_cap, detail_budget, seen_fps, now, cascade_extract,
+                 parse_dt) -> list[dict]:
+    payloads: list[dict] = []
+    pages = 0
+    while queue and pages < page_cap:
         url = queue.pop(0)
         if url in visited:
             continue
@@ -244,10 +274,11 @@ def run_recipe(
             )
 
         if recipe.follow_detail:
-            for durl in detail_urls(recipe, html, url):
+            for durl in detail_urls(recipe, html, url)[:detail_budget]:
                 if durl in visited:
                     continue
                 visited.add(durl)
+                detail_budget -= 1
                 dhtml = fetch_page(durl)
                 if dhtml is None:
                     continue
@@ -273,14 +304,7 @@ def run_recipe(
         if (nxt := next_url(recipe, html, url)) is not None:
             queue.append(nxt)
 
-    # dedupe identical payloads (listing + detail double-extraction)
-    unique, keys = [], set()
-    for p in payloads:
-        key = (p.get("title", {}).get("value"), p.get("starts_at", {}).get("value"))
-        if key not in keys:
-            keys.add(key)
-            unique.append(p)
-    return unique, validate(recipe, unique)
+    return payloads
 
 
 class _FakeResult:
@@ -325,6 +349,7 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
             log.warning("recipe fetch failed %s: %s", url, e)
             return None
 
+    fetch_http.close = client.close  # run_recipe closes the pool when done
     return fetch_http
 
 
@@ -341,12 +366,16 @@ def _all_seen(payloads: list[dict], seen: set[str], source: dict) -> bool:
     from eventindex.extract import parse_dt
     from eventindex.resolve.fingerprint import fingerprint
 
+    checked = 0
     for p in payloads:
         starts = parse_dt(p.get("starts_at", {}).get("value"))
         title = p.get("title", {}).get("value")
         if not title or starts is None:
             continue
+        checked += 1
         fp = fingerprint(title, starts, lat=source.get("lat"), lon=source.get("lon"))
         if fp not in seen:
             return False
-    return True
+    # a page of unparseable garbage is NOT evidence that everything was seen -
+    # stopping here is how a layout change silently truncates the crawl
+    return checked > 0

@@ -91,6 +91,43 @@ def completeness_escalation(conn) -> int:
     return escalated
 
 
+BROKEN_STREAK = 5
+
+
+def escalate_broken(conn) -> int:
+    """A source whose last BROKEN_STREAK crawls all errored is structurally
+    broken, not unlucky: mark it degraded and send the onboarding agent
+    (same self-heal path recipes use). Degraded sources are not scheduled,
+    which ends the retry-forever loop; a successful re-onboard flips them
+    back to active."""
+    rows = conn.execute(
+        """
+        SELECT s.id, s.name FROM source s
+        WHERE s.status IN ('active', 'dormant')
+          AND (SELECT count(*) FROM crawl_log cl
+               WHERE cl.source_id = s.id) >= %(n)s
+          AND NOT EXISTS (
+              SELECT 1 FROM (
+                  SELECT status FROM crawl_log cl
+                  WHERE cl.source_id = s.id
+                  ORDER BY started_at DESC LIMIT %(n)s
+              ) recent WHERE recent.status != 'error'
+          )
+        """,
+        {"n": BROKEN_STREAK},
+    ).fetchall()
+    for r in rows:
+        with conn.transaction():
+            conn.execute(
+                "UPDATE source SET status = 'degraded' WHERE id = %s", (r["id"],)
+            )
+            enqueue(conn, "onboard", {
+                "source_id": str(r["id"]),
+                "reason": f"self-heal: last {BROKEN_STREAK} crawls all errored",
+            })
+    return len(rows)
+
+
 def enqueue_nightly_qa(conn) -> bool:
     """One qa_check sample per Vienna day (§12: the QA loop is the
     highest-leverage investment - every aggregator rots without it)."""
@@ -115,6 +152,9 @@ def schedule(conn) -> int:
     parked = park_dormant(conn)
     if parked:
         print(f"parked {parked} yieldless sources as dormant")
+    broken = escalate_broken(conn)
+    if broken:
+        print(f"escalated {broken} persistently erroring sources to re-onboarding")
     if enqueue_nightly_qa(conn):
         print("enqueued the daily qa_check sample")
     rows = conn.execute(
@@ -183,8 +223,6 @@ def main() -> None:
     with db.connect() as conn:
         print(f"enqueued {schedule(conn)} crawl jobs")
         if args.discover:
-            from eventindex import config
-
             channels = ["google_places", "osm", "backlinks", "search"]
             with conn.transaction():
                 for channel in channels:

@@ -55,6 +55,12 @@ def test_confirmed_bumps_trust_and_timestamp(conn, monkeypatch):
         "SELECT last_confirmed_at FROM occurrence WHERE id = %s", (oid,)
     ).fetchone()
     assert occ["last_confirmed_at"] is not None
+    # the confirmation is also a claim - only claims survive rebuilds (H0)
+    claim = conn.execute(
+        "SELECT c.payload FROM event_claim c JOIN source s ON s.id = c.source_id "
+        "WHERE s.url = %s", (handlers.QA_SOURCE_URL,),
+    ).fetchone()
+    assert claim is not None and "status" not in claim["payload"]
     log = conn.execute("SELECT detail FROM crawl_log").fetchone()
     assert log["detail"].startswith("qa: checked=1 confirmed=1")
 

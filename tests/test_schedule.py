@@ -1,7 +1,8 @@
 from psycopg.types.json import Jsonb
 
 from eventindex.jobs.schedule import (
-    completeness_escalation, enqueue_nightly_qa, park_dormant, schedule,
+    completeness_escalation, enqueue_nightly_qa, escalate_broken, park_dormant,
+    schedule,
 )
 
 
@@ -65,6 +66,54 @@ def test_capped_feed_gets_companion_site_and_agent_once(conn):
     assert completeness_escalation(conn) == 0
 
 
+def _log(conn, source_id, status, n=1):
+    for _ in range(n):
+        conn.execute(
+            "INSERT INTO crawl_log (source_id, status) VALUES (%s, %s)",
+            (source_id, status),
+        )
+
+
+def test_persistently_erroring_source_escalates_once(conn):
+    sick = _source(conn, "sick", "now()")
+    _log(conn, sick, "error", n=5)
+    flaky = _source(conn, "flaky", "now()")
+    _log(conn, flaky, "error", n=4)
+    _log(conn, flaky, "ok")  # one success inside the window -> not broken
+    conn.commit()
+
+    assert escalate_broken(conn) == 1
+    conn.commit()
+    status = conn.execute(
+        "SELECT status FROM source WHERE id = %s", (sick,)
+    ).fetchone()["status"]
+    assert status == "degraded"
+    onboard = conn.execute("SELECT payload FROM jobs WHERE kind = 'onboard'").fetchone()
+    assert onboard["payload"]["source_id"] == str(sick)
+    assert "self-heal" in onboard["payload"]["reason"]
+    assert escalate_broken(conn) == 0  # degraded sources are out of the loop
+
+
+def test_dormant_source_reactivates_on_yield(conn):
+    import uuid as _uuid
+
+    from eventindex.jobs import handlers
+
+    sid = _source(conn, "sleeper", "NULL", status="dormant")
+    source = conn.execute("SELECT * FROM source WHERE id = %s", (sid,)).fetchone()
+    payload = {"title": {"value": "Fest", "confidence": 0.9},
+               "starts_at": {"value": "2099-07-20T19:00:00+02:00", "confidence": 0.9}}
+
+    handlers._update_source_stats(conn, {"id": _uuid.uuid4()}, source, [payload], "rss")
+    row = conn.execute("SELECT status FROM source WHERE id = %s", (sid,)).fetchone()
+    assert row["status"] == "active"  # the pulse crawl found life
+
+    conn.execute("UPDATE source SET status = 'dormant' WHERE id = %s", (sid,))
+    handlers._update_source_stats(conn, {"id": _uuid.uuid4()}, source, [], "rss")
+    row = conn.execute("SELECT status FROM source WHERE id = %s", (sid,)).fetchone()
+    assert row["status"] == "dormant"  # still yieldless -> stays parked
+
+
 def test_nightly_qa_enqueued_once_per_day(conn):
     assert enqueue_nightly_qa(conn) is True
     conn.commit()
@@ -82,7 +131,7 @@ def test_yieldless_sources_park_dormant_with_monthly_pulse(conn):
             "INSERT INTO crawl_log (source_id, status, events_found) "
             "VALUES (%s, 'ok', 0)", (junk,),
         )
-    young = _source(conn, "young", "now() - interval '2 days'", yield_ema=0.0)
+    _source(conn, "young", "now() - interval '2 days'", yield_ema=0.0)
     conn.commit()
 
     assert park_dormant(conn) == 1  # junk parks, young hasn't earned it yet

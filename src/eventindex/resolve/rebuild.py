@@ -18,7 +18,7 @@ import logging
 import re
 import uuid
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
 from datetime import date, datetime, time as time_t, timedelta
 
 from psycopg.types.json import Jsonb
@@ -243,6 +243,8 @@ def _text_recurrence(tx, c: Claim) -> Recurrence | None:
             Recurrence,
             source_id=c.source_id,
         )
+    except BudgetExceeded:
+        raise  # consistent with adjudication: park the rebuild, don't degrade
     except Exception:
         return None  # not cached: transient failures may retry next rebuild
     if rec.freq in ("once", "irregular"):
@@ -587,7 +589,12 @@ def _verified(tx, key: str, rec: Recurrence, occs: list[datetime]) -> bool:
     ).fetchone()
     if cached is not None:
         return cached["same_event"]
-    ok = recurrence.verify(tx, rec, occs)
+    try:
+        ok = recurrence.verify(tx, rec, occs)
+    except BudgetExceeded:
+        raise  # no verdicts without money - park the rebuild
+    except Exception:
+        return False  # tentative for THIS rebuild only, never cached
     _cache_verdict(
         check_key, key, rec.as_stated[:200], rec.as_stated[:200], None, 0, ok,
         "recurrence_verify",
@@ -828,7 +835,8 @@ def _confirmation_sweep(tx, event_ids: list[uuid.UUID]) -> None:
         """
         SELECT DISTINCT c.source_id FROM identity i
         JOIN event_claim c ON c.fingerprint = i.fingerprint
-        WHERE i.event_id = ANY(%s)
+        JOIN source s ON s.id = c.source_id
+        WHERE i.event_id = ANY(%s) AND s.kind != 'internal'
         """,
         (event_ids,),
     ).fetchall()

@@ -85,6 +85,20 @@ def run_job(conn, job: dict) -> None:
             log.warning("daily cap reached - job %s parked until midnight, worker exiting",
                         job["id"])
             raise SystemExit(0)
+        if "BudgetExceeded" in error and "monthly budget reached" in error:
+            # per-source condition: park THIS job until the Vienna month
+            # rolls over; other sources keep working, so no worker exit
+            with conn.transaction():
+                conn.execute(
+                    "UPDATE jobs SET status = 'pending', attempts = attempts - 1, "
+                    "run_after = (date_trunc('month', now() AT TIME ZONE %s) "
+                    "  + interval '1 month 5 minutes') AT TIME ZONE %s, "
+                    "last_error = 'source monthly budget - waiting for month rollover' "
+                    "WHERE id = %s",
+                    (config.TIMEZONE, config.TIMEZONE, job["id"]),
+                )
+            log.warning("monthly budget hit - job %s parked until next month", job["id"])
+            return
         if "Insufficient credits" in error or "Error code: 402" in error:
             # credit outage is a system condition, not a job failure: pause
             # the job an hour without burning an attempt (learned 2026-07-07:
@@ -111,6 +125,15 @@ def run_job(conn, job: dict) -> None:
                     "UPDATE jobs SET status = 'pending', last_error = %s, "
                     "run_after = now() + %s * interval '1 second' WHERE id = %s",
                     (error, backoff, job["id"]),
+                )
+            if job["kind"] == "crawl" and job["payload"].get("source_id"):
+                # the handler tx rolled back, taking its crawl_log with it -
+                # without this row the scheduler re-enqueues a broken source
+                # forever and park/escalation logic is blind to the failures
+                conn.execute(
+                    "INSERT INTO crawl_log (job_id, source_id, finished_at, "
+                    "status, detail) VALUES (%s, %s, now(), 'error', %s)",
+                    (job["id"], job["payload"]["source_id"], error[-400:]),
                 )
         log.warning("job %s (%s) failed (attempt %d)", job["id"], job["kind"], job["attempts"])
 

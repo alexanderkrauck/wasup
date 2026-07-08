@@ -136,6 +136,11 @@ def _update_source_stats(tx, job, source, payloads: list, method: str) -> None:
         """
         UPDATE source SET
             last_crawled = now(),
+            -- a dormant source that yields again has earned its way back
+            -- (dormancy must not be a one-way door; the monthly pulse crawl
+            -- is pointless if its findings can't reactivate)
+            status = CASE WHEN status = 'dormant' AND %(n)s > 0
+                          THEN 'active' ELSE status END,
             last_yield = %(n)s,
             yield_ema = yield_ema * (1 - %(a)s) + %(n)s * %(a)s,
             cost_ema = cost_ema * (1 - %(a)s) + %(a)s * coalesce(
@@ -154,9 +159,14 @@ def _update_source_stats(tx, job, source, payloads: list, method: str) -> None:
 def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     """Recipe-driven crawl (§5b) with the self-healing contract: validation
     failure OR >80% yield drop vs EMA, twice in a row -> degraded + re-onboard."""
+    from eventindex.extract import sanity_filter
+
     recipe = Recipe.model_validate(source["recipe"])
     payloads, validation = run_recipe(recipe, source, tx, job_id=job["id"])
-    payloads = [p for p in payloads if "starts_at" in p and parse_dt(p["starts_at"]["value"])]
+    # selector-extracted payloads skip the cascade, so the deterministic
+    # gates (future date, no placeholder title) must run here - otherwise
+    # recipes insert past events and inflate yield/horizon stats
+    payloads = sanity_filter(payloads, source)
 
     yield_dropped = (
         source["yield_ema"] > 5 and len(payloads) < 0.2 * source["yield_ema"]
@@ -339,6 +349,29 @@ def _qa_verify(tx, occ: dict, job_id) -> str:
     ).outcome
 
 
+def _qa_claim(tx, qa_sid, occ: dict, status: str | None) -> None:
+    """QA writes claims, never canon (H0): a positive claim re-anchors
+    last_seen/last_confirmed_at at the next rebuild, a negative one flips
+    the occurrence through the ordinary asymmetric status merge."""
+    fp = tx.execute(
+        "SELECT fingerprint FROM identity WHERE event_id = %s "
+        "ORDER BY fingerprint LIMIT 1", (occ["event_id"],),
+    ).fetchone()
+    if fp is None:
+        return
+    payload = {
+        "title": {"value": occ["title"], "confidence": 0.9},
+        "starts_at": {"value": occ["starts_at"].isoformat(), "confidence": 0.9},
+    }
+    if status:
+        payload["status"] = {"value": status, "confidence": 0.9}
+    tx.execute(
+        "INSERT INTO event_claim (source_id, fingerprint, payload) "
+        "VALUES (%s, %s, %s)",
+        (qa_sid, fp["fingerprint"], Jsonb(payload)),
+    )
+
+
 def qa_check(job: dict, tx) -> list[dict]:
     """QA loop (§12): re-verify occurrences against their event URL, feed
     source trust, and flip cancellations - via a claim, never by editing
@@ -377,26 +410,15 @@ def qa_check(job: dict, tx) -> list[dict]:
              "eid": occ["event_id"]},
         )
         if outcome == "confirmed":
+            # instant freshness for the API; the claim below is what makes
+            # the confirmation survive rebuilds (canon is rebuilt from claims)
             tx.execute(
                 "UPDATE occurrence SET last_confirmed_at = now() WHERE id = %s",
                 (occ["id"],),
             )
+            _qa_claim(tx, qa_sid, occ, status=None)
         elif outcome == "cancelled":
-            fp = tx.execute(
-                "SELECT fingerprint FROM identity WHERE event_id = %s "
-                "ORDER BY fingerprint LIMIT 1", (occ["event_id"],),
-            ).fetchone()
-            if fp:
-                tx.execute(
-                    "INSERT INTO event_claim (source_id, fingerprint, payload) "
-                    "VALUES (%s, %s, %s)",
-                    (qa_sid, fp["fingerprint"], Jsonb({
-                        "title": {"value": occ["title"], "confidence": 0.9},
-                        "starts_at": {"value": occ["starts_at"].isoformat(),
-                                      "confidence": 0.9},
-                        "status": {"value": "cancelled", "confidence": 0.9},
-                    })),
-                )
+            _qa_claim(tx, qa_sid, occ, status="cancelled")
 
     tx.execute(
         "INSERT INTO crawl_log (job_id, finished_at, status, events_found, detail) "

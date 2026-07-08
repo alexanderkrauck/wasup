@@ -58,7 +58,10 @@ TRAJECTORY_DIR = VAR_DIR / "trajectories"
 # Worker
 JOB_MAX_ATTEMPTS = 3
 JOB_RETRY_BACKOFF_S = 60  # attempt n retries after 60 * 5^(n-1) seconds
-JOB_STALE_RUNNING_S = 3600  # running jobs older than this are requeued at startup
+# must exceed the worst-case legitimate job (a 60-page + 60-detail recipe
+# crawl at 2s politeness plus LLM extraction runs well past an hour) -
+# requeueing a LIVE job double-runs it: double spend, interleaved claims
+JOB_STALE_RUNNING_S = 4 * 3600
 WORKER_IDLE_POLL_S = 5
 
 # Crawl politeness

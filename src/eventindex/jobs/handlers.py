@@ -1,7 +1,8 @@
 """Job handlers: pure functions (job, tx) -> [jobs to enqueue].
 
 crawl: fetch -> extraction cascade -> event_claim rows -> enqueue resolve.
-resolve: claims of one crawl -> canonical event/occurrence rows (v0).
+resolve: full canon rebuild, resolve(all_claims) -> event/occurrence (H0).
+enrich/onboard/probe/discover/qa_check: see each handler.
 
 The dummy path ({"dummy": true}) stays as the end-to-end smoke test from
 phase 0.

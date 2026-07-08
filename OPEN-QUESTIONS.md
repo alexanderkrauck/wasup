@@ -5,9 +5,10 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 ## Open
 
 
-7. **Domain name** - needed by phase 4 at the latest (.ics URLs, API keys); any preference, or defer?
-9. **Embeddings provider** - §6 title matching + phase-4 semantic search need an embeddings API; OpenRouter's embeddings coverage is shaky. OK to add a direct OpenAI (or Voyage) key just for embeddings (~cents/month), or should I verify OpenRouter first? (Phase 2 shipped with trigram-only title similarity - works, logged in DECISIONS.)
-11. **Venue review** - `var/review/venues-2026-07-05.md` lists 132 auto-created venues; a quick skim for obvious junk suffices (5 min, weekly from now on).
+7. **Domain name** - now actually needed: your `.ics` calendar subscription URL wants a stable host (phase 4 shipped 2026-07-07); any preference, or keep localhost until the VPS decision?
+9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
+11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
+
 ## Answered
 
 12. **Search API for §4d fan-out** → resolved with NO new account: OpenRouter web plugin (Exa engine), URLs via url_citation annotations, ~€1/month for 160 queries, budget-ledgered through the one LLM client. Research trail: Google CSE closed to new customers & dead 2027-01 (Alexander's screenshot confirmed); Gemini grounding free but ToS forbids using links for crawling; Brave vetoed by Alexander. Smoke test: "run club linz" → howwasyourdayclub.com at rank 2. *(2026-07-06)*

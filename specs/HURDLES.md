@@ -109,6 +109,8 @@ The promise is not "the agent writes perfect scrapers", it's "no human writes sc
 
 **Solution:** Reframe: these are **ranking features, not facts**. (a) priors live in an editable `category_priors` table (30 rows, hand-seeded, defensible: "yoga skews female, techno skews young" is common knowledge, not ML); (b) LLM only *adjusts* the prior from explicit textual evidence ("Seniorenrunde", "Frauenlauf"), never invents from nothing; (c) API labels them `estimate`, confidence capped at 0.8, UI copy says "typically"; (d) they never appear without their confidence.
 
+> **(b) superseded 2026-07-06 (DECISIONS changelog):** Alexander relaxed it - attributes are ALWAYS estimated (LLM world knowledge allowed), confidence encodes guess-ness (~0.2 pure guess / ~0.35 typical / ≤0.8 evidenced), null only for truly inapplicable. (a), (c), (d) stand unchanged.
+
 - **H5.1 Calibration long-term.**
   → Deferred by design: if the product grows feedback (attendance reports, user corrections via `/reports`), priors get updated from data. Until then, priors-with-humility is the correct system - there is nothing to calibrate against yet, and the architecture has the slot ready. **[leaf: boring - a table update job, later]**
 - **H5.2 Fullness needs capacity data.**
@@ -146,7 +148,7 @@ kinds: crawl | onboard | probe | resolve | enrich | qa_check | discover
 - **H7.1 Pure functions need discipline** (side effects creep).
   → Enforced by shape: every worker gets `(payload, tx)` and returns rows to insert. All state in Postgres, no in-memory anything. Testing = call function with fixture payload. **[leaf: boring - a convention + code review]**
 - **H7.2 What to NOT build in v1** (deferral is a decision, not an accident).
-  → v1 cuts: socials scraping (tier 4), vision/PDF path, tier-D agent crawls, demographics enrichment, takedown self-service (manual email suffices at zero users). v1 = portals + tier-2 institutions + recipe crawling + resolver + API. That alone beats every existing Linz portal. Each cut has a re-entry trigger: socials when ≥20 sources are Instagram-only; vision when ≥10 high-value PDF sources queue up; tier-D when ≥5 sources defeat recipes. **[leaf: boring - a scope table with triggers]**
+  → v1 cuts: socials scraping (tier 4), vision/PDF path, tier-D agent crawls, ~~demographics enrichment~~ (*trigger FIRED 2026-07-06, shipped per H5 as amended*), takedown self-service (manual email suffices at zero users). v1 = portals + tier-2 institutions + recipe crawling + resolver + API. That alone beats every existing Linz portal. Each cut has a re-entry trigger: socials when ≥20 sources are Instagram-only; vision when ≥10 high-value PDF sources queue up; tier-D when ≥5 sources defeat recipes. **[leaf: boring - a scope table with triggers]**
 - **H7.3 Observability without an ops stack.**
   → One `crawl_log` table + one nightly digest (rows crawled, events found, failures, spend, top degraded sources) posted to email/chat. Grafana can wait. **[leaf: boring]**
 

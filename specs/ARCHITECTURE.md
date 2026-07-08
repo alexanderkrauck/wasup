@@ -385,7 +385,8 @@ Two-stage: cheap blocking, then careful matching.
 Claims sharing a fingerprint are candidate duplicates. Then pairwise match score:
 
 ```
-score = 0.35 × title_similarity(trigram + embedding cosine)
+score = 0.35 × title_similarity(trigram + word containment; embedding cosine
+        deferred with OPEN-QUESTIONS #9 - as built 2026-07-05/07)
       + 0.25 × time_overlap
       + 0.20 × venue_match (resolved venue > geo distance)
       + 0.10 × organizer_match
@@ -474,12 +475,16 @@ GET /v1/occurrences
     &min_confidence=0.6&include_tentative=true
     &sort=starts_at|distance|confidence|relevance
     &q=free text                              → hybrid: filters + pgvector semantic
+                                              (superseded 2026-07-06: see /v1/search note below)
 
 GET /v1/events/{id}            full record incl. field_provenance + claims
 GET /v1/events/{id}/similar    embedding neighbors
 GET /v1/venues, /v1/venues/{id}/events
-GET /v1/search?q=...           pure semantic ("something active tonight, not techno,
-                               under 20€, where going alone isn't weird")
+GET /v1/search?q=...           AGENT search, not pure semantic (redefined by Alexander
+                               2026-07-06, DECISIONS changelog): a mini model parses the
+                               query into HARD filters (time, category, exclusions,
+                               audience, price - set logic in SQL); residual vibe terms
+                               only RANK within the allowed set. Embeddings never select.
 GET /v1/feed.ics?{same filters}   any filter combo as a calendar subscription
 POST /v1/reports               user feedback: wrong/cancelled/duplicate → QA queue,
                                feeds source trust
@@ -519,10 +524,10 @@ Rough expectation: 800-1500 registered sources for the metro area, yielding (est
 ## 11. Stack & Cost Sketch
 
 - **DB:** Postgres + PostGIS + pgvector. One box. This never needs to be "big data" - Linz is maybe 30-50k occurrences/year.
-- **Workers:** Python (httpx, Playwright, icalendar, dateutil.rrule), queue via Postgres SKIP LOCKED or Redis. No Kafka, no k8s.
-- **LLM:** cheap model (Haiku-class) for extraction/classification, mid model for merge adjudication + enrichment, vision model for flyers/PDFs. Structured outputs everywhere.
-- **Scrapers:** Apify (or similar) for Instagram/Facebook - the one line item worth paying for.
-- **API:** FastAPI. Cache hot queries.
+- **Workers:** Python (httpx, Playwright, icalendar, dateutil.rrule), queue via Postgres SKIP LOCKED (*Redis option removed - CLAUDE.md forbids it; as built: Postgres only*). No Kafka, no k8s.
+- **LLM:** mini model for extraction/classification, mid model for adjudication escalation + agentic onboarding, vision when the PDF fence unfences. Structured outputs everywhere. (*As decided 2026-07-07: mini=deepseek-v4-flash, mid=kimi-k2.7-code, two tiers only - see DECISIONS changelog.*)
+- **Scrapers:** Apify (or similar) for Instagram/Facebook - the one line item worth paying for (*when the socials fence unfences, H7.2*).
+- **API:** FastAPI. No caching until a measured query is slow (CLAUDE.md).
 
 Cost estimate at steady state: ~1200 sources, avg crawl every 2-3 days, ~80% early-exit on content hash → ~150-250 LLM extraction calls/day + enrichment ≈ **€2-6/day LLM + €30-80/month scraping APIs + one €20-40/month server**. The bootstrap month is heavier (everything is new content).
 
@@ -535,7 +540,7 @@ Dependency-ordered phases (each phase is independently shippable and verifiable;
 1. **Skeleton:** schema, fetcher, JSON-LD/ICS extractor, LLM extractor, manual registry of ~40 tier-1/2 sources. Ship `/v1/occurrences` with basic filters. *Done when: real Linz events queryable via API.*
 2. **Resolve & recur:** venue resolver, fingerprint dedup, rrule handling, occurrence expansion. Ingest the portals; verify cross-source merging on real collisions. *Done when: the same concert from 3 sources is one event.*
 3. **Discovery + recipes:** GMaps/OSM sweep, probe-and-register, link-graph expansion, search fan-out. Recipe interpreter + onboarding agent (§5b) so new sources need zero code. Registry to 500+ sources. Adaptive scheduler. *Done when: a never-seen source goes from URL to indexed events with no human code.*
-4. **Intelligence:** confidence model wiring, enrichment pass (demographics/fullness/vibe), embeddings + semantic search, `.ics` feeds, `/reports`. *Done when: "something active tonight, not techno" returns sensible results.*
+4. **Intelligence:** confidence model wiring, enrichment pass (demographics/fullness/vibe), agent search (*embeddings dropped from the critical path 2026-07-06 - hard filters + vibe-term ranking*), `.ics` feeds, `/reports`. *Done when: "something active tonight, not techno" returns sensible results.*
 5. **Later (triggered, see HURDLES.md H7.2):** socials scraping, PDF/vision path, tier-D agent crawls, zero-result monitor, and a thin frontend (or just point Claude at the API and ask "what's on tonight" - which is the original itch).
 
 The single highest-leverage early investment: **the QA loop** (nightly random re-verification + user reports adjusting source trust). Every aggregator degrades into stale garbage without it; freshness + trust is what will make this one different.

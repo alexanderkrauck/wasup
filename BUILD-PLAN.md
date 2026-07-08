@@ -14,7 +14,7 @@ Repo scaffold, `config.py`, DB schema + migrations (ALL tables from ARCHITECTURE
 
 ## Phase 1 - Skeleton: real events queryable
 
-Fetcher (httpx, robots.txt, rate limits, content-hash early exit, conditional GET), extraction cascade tiers a-c: JSON-LD schema.org/Event parser, ICS/RSS parser, LLM full-text extractor (mini model, per ARCHITECTURE §3.3) - each emitting `event_claim` rows. Seed registry: ~40 tier-1/2 sources hand-entered from ARCHITECTURE §10 (start with linztermine, eventfinder, linz.at, oeticket, Eventbrite browse pages [JSON-LD, see §catalog], Posthof, Brucknerhaus, Stadtwerkstatt, Kapu, VHS, AEC, JKU...). Minimal resolver v0: fingerprint-identical claims collapse; naive canon projection. `GET /v1/occurrences` with time/geo/category filters + keyset pagination; `GET /v1/events/{id}`.
+Fetcher (httpx, ~~robots.txt~~ *ignored per locked decision 2026-07-06*, rate limits, content-hash early exit, conditional GET), extraction cascade tiers a-c: JSON-LD schema.org/Event parser, ICS/RSS parser, LLM full-text extractor (mini model, per ARCHITECTURE §3.3) - each emitting `event_claim` rows. Seed registry: ~40 tier-1/2 sources hand-entered from ARCHITECTURE §10 (start with linztermine, eventfinder, linz.at, oeticket, Eventbrite browse pages [JSON-LD, see §catalog], Posthof, Brucknerhaus, Stadtwerkstatt, Kapu, VHS, AEC, JKU...). Minimal resolver v0: fingerprint-identical claims collapse; naive canon projection. `GET /v1/occurrences` with time/geo/category filters + keyset pagination; `GET /v1/events/{id}`.
 
 **Done when:** `curl /v1/occurrences?from=<today>&near=48.3069,14.2858&radius=5km` returns real, current Linz events from ≥10 distinct sources, with provenance visible.
 **Not in this phase:** dedup across sources, recurrence, discovery, semantic search.
@@ -42,11 +42,11 @@ Confidence wiring end-to-end (source trust EMA, compound event confidence, stale
 **Done when:** (a) "was geht heute abend, nicht techno, unter 20€" via `/v1/search` returns sensible ranked results with zero excluded-category leaks over a 50-query test set; (b) Alexander subscribes to a filtered .ics and events appear in his calendar; (c) a `/reports` submission demonstrably lowers a source's trust; (d) digest shows the QA loop running nightly.
 **[human]:** use it for a week; the feedback from real usage IS the phase-4 acceptance test.
 
-*Status 2026-07-07: all phase-4 components shipped (qa_check, .ics, /reports, /changes, api keys, §9b suppression, 50-query gate at tests/test_search_live.py). Evidence pending budget reset: (a) run `uv run pytest -m live tests/test_search_live.py`, (c)+(d) flow from tonight's queue. (b) needs Alexander: subscribe to /v1/feed.ics?api_key=... Embeddings for ranking remain deliberately unbuilt (agent-search decision 2026-07-06: vibe-term overlap ranks; add pgvector ranking only if real usage shows it lacking). Rate limits deferred until a second consumer exists.*
+*Status 2026-07-07 (corrected 07-08): phase-4 components shipped (qa_check, .ics, /reports, /changes, api keys, §9b suppression, 50-query gate at tests/test_search_live.py) EXCEPT booking-schema extraction (ticket URL, "Anmeldung unter...") - unshipped, now red-team backlog #8. Evidence pending budget reset: (a) run `uv run pytest -m live tests/test_search_live.py`, (c)+(d) flow from the queue. (b) needs Alexander: subscribe to /v1/feed.ics?api_key=... Embeddings for ranking remain deliberately unbuilt (agent-search decision 2026-07-06: vibe-term overlap ranks; add pgvector ranking only if real usage shows it lacking). Rate limits deferred until a second consumer exists.*
 
 ## After v1 (do not touch until trigger fires - HURDLES §H7.2)
 
-socials (trigger: ≥20 Instagram-only sources identified) · vision/PDF (≥10 high-value PDF sources queued) · tier-D (≥5 sources defeat recipes) · demographics inference (product demand) · takedown self-service (first real request) · frontend (v1 proves usage via API/.ics first) · multi-city (Linz coverage bar demonstrably met).
+socials (trigger: ≥20 Instagram-only sources identified; ~8 suspected as of 2026-07-07) · vision/PDF (≥10 high-value PDF sources queued; ~2) · tier-D (≥5 sources defeat recipes; 1) · ~~demographics inference~~ trigger FIRED 2026-07-06, shipped as enrichment (DECISIONS changelog) · takedown self-service (first real request) · frontend (v1 proves usage via API/.ics first) · multi-city (Linz coverage bar demonstrably met).
 
 ## Red-team backlog (2026-07-07, two audit rounds - ordered by leverage)
 
@@ -57,6 +57,7 @@ socials (trigger: ≥20 Instagram-only sources identified) · vision/PDF (≥10 
 5. **Vision/PDF fence trigger evidence**: Aktiv-Tage Linz (city Ferienprogramm) is a PDF brochure; count such high-value PDF sources toward the >=10 trigger (currently ~2).
 6. **Socials fence**: ~8 suspected IG-first sources found in one 2-week window (trigger: >=20 confirmed). Start tracking suspected_ig_only on sources.
 7. Special-handling sources: oeticket (DataDome bot protection - maybe skip, linztermine overlaps), meetup.com (JS/API), casinos.at (JS). Structural no-source-yet: beach volleyball, Salonschiff, Plus City, Biergarten live music.
+8. **Booking-schema extraction** (phase-4 leftover, found in the 2026-07-08 doc sweep): ticket URL + "Anmeldung unter..." where trivially present in already-extracted text -> `booking_url`/`registration_required` columns (exist, always null). Full §13 agent-action layer stays future.
 
 ## Standing rules
 

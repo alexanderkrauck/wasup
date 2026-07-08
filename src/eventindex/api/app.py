@@ -11,13 +11,14 @@ Run: uv run uvicorn eventindex.api.app:app
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from eventindex import db
+from eventindex import config, db
 
 MAX_LIMIT = 200
 
@@ -39,7 +40,14 @@ _EFFECTIVE_CONFIDENCE_SQL = """
 """
 
 
+# discovery surfaces stay open like /docs: they carry no data, only the
+# instructions an agent needs before it has a key
+_OPEN_PATHS = {"/llms.txt", "/.well-known/api-catalog"}
+
+
 def _require_api_key(request: Request) -> None:
+    if request.url.path in _OPEN_PATHS:
+        return
     with db.connect() as conn:
         if conn.execute("SELECT 1 FROM api_key WHERE active LIMIT 1").fetchone() is None:
             return  # bootstrap: no keys registered yet -> open
@@ -52,6 +60,29 @@ def _require_api_key(request: Request) -> None:
 
 app = FastAPI(title="eventindex", version="v1",
               dependencies=[Depends(_require_api_key)])
+
+
+@app.get("/llms.txt", include_in_schema=False)
+def llms_txt():
+    """llms.txt convention: the instruction document a visiting agent needs
+    to use this index well (semantics, filter schema, examples)."""
+    text = (Path(__file__).parent / "llms.md").read_text()
+    return Response(
+        text.replace("{categories}", ", ".join(config.CATEGORIES)),
+        media_type="text/markdown",
+    )
+
+
+@app.get("/.well-known/api-catalog", include_in_schema=False)
+def api_catalog():
+    """RFC 9727 API discovery: points agents at the spec and the docs."""
+    return Response(
+        content='{"linkset": [{"anchor": "/", '
+        '"service-desc": [{"href": "/openapi.json", '
+        '"type": "application/vnd.oai.openapi+json"}], '
+        '"service-doc": [{"href": "/llms.txt", "type": "text/markdown"}]}]}',
+        media_type="application/linkset+json",
+    )
 
 
 def _data_freshness(conn) -> datetime | None:
@@ -210,16 +241,18 @@ def feed_ics(
     return Response(content=cal.to_ical(), media_type="text/calendar")
 
 
-@app.get("/v1/search")
-def search(q: str, limit: int = Query(20, le=100, ge=1)):
-    """Agent search: LLM-parsed hard filters + vibe ranking (never the
-    other way around). The parsed filters are echoed for transparency."""
-    from eventindex.api.search import build_sql, parse_query, rank
+def _run_filters(filters, limit: int,
+                 importance: dict[str, float] | None = None) -> dict:
+    """The deterministic search core shared by /v1/search and /v1/query:
+    guarantees as set logic in SQL; soft attribute preferences scored as
+    importance x certainty; vibe terms only rank."""
+    from eventindex.api.search import attribute_select, build_sql, rank
 
     with db.connect() as conn:
-        filters = parse_query(conn, q)  # spend is ledgered on its own connection
         where, params = build_sql(filters)
-        params["limit"] = limit * 3  # fetch extra, rank, cut
+        # soft preferences reorder, so the candidate pool must be wider than
+        # the page - at Linz scale a whole window fits comfortably
+        params["limit"] = max(limit * 3, 300)
         rows = conn.execute(
             f"""
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
@@ -229,7 +262,8 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
                    e.expected_age_range AS age_range,
                    ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                    ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
-                   ({_PROVENANCE_SQL}) AS provenance_summary
+                   ({_PROVENANCE_SQL}) AS provenance_summary,
+                   {attribute_select()}
             FROM occurrence o JOIN event e ON e.id = o.event_id
             WHERE {where}
             ORDER BY o.starts_at LIMIT %(limit)s
@@ -242,8 +276,50 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
     return {
         "data_freshness": freshness,
         "parsed_filters": filters.model_dump(),
-        "occurrences": rank(rows, filters.vibe_terms)[:limit],
+        "importance": importance or {},
+        "occurrences": rank(rows, filters, importance)[:limit],
     }
+
+
+@app.get("/v1/search")
+def search(q: str, limit: int = Query(20, le=100, ge=1)):
+    """Natural-language search: a mini model parses the query into hard
+    filters (costs the index LLM budget - agents should POST /v1/query
+    with the filters instead). The parsed filters are echoed."""
+    from eventindex.api.search import parse_query
+
+    with db.connect() as conn:
+        filters = parse_query(conn, q)  # spend is ledgered on its own connection
+    return _run_filters(filters, limit)
+
+
+@app.post("/v1/query")
+def query(body: dict, limit: int = Query(20, le=100, ge=1)):
+    """Structured search for agents: send SearchFilters fields directly
+    (all optional - see /llms.txt) and NO LLM runs on the index side.
+
+    Semantics: exclude_*/window/categories/price and required_attributes are
+    HARD set logic (null = unknown never matches them). All other audience
+    attributes are SOFT preferences ranked by importance x stored certainty
+    (unknown scores a fixed prior instead of being dropped). Optional body
+    key `importance`: {attribute: 0..1} weights, default 1.0 each.
+    Occurrences with projected=true are forward-projected estimates.
+    """
+    from eventindex.api.search import ATTRIBUTES, FILTER_DEFAULTS, SearchFilters
+
+    importance = body.pop("importance", None) or {}
+    if not isinstance(importance, dict) or not all(
+        k in ATTRIBUTES and isinstance(v, (int, float)) and 0 <= v <= 1
+        for k, v in importance.items()
+    ):
+        raise HTTPException(
+            422, f"importance must map attribute names {sorted(ATTRIBUTES)} to 0..1"
+        )
+    try:
+        filters = SearchFilters(**(FILTER_DEFAULTS | body))
+    except (ValidationError, TypeError) as e:
+        raise HTTPException(422, f"invalid filters: {e}")
+    return _run_filters(filters, limit, importance)
 
 
 @app.get("/v1/events/{event_id}")

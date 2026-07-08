@@ -1,9 +1,21 @@
-"""Agent search (§9, redefined 2026-07-06): a mini model parses the natural
-query into HARD filters (set logic in SQL - exclusions and constraints are
-guarantees, never similarity); the residual vibe terms only RANK within the
-allowed set. No embeddings on the constraint path.
+"""Agent search (§9, redefined 2026-07-06/08): guarantees are set logic in
+SQL; audience attributes are weighted preferences.
+
+Two kinds of query inputs, deliberately different:
+- HARD (guarantees): time window, categories, exclusions, price facts, and
+  any attribute the caller marks `required`. Set logic, applied before
+  ranking, null = unknown never matches.
+- SOFT (preferences): inferred audience attributes (age, gender split,
+  kid_friendly, ...). Every stored attribute carries a certainty; the caller
+  states an importance; ranking combines them: an event contributes
+  P(satisfied) = certainty if it matches, 1 - certainty if it contradicts,
+  UNKNOWN_PRIOR if unenriched - averaged weighted by importance.
+
+The ATTRIBUTES registry is the single extension point: a future inferred
+attribute (e.g. for_children) = one field in enrich.Enrichment + one row here.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -13,6 +25,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from eventindex import config, llm
 
 VIENNA = ZoneInfo(config.TIMEZONE)
+
+# P(satisfied) is anchored at the coin flip: 0.5 + c/2 on a match,
+# 0.5 - c/2 on a contradiction. Unknown sits just under a weak match and
+# just above a weak contradiction: strong match .9 > weak match .6 >
+# unknown .45 > weak contradiction .4 > strong contradiction .1
+UNKNOWN_PRIOR = 0.45
+ENUM_CONFIDENCE = 0.5  # energy/language are stored without their own confidence
 
 
 class SearchFilters(BaseModel):
@@ -32,6 +51,7 @@ class SearchFilters(BaseModel):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=VIENNA)
         return dt.isoformat()
+
     categories: list[str] | None = Field(description="wanted categories from the taxonomy, null = any")
     exclude_categories: list[str] = Field(description="categories the user does NOT want - hard guarantee")
     exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags - hard guarantee")
@@ -48,11 +68,113 @@ class SearchFilters(BaseModel):
     outdoor: bool | None
     energy: Literal["low", "medium", "high"] | None
     language: Literal["de", "en"] | None
+    required_attributes: list[str] = Field(
+        description="attribute names the user makes NON-NEGOTIABLE "
+        "('unbedingt', 'muss') - enforced as hard filters instead of "
+        "preferences; from: age, gender_split_min, kid_friendly, "
+        "newcomer_friendly, outdoor, energy, language"
+    )
     vibe_terms: list[str] = Field(
         description="residual descriptive words for RANKING only (e.g. 'dance', "
         "'high energy' -> ['dance','energetic']); never constraints"
     )
 
+
+# SearchFilters keeps every field required-but-nullable (strict structured
+# output for the internal parser). External callers of POST /v1/query send
+# partial bodies; these defaults fill the gaps.
+FILTER_DEFAULTS: dict = {
+    "from_dt": None, "to_dt": None, "categories": None,
+    "exclude_categories": [], "exclude_terms": [], "age_min": None,
+    "age_max": None, "gender_split_min": None, "max_price": None,
+    "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
+    "outdoor": None, "energy": None, "language": None,
+    "required_attributes": [], "vibe_terms": [],
+}
+
+
+# ------------------------------------------------------- attribute registry
+
+@dataclass(frozen=True)
+class Attribute:
+    """How one queryable audience attribute lives in the event row.
+
+    value_sql/conf_sql are trusted constants (never user input); kind picks
+    the satisfaction comparator. Adding an inferred attribute later means one
+    field in enrich.Enrichment + one row here - nothing else.
+    """
+
+    kind: str  # bool | min_float | enum | age
+    value_sql: str
+    conf_sql: str
+    hard_sql: str  # condition template used when the attribute is `required`
+
+
+def _inferred_bool(key: str) -> Attribute:
+    return Attribute(
+        kind="bool",
+        value_sql=f"(e.inferred->'{key}'->>'value')::bool",
+        conf_sql=f"(e.inferred->'{key}'->>'confidence')::float",
+        hard_sql=f"(e.inferred->'{key}'->>'value')::bool = %({{p}})s",
+    )
+
+
+ATTRIBUTES: dict[str, Attribute] = {
+    "gender_split_min": Attribute(
+        kind="min_float",
+        value_sql="e.expected_gender_split",
+        conf_sql="e.expected_gender_split_confidence",
+        hard_sql="e.expected_gender_split >= %({p})s",
+    ),
+    "age": Attribute(
+        kind="age",
+        value_sql="e.expected_age_range",  # placeholder; age uses lo/hi below
+        conf_sql="e.expected_age_range_confidence",
+        hard_sql="e.expected_age_range && int4range(%({p}min)s, %({p}max)s, '[]')",
+    ),
+    "kid_friendly": _inferred_bool("kid_friendly"),
+    "newcomer_friendly": _inferred_bool("newcomer_friendly"),
+    "outdoor": _inferred_bool("outdoor"),
+    "energy": Attribute(
+        kind="enum", value_sql="e.inferred->>'energy'", conf_sql=str(ENUM_CONFIDENCE),
+        hard_sql="e.inferred->>'energy' = %({p})s",
+    ),
+    "language": Attribute(
+        kind="enum", value_sql="e.inferred->>'language'", conf_sql=str(ENUM_CONFIDENCE),
+        hard_sql="e.inferred->>'language' = %({p})s",
+    ),
+}
+
+
+def _wanted(f: SearchFilters) -> dict:
+    """The attribute constraints the query actually states: name -> wanted."""
+    wanted: dict = {}
+    if f.age_min is not None and f.age_max is not None:
+        wanted["age"] = (f.age_min, f.age_max)
+    for name in ("gender_split_min", "kid_friendly", "newcomer_friendly",
+                 "outdoor", "energy", "language"):
+        if (v := getattr(f, name)) is not None:
+            wanted[name] = v
+    return wanted
+
+
+def attribute_select() -> str:
+    """Extra SELECT columns the scorer needs (trusted constants only)."""
+    cols = []
+    for name, attr in ATTRIBUTES.items():
+        if attr.kind == "age":
+            cols += [
+                "lower(e.expected_age_range) AS age__lo",
+                "upper(e.expected_age_range) AS age__hi",
+                f"{attr.conf_sql} AS age__conf",
+            ]
+        else:
+            cols += [f"{attr.value_sql} AS {name}__value",
+                     f"{attr.conf_sql} AS {name}__conf"]
+    return ", ".join(cols)
+
+
+# ---------------------------------------------------------------- parsing
 
 def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
     now = (now or datetime.now(VIENNA)).astimezone(VIENNA)
@@ -64,15 +186,20 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         'abend" = tomorrow 17:00-23:59; "am wochenende" = next Sat 00:00 - Sun '
         "23:59. No time mentioned = from now, no end.\n"
         "Only set a filter the query actually implies; everything else null/empty. "
-        "Negations (nicht/kein/ohne X) go to exclude_*.\n\n"
+        "Negations (nicht/kein/ohne X) go to exclude_*.\n"
+        "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
+        "soft preferences by default; add a name to required_attributes ONLY "
+        "when the user is emphatic ('unbedingt', 'muss', 'nur wenn').\n\n"
         f"QUERY: {q}",
         SearchFilters,
     )
 
 
+# ------------------------------------------------------------------- SQL
+
 def build_sql(f: SearchFilters) -> tuple[str, dict]:
-    """Hard filters -> WHERE conditions. null attribute = unknown = never
-    matches a constraint (§7 contract)."""
+    """HARD conditions only: guarantees + attributes marked required.
+    null attribute = unknown = never matches a hard constraint (§7)."""
     conditions = ["o.status = 'scheduled'"]
     params: dict = {}
     conditions.append("o.starts_at >= %(from)s")
@@ -98,48 +225,88 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
         )
         params[key] = f"%{term}%"
         params[key + "raw"] = term
-    if f.age_min is not None and f.age_max is not None:
-        conditions.append("e.expected_age_range && int4range(%(age_min)s, %(age_max)s, '[]')")
-        params["age_min"], params["age_max"] = f.age_min, f.age_max
-    if f.gender_split_min is not None:
-        conditions.append("e.expected_gender_split >= %(gender_min)s")
-        params["gender_min"] = f.gender_split_min
     if f.is_free:
         conditions.append("e.price_min = 0")
     elif f.max_price is not None:
         conditions.append("e.price_min <= %(max_price)s")
         params["max_price"] = f.max_price
-    for attr in ("kid_friendly", "newcomer_friendly", "outdoor"):
-        want = getattr(f, attr)
-        if want is not None:
-            conditions.append(
-                f"(e.inferred->'{attr}'->>'value')::bool = %({attr})s"
-            )
-            params[attr] = want
-    if f.energy:
-        conditions.append("e.inferred->>'energy' = %(energy)s")
-        params["energy"] = f.energy
-    if f.language:
-        conditions.append("e.inferred->>'language' = %(language)s")
-        params["language"] = f.language
+
+    wanted = _wanted(f)
+    for name in f.required_attributes:
+        if name not in wanted or name not in ATTRIBUTES:
+            continue  # required without a stated value is a no-op
+        attr = ATTRIBUTES[name]
+        p = f"req_{name}"
+        conditions.append(attr.hard_sql.format(p=p))
+        if attr.kind == "age":
+            params[p + "min"], params[p + "max"] = wanted["age"]
+        else:
+            params[p] = wanted[name]
     return " AND ".join(conditions), params
 
 
-def rank(rows: list[dict], vibe_terms: list[str]) -> list[dict]:
-    """Rank WITHIN the allowed set: vibe-term overlap × effective confidence.
-    Pure text overlap for now; embeddings may later refine this - never the
-    constraints."""
-    terms = [t.lower() for t in vibe_terms]
+# --------------------------------------------------------------- scoring
+
+def _satisfaction(row: dict, name: str, want) -> float:
+    """P(this event satisfies the constraint), from stored value+certainty,
+    anchored at the coin flip: 0.5 + c/2 on a match, 0.5 - c/2 on a
+    contradiction, UNKNOWN_PRIOR when the attribute is unknown."""
+    attr = ATTRIBUTES[name]
+    if attr.kind == "age":
+        lo, hi = row.get("age__lo"), row.get("age__hi")
+        if lo is None or hi is None:
+            return UNKNOWN_PRIOR
+        conf = row.get("age__conf") or ENUM_CONFIDENCE
+        ok = want[0] <= hi - 1 and want[1] >= lo  # int4range upper is exclusive
+    else:
+        value = row.get(f"{name}__value")
+        if value is None:
+            return UNKNOWN_PRIOR
+        raw_conf = row.get(f"{name}__conf")
+        conf = float(raw_conf) if raw_conf is not None else ENUM_CONFIDENCE
+        if attr.kind == "min_float":
+            ok = float(value) >= want
+        else:  # bool, enum
+            ok = value == want
+    return 0.5 + conf / 2 if ok else 0.5 - conf / 2
+
+
+def preference_score(row: dict, f: SearchFilters,
+                     importance: dict[str, float] | None = None) -> float:
+    """Importance-weighted expected satisfaction over the SOFT constraints
+    (required ones were already enforced in SQL). 1.0 when none stated."""
+    importance = importance or {}
+    soft = {n: w for n, w in _wanted(f).items()
+            if n not in f.required_attributes}
+    if not soft:
+        return 1.0
+    total_w = sum(importance.get(n, 1.0) for n in soft)
+    if total_w <= 0:
+        return 1.0
+    return sum(
+        importance.get(n, 1.0) * _satisfaction(row, n, want)
+        for n, want in soft.items()
+    ) / total_w
+
+
+def rank(rows: list[dict], f: SearchFilters,
+         importance: dict[str, float] | None = None) -> list[dict]:
+    """Rank WITHIN the allowed set: preference score x vibe-term overlap x
+    effective confidence. Nothing is dropped here - hard filtering already
+    happened in SQL."""
+    terms = [t.lower() for t in f.vibe_terms]
 
     def score(row) -> float:
-        if not terms:
-            return row["confidence"] or 0.0
-        haystack = " ".join([
-            (row["title"] or "").lower(),
-            " ".join(row.get("vibe_tags") or []),
-            " ".join(row.get("category") or []),
-        ])
-        hits = sum(1 for t in terms if t in haystack)
-        return (0.5 + hits / len(terms)) * (row["confidence"] or 0.0)
+        s = preference_score(row, f, importance) * (row["confidence"] or 0.0)
+        if terms:
+            haystack = " ".join([
+                (row["title"] or "").lower(),
+                " ".join(row.get("vibe_tags") or []),
+                " ".join(row.get("category") or []),
+            ])
+            hits = sum(1 for t in terms if t in haystack)
+            s *= 0.5 + hits / len(terms)
+        row["match_score"] = round(s, 4)  # exposed: consumers see the weighting
+        return s
 
     return sorted(rows, key=score, reverse=True)

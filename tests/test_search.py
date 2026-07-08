@@ -1,5 +1,6 @@
-"""Agent-search semantics: exclusions are guarantees, filters are set logic,
-vibe terms only rank. Parser itself is stubbed (LLM); build_sql/rank are the
+"""Agent-search semantics: exclusions are guarantees, hard filters are set
+logic, soft attribute preferences combine importance x certainty and never
+drop rows. Parser itself is stubbed (LLM); build_sql/scoring are the
 testable deterministic core."""
 
 import uuid
@@ -8,25 +9,20 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from eventindex.api.search import SearchFilters, build_sql, rank
+from eventindex.api.search import (
+    ATTRIBUTES, FILTER_DEFAULTS, SearchFilters, UNKNOWN_PRIOR, attribute_select,
+    build_sql, preference_score, rank,
+)
 
 NOW = datetime.now(timezone.utc)
 
 
 def _filters(**kw):
-    base = dict(
-        from_dt=None, to_dt=None, categories=None, exclude_categories=[],
-        exclude_terms=[], age_min=None, age_max=None, gender_split_min=None,
-        max_price=None,
-        is_free=None, kid_friendly=None, newcomer_friendly=None, outdoor=None,
-        energy=None, language=None, vibe_terms=[],
-    )
-    base.update(kw)
-    return SearchFilters(**base)
+    return SearchFilters(**(FILTER_DEFAULTS | kw))
 
 
 def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
-         kid=None, price=None):
+         kid=None, kid_conf=0.6, price=None, gender=None, gender_conf=None):
     event_id = uuid.uuid4()
     inferred = {}
     if energy:
@@ -34,16 +30,20 @@ def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
     if vibe:
         inferred["vibe_tags"] = vibe
     if kid is not None:
-        inferred["kid_friendly"] = {"value": kid, "confidence": 0.6}
+        inferred["kid_friendly"] = {"value": kid, "confidence": kid_conf}
     from psycopg.types.json import Jsonb
     conn.execute(
         "INSERT INTO event (id, kind, title, category, confidence, status, "
-        "expected_age_range, inferred, price_min) VALUES "
+        "expected_age_range, expected_age_range_confidence, "
+        "expected_gender_split, expected_gender_split_confidence, "
+        "inferred, price_min) VALUES "
         "(%s, 'one_off', %s, %s, 0.9, 'confirmed', "
-        " CASE WHEN %s::int IS NULL THEN NULL ELSE int4range(%s, %s, '[]') END, %s, %s)",
+        " CASE WHEN %s::int IS NULL THEN NULL ELSE int4range(%s, %s, '[]') END, "
+        " 0.5, %s, %s, %s, %s)",
         (event_id, title, category or [],
          age[0] if age else None, age[0] if age else None,
-         age[1] if age else None, Jsonb(inferred) if inferred else None, price),
+         age[1] if age else None, gender, gender_conf,
+         Jsonb(inferred) if inferred else None, price),
     )
     conn.execute(
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
@@ -52,13 +52,19 @@ def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
 
 
 def _run(conn, filters):
+    """Hard SQL + soft ranking, like the API core."""
     where, params = build_sql(filters)
     params["limit"] = 50
-    return [r["title"] for r in conn.execute(
-        f"SELECT e.title FROM occurrence o JOIN event e ON e.id = o.event_id "
+    rows = conn.execute(
+        f"SELECT e.title, 0.9::float AS confidence, e.category, "
+        f"e.inferred->'vibe_tags' AS vibe_tags, {attribute_select()} "
+        f"FROM occurrence o JOIN event e ON e.id = o.event_id "
         f"WHERE {where} LIMIT %(limit)s", params,
-    )]
+    ).fetchall()
+    return [r["title"] for r in rank(rows, filters)]
 
+
+# ------------------------------------------------------------- guarantees
 
 def test_exclusions_are_leakproof(conn):
     _add(conn, "Techno Rave", category=["nightlife"], vibe=["techno"])
@@ -90,36 +96,109 @@ def test_window_strings_validated_and_vienna_pinned():
         _filters(from_dt="morgen abend")  # non-ISO never reaches the DB
 
 
-def test_age_filter_never_matches_unknown(conn):
+def test_free_filter(conn):
+    _add(conn, "Gratis Konzert", price=0)
+    _add(conn, "Teures Konzert", price=40)
+    conn.commit()
+    assert _run(conn, _filters(is_free=True)) == ["Gratis Konzert"]
+
+
+# ------------------------------------------- required = hard, null excluded
+
+def test_required_attribute_never_matches_unknown(conn):
     _add(conn, "Studentenparty", age=(20, 30))
     _add(conn, "Unknown Audience Thing")
     conn.commit()
-    titles = _run(conn, _filters(age_min=20, age_max=30))
-    assert titles == ["Studentenparty"]  # null = unknown, excluded
+    titles = _run(conn, _filters(age_min=20, age_max=30,
+                                 required_attributes=["age"]))
+    assert titles == ["Studentenparty"]  # null = unknown, hard-excluded
 
 
-def test_energy_and_kid_filters(conn):
-    _add(conn, "HIIT Bootcamp", energy="high", kid=False)
-    _add(conn, "Kinderfest", energy="medium", kid=True)
+def test_required_kid_friendly_is_set_logic(conn):
+    _add(conn, "Kinderfest", kid=True)
+    _add(conn, "HIIT Bootcamp", kid=False)
+    _add(conn, "Mystery Meetup")  # unknown
     conn.commit()
-    assert _run(conn, _filters(energy="high")) == ["HIIT Bootcamp"]
-    assert _run(conn, _filters(kid_friendly=True)) == ["Kinderfest"]
+    titles = _run(conn, _filters(kid_friendly=True,
+                                 required_attributes=["kid_friendly"]))
+    assert titles == ["Kinderfest"]
 
 
-def test_vibe_terms_rank_but_never_exclude(conn):
+# --------------------------------------- soft: importance x certainty ranks
+
+def test_soft_preference_ranks_but_never_drops(conn):
+    _add(conn, "Kinderfest", kid=True, kid_conf=0.8)
+    _add(conn, "HIIT Bootcamp", kid=False, kid_conf=0.8)
+    _add(conn, "Mystery Meetup")  # unknown
+    conn.commit()
+    titles = _run(conn, _filters(kid_friendly=True))
+    assert len(titles) == 3  # nothing dropped
+    # confident match > unknown (prior) > confident contradiction
+    assert titles == ["Kinderfest", "Mystery Meetup", "HIIT Bootcamp"]
+
+
+def test_certainty_orders_the_spectrum():
+    f = _filters(kid_friendly=True)
+
+    def p(value, conf):
+        return preference_score(
+            {"kid_friendly__value": value, "kid_friendly__conf": conf}, f
+        )
+
+    # strong match > weak match > unknown > weak contra > strong contra
+    assert p(True, 0.8) > p(True, 0.2) > p(None, None) > p(False, 0.2) > p(False, 0.8)
+    assert p(None, None) == UNKNOWN_PRIOR
+
+
+def test_importance_weights_shift_the_ranking():
+    f = _filters(kid_friendly=True, gender_split_min=0.5)
+    kid_yes_gender_no = {
+        "kid_friendly__value": True, "kid_friendly__conf": 0.8,
+        "gender_split_min__value": 0.3, "gender_split_min__conf": 0.8,
+    }
+    kid_no_gender_yes = {
+        "kid_friendly__value": False, "kid_friendly__conf": 0.8,
+        "gender_split_min__value": 0.7, "gender_split_min__conf": 0.8,
+    }
+    gender_matters = {"gender_split_min": 1.0, "kid_friendly": 0.1}
+    kids_matter = {"gender_split_min": 0.1, "kid_friendly": 1.0}
+    assert preference_score(kid_no_gender_yes, f, gender_matters) > \
+        preference_score(kid_yes_gender_no, f, gender_matters)
+    assert preference_score(kid_yes_gender_no, f, kids_matter) > \
+        preference_score(kid_no_gender_yes, f, kids_matter)
+
+
+def test_age_overlap_soft_scoring():
+    f = _filters(age_min=20, age_max=30)
+    inside = {"age__lo": 18, "age__hi": 34, "age__conf": 0.6}  # [18,33]
+    outside = {"age__lo": 50, "age__hi": 71, "age__conf": 0.6}
+    unknown = {"age__lo": None, "age__hi": None, "age__conf": None}
+    assert preference_score(inside, f) == 0.8    # 0.5 + 0.6/2
+    assert abs(preference_score(outside, f) - 0.2) < 1e-9
+    assert preference_score(unknown, f) == UNKNOWN_PRIOR
+
+
+def test_vibe_terms_rank_but_never_exclude():
+    f = _filters(vibe_terms=["dance"])
     rows = [
         {"title": "Salsa Night", "vibe_tags": ["dance", "energetic"],
          "category": ["nightlife"], "confidence": 0.8},
         {"title": "Chess Evening", "vibe_tags": ["quiet"],
          "category": ["community"], "confidence": 0.9},
     ]
-    ranked = rank(rows, ["dance"])
+    ranked = rank(rows, f)
     assert ranked[0]["title"] == "Salsa Night"  # ranked up...
     assert len(ranked) == 2                     # ...but nothing dropped
+    assert all("match_score" in r for r in ranked)
 
 
-def test_free_filter(conn):
-    _add(conn, "Gratis Konzert", price=0)
-    _add(conn, "Teures Konzert", price=40)
-    conn.commit()
-    assert _run(conn, _filters(is_free=True)) == ["Gratis Konzert"]
+# ------------------------------------------------------------- registry
+
+def test_filter_defaults_cover_the_whole_model():
+    assert set(FILTER_DEFAULTS) == set(SearchFilters.model_fields)
+
+
+def test_registry_covers_every_soft_filter_field():
+    soft = {"gender_split_min", "kid_friendly", "newcomer_friendly",
+            "outdoor", "energy", "language", "age"}
+    assert soft == set(ATTRIBUTES)

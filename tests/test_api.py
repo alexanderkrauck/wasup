@@ -143,6 +143,49 @@ def test_changes_keyset_cursor_walks_everything_once(client):
     assert len(seen) == len(set(seen)) == 5
 
 
+def test_query_endpoint_needs_no_llm_and_accepts_partial_filters(client):
+    resp = client.post("/v1/query", json={"categories": ["music"]})
+    assert resp.status_code == 200
+    data = resp.json()
+    titles = [o["title"] for o in data["occurrences"]]
+    assert "Nearby Concert" in titles
+    assert "No Category Thing" not in titles  # null category = unknown (hard)
+    assert all("match_score" in o for o in data["occurrences"])
+
+
+def test_query_endpoint_soft_preferences_keep_unknowns(client):
+    resp = client.post("/v1/query", json={
+        "kid_friendly": True, "importance": {"kid_friendly": 0.8},
+    })
+    assert resp.status_code == 200
+    # no event has kid_friendly data -> all stay visible, scored at the prior
+    assert len(resp.json()["occurrences"]) == 4
+
+
+def test_query_endpoint_rejects_garbage(client):
+    assert client.post("/v1/query", json={"nonsense_field": 1}).status_code == 422
+    assert client.post("/v1/query", json={"from_dt": "tomorrow"}).status_code == 422
+    assert client.post(
+        "/v1/query", json={"importance": {"not_an_attr": 1.0}}
+    ).status_code == 422
+    assert client.post(
+        "/v1/query", json={"importance": {"kid_friendly": 7}}
+    ).status_code == 422
+
+
+def test_discovery_surfaces_are_open_even_when_keys_exist(conn, client):
+    conn.execute("INSERT INTO api_key (key, name) VALUES ('sekrit', 't')")
+    conn.commit()
+    llms = client.get("/llms.txt")
+    assert llms.status_code == 200  # open by design, like /docs
+    assert "music" in llms.text  # taxonomy injected
+    assert "/v1/query" in llms.text
+    catalog = client.get("/.well-known/api-catalog")
+    assert catalog.status_code == 200
+    assert "openapi.json" in catalog.text
+    assert client.post("/v1/query", json={}).status_code == 401  # data stays keyed
+
+
 def test_staleness_decay_is_computed_at_query_time(conn):
     event_id = _add_event(conn, "Zombie Stammtisch", starts=NOW + timedelta(days=1))
     # confirmed a month ago, weekly cadence -> 0.9^4 ≈ 0.59 effective

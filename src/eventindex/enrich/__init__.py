@@ -50,12 +50,20 @@ class Enrichment(BaseModel):
     kid_friendly: _BoolEst
     newcomer_friendly: _BoolEst
     outdoor: _BoolEst
+    solo_friendly: _BoolEst
+    interaction_structure: Literal["none", "optional", "built_in"] | None
     energy: Literal["low", "medium", "high"] | None
     vibe_tags: list[str] = Field(description="3-6 short lowercase vibe words")
 
 
+# bump when the Enrichment schema gains fields: old cache rows lack them, so
+# a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
+SCHEMA_VERSION = 2
+
+
 def content_key(event: dict) -> str:
     parts = "|".join([
+        f"v{SCHEMA_VERSION}",
         event.get("title") or "", (event.get("description") or "")[:500],
         ",".join(event.get("category") or []), str(event.get("venue_name") or ""),
     ])
@@ -92,7 +100,13 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         f"{CONFIDENCE_CAP} ONLY with explicit textual evidence (quote it in "
         "evidence).\n"
         "gender_split: 0=all male .. 1=all female. newcomer_friendly: open to "
-        "strangers vs members-only circles.\n\n"
+        "strangers vs members-only circles. solo_friendly: normal to attend "
+        "alone (a run club: yes; a couples dance course: no). "
+        "interaction_structure: does the FORMAT make attendees interact - "
+        "'built_in' = rotation/teams/pair work forces it (Salsa mixer, pub "
+        "quiz with assigned teams, language tandem), 'optional' = easy but "
+        "not forced (Stammtisch, board game cafe), 'none' = you can stay "
+        "silent throughout (concert, cinema, lecture).\n\n"
         f"CATEGORY PRIOR: {prior}\n"
         f"TITLE: {event.get('title')}\n"
         f"DESCRIPTION: {(event.get('description') or '')[:1200]}\n"
@@ -150,7 +164,8 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
             "inferred": Jsonb({
                 k: attributes[k] for k in
                 ("language", "kid_friendly", "newcomer_friendly", "outdoor",
-                 "energy", "vibe_tags") if k in attributes
+                 "solo_friendly", "interaction_structure", "energy",
+                 "vibe_tags") if k in attributes
             }),
         },
     )

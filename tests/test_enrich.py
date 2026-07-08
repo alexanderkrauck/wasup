@@ -18,6 +18,8 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "kid_friendly": {"value": False, "confidence": 0.6, "evidence": "ab 18"},
         "newcomer_friendly": {"value": True, "confidence": 0.5, "evidence": None},
         "outdoor": {"value": None, "confidence": 0.0, "evidence": None},
+        "solo_friendly": {"value": True, "confidence": 0.4, "evidence": None},
+        "interaction_structure": "optional",
         "energy": "high",
         "vibe_tags": ["techno", "student", "loud"],
     })

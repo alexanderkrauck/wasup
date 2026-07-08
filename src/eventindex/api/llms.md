@@ -36,11 +36,15 @@ X" queries, e.g. `["lauf","run"]` for running; word-boundary-aware),
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,
-`newcomer_friendly`, `outdoor`, `energy` (low|medium|high), `language`
-(de|en). Optional `importance`: `{attribute: 0..1}` (default 1.0 each).
+`newcomer_friendly` (open to strangers vs members-only), `solo_friendly`
+(normal to attend alone), `interaction_structure` (built_in = the format
+FORCES interaction: rotation/teams/pair work; optional; none = silent
+attendance ok), `outdoor`, `energy` (low|medium|high), `language` (de|en).
+Optional `importance`: `{attribute: 0..1}` (default 1.0 each).
 Attribute names for `importance` and `required_attributes` are: `age` (note:
 one name for the age_min/age_max pair), `gender_split_min`, `kid_friendly`,
-`newcomer_friendly`, `outdoor`, `energy`, `language`.
+`newcomer_friendly`, `outdoor`, `solo_friendly`, `interaction_structure`,
+`energy`, `language`.
 
 Ranking combines **your importance x the stored certainty**, anchored at the
 coin flip: an event scores `0.5 + certainty/2` when it satisfies a
@@ -66,6 +70,21 @@ POST /v1/query
 ```
 
 Taxonomy for `categories`/`exclude_categories`: {categories}
+
+## Composition recipes (the power move)
+
+The stored attributes are deliberately neutral primitives; the interesting
+queries are COMPOSITIONS you build at query time. Examples:
+
+- "I'm alone and shy but want to meet people" -> `solo_friendly: true` +
+  `interaction_structure: "built_in"` + `newcomer_friendly: true` with high
+  importance on interaction_structure. The format does the socializing.
+- "meet women, going alone" -> the same, plus `gender_split_min: 0.5` with
+  high importance. Compose it privately for your user; the index never
+  labels anyone's event as a dating venue.
+- "where should business X show up / sponsor" -> filter the window, rank by
+  audience fit: age/gender/energy matching X's customers, weight by
+  `expected_attendance` and confidence from the per-event payloads.
 
 ## Other endpoints
 

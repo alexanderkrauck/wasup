@@ -38,7 +38,7 @@ ENUM_CONFIDENCE = 0.5  # energy/language are stored without their own confidence
 # below (pinned by test) - note "age" here vs age_min/age_max filter fields.
 SOFT_ATTRIBUTES = frozenset({
     "age", "gender_split_min", "kid_friendly", "newcomer_friendly",
-    "outdoor", "energy", "language",
+    "outdoor", "energy", "language", "solo_friendly", "interaction_structure",
 })
 
 
@@ -80,6 +80,14 @@ class SearchFilters(BaseModel):
     kid_friendly: bool | None
     newcomer_friendly: bool | None
     outdoor: bool | None
+    solo_friendly: bool | None = Field(
+        description="normal to attend alone; set true for 'bin allein' queries"
+    )
+    interaction_structure: Literal["none", "optional", "built_in"] | None = Field(
+        description="built_in = the format FORCES interaction (rotation, "
+        "teams, pair work) - set for shy/meet-people queries; optional = "
+        "easy to talk; none = silent attendance"
+    )
     energy: Literal["low", "medium", "high"] | None
     language: Literal["de", "en"] | None
     required_attributes: list[str] = Field(
@@ -113,7 +121,8 @@ FILTER_DEFAULTS: dict = {
     "age_min": None,
     "age_max": None, "gender_split_min": None, "max_price": None,
     "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
-    "outdoor": None, "energy": None, "language": None,
+    "outdoor": None, "solo_friendly": None, "interaction_structure": None,
+    "energy": None, "language": None,
     "required_attributes": [], "vibe_terms": [],
 }
 
@@ -175,6 +184,12 @@ ATTRIBUTES: dict[str, Attribute] = {
     "kid_friendly": _inferred_bool("kid_friendly"),
     "newcomer_friendly": _inferred_bool("newcomer_friendly"),
     "outdoor": _inferred_bool("outdoor"),
+    "solo_friendly": _inferred_bool("solo_friendly"),
+    "interaction_structure": Attribute(
+        kind="enum", value_sql="e.inferred->>'interaction_structure'",
+        conf_sql=str(ENUM_CONFIDENCE),
+        hard_sql="e.inferred->>'interaction_structure' = %({p})s",
+    ),
     "energy": Attribute(
         kind="enum", value_sql="e.inferred->>'energy'", conf_sql=str(ENUM_CONFIDENCE),
         hard_sql="e.inferred->>'energy' = %({p})s",
@@ -192,7 +207,8 @@ def _wanted(f: SearchFilters) -> dict:
     if f.age_min is not None and f.age_max is not None:
         wanted["age"] = (f.age_min, f.age_max)
     for name in ("gender_split_min", "kid_friendly", "newcomer_friendly",
-                 "outdoor", "energy", "language"):
+                 "outdoor", "solo_friendly", "interaction_structure",
+                 "energy", "language"):
         if (v := getattr(f, name)) is not None:
             wanted[name] = v
     return wanted

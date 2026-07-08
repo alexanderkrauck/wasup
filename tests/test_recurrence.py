@@ -127,3 +127,20 @@ def test_valid_from_accepts_datetime_strings():
     pairs = expand(rec, {"public_holidays": [], "school_holidays": []},
                    now=datetime(2026, 7, 8, tzinfo=timezone.utc))
     assert pairs and pairs[0][0].weekday() == 4  # Fridays, no crash
+
+
+def test_partial_dates_degrade_to_anchor_not_crash():
+    from datetime import datetime, timezone
+
+    from eventindex.resolve.recurrence import Recurrence, expand
+
+    rec = Recurrence(
+        freq="weekly", weekday="MO", week_of_month=None, interval=1,
+        time="19:00", duration_minutes=None, except_holidays=[],
+        valid_from="2026-04", valid_until="irgendwann",  # model garbage
+        as_stated="jeden Montag",
+    )
+    anchor = datetime(2026, 7, 6, 19, 0, tzinfo=timezone.utc)
+    pairs = expand(rec, {"public_holidays": [], "school_holidays": []},
+                   now=datetime(2026, 7, 8, tzinfo=timezone.utc), anchor=anchor)
+    assert pairs and all(p[0].weekday() == 0 for p in pairs)  # Mondays

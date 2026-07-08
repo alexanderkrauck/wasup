@@ -58,14 +58,20 @@ def _in_holiday(d: date, ranges: list[tuple[date, date]]) -> bool:
     return any(a <= d <= b for a, b in ranges)
 
 
-def _parse_date(value: str) -> date:
-    """The schema asks for an ISO date, but models occasionally hand back a
-    full datetime ('2026-07-03T08:00:00') - and cached values persist, so a
-    strict parse would crash every future rebuild. Accept both."""
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return datetime.fromisoformat(value).date()
+def _parse_date(value: str | None) -> date | None:
+    """The schema asks for an ISO date, but models hand back datetimes
+    ('2026-07-03T08:00:00') or partial dates ('2026-04') - and cached values
+    persist, so a strict parse would crash every future rebuild. Accept
+    date/datetime; degrade anything else to None (callers fall back to the
+    anchor / no bound)."""
+    if not value:
+        return None
+    for parse in (date.fromisoformat, lambda v: datetime.fromisoformat(v).date()):
+        try:
+            return parse(value)
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_time(value: str | None) -> time_t:
@@ -110,13 +116,12 @@ def expand(
     horizon = now + timedelta(weeks=EXPANSION_WEEKS)
     at = _parse_time(rec.time)
 
-    if rec.valid_from:
-        valid_from = _parse_date(rec.valid_from)
-    elif anchor is not None:
+    valid_from = _parse_date(rec.valid_from)
+    if valid_from is None and anchor is not None:
         valid_from = anchor.astimezone(VIENNA).date()
-    else:
+    if valid_from is None:
         valid_from = now.date()
-    valid_until = _parse_date(rec.valid_until) if rec.valid_until else None
+    valid_until = _parse_date(rec.valid_until)
 
     if rec.freq == "irregular":
         return []

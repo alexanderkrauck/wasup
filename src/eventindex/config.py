@@ -30,13 +30,18 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # sites and was deleted - re-add if tier-D crawls ever unfence.
 # When the PDF/flyer trigger fires: kimi (mid) already sees images;
 # qwen/qwen3.6-flash ($0.19/$1.13, multimodal) is the vision-mini candidate.
+# 2026-07-08 re-check: mini is the consensus cheapest-capable model, keep.
+# Mid swapped kimi-k2.7-code ($0.74/$3.50) -> minimax-m3 ($0.30/$1.20):
+# ~2.5-3x cheaper on the dominant onboarding spend, strong agentic scores,
+# multimodal (keeps the PDF/vision option). Kimi is the fallback if the
+# recipe-success rate in the digest degrades.
 MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx, text-only
-MODEL_MID = "moonshotai/kimi-k2.7-code"     # $0.74/$3.50, agentic+code, text+image
+MODEL_MID = "minimax/minimax-m3"            # $0.30/$1.20, 1M ctx, text+image+video
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 
 # Budgets (DECISIONS.md: enforced in code from day one)
-GLOBAL_DAILY_LLM_CAP_EUR = 10.0  # raised from 5.0 (Alexander, 2026-07-06)
+GLOBAL_DAILY_LLM_CAP_EUR = 15.0  # 5->10 (2026-07-06), 10->15 (2026-07-08): onboarding backlog
 MONTHLY_BUDGET_EUR_BY_TIER = {1: 2.0, 2: 1.0, 3: 1.0, 4: 3.0}
 # Fallback when OpenRouter omits cost in the response: deliberately pessimistic.
 FALLBACK_EUR_PER_1K_TOKENS = 0.005

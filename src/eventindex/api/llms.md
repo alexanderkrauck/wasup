@@ -29,8 +29,10 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 Auth: header `X-API-Key` or query param `api_key`.
 
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna),
-`categories`, `exclude_categories`, `exclude_terms`, `max_price`, `is_free`,
-`required_attributes`.
+`categories`, `exclude_categories`, `exclude_terms`, `include_terms`
+(synonym set, at least ONE must appear in title/tags - use for "specifically
+X" queries, e.g. `["lauf","run"]` for running; word-boundary-aware),
+`max_price`, `is_free`, `required_attributes`.
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,

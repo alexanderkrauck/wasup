@@ -87,6 +87,18 @@ def test_exclude_terms_do_not_drop_unenriched_events(conn):
     assert "Techno Nacht" not in titles
 
 
+def test_include_terms_require_one_synonym_word_boundary_aware(conn):
+    _add(conn, "HWYD Social Run")
+    _add(conn, "FUN-Orientierungslauf Solar City")   # compound suffix: match
+    _add(conn, "Führung: Max Pechstein")             # 'run' inside: NO match
+    _add(conn, "Salsa Night", vibe=["running"])      # tag match
+    conn.commit()
+    titles = _run(conn, _filters(include_terms=["lauf", "run", "running"]))
+    assert "Führung: Max Pechstein" not in titles
+    assert set(titles) == {"HWYD Social Run", "FUN-Orientierungslauf Solar City",
+                           "Salsa Night"}
+
+
 def test_window_strings_validated_and_vienna_pinned():
     f = _filters(from_dt="2026-07-08T17:00", to_dt="2026-07-08T23:59")
     assert f.from_dt.endswith("+02:00")  # naive LLM output -> Europe/Vienna
@@ -176,6 +188,24 @@ def test_age_overlap_soft_scoring():
     assert preference_score(inside, f) == 0.8    # 0.5 + 0.6/2
     assert abs(preference_score(outside, f) - 0.2) < 1e-9
     assert preference_score(unknown, f) == UNKNOWN_PRIOR
+
+
+def test_vibe_terms_match_compounds_not_substrings():
+    f = _filters(vibe_terms=["run", "lauf"])
+    rows = [
+        {"title": "Führung: Max Pechstein", "vibe_tags": [], "category": [],
+         "confidence": 0.9},
+        {"title": "FUN-Orientierungslauf Solar City", "vibe_tags": [],
+         "category": [], "confidence": 0.9},
+        {"title": "HWYD Social Run", "vibe_tags": [], "category": [],
+         "confidence": 0.9},
+    ]
+    ranked = rank(rows, f)
+    # "run" inside "Führung" is not a hit; compound suffix "lauf" is
+    assert {r["title"] for r in ranked[:2]} == {
+        "HWYD Social Run", "FUN-Orientierungslauf Solar City",
+    }
+    assert ranked[-1]["title"].startswith("Führung")
 
 
 def test_vibe_terms_rank_but_never_exclude():

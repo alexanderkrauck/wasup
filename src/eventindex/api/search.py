@@ -63,6 +63,12 @@ class SearchFilters(BaseModel):
     categories: list[str] | None = Field(description="wanted categories from the taxonomy, null = any")
     exclude_categories: list[str] = Field(description="categories the user does NOT want - hard guarantee")
     exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags - hard guarantee")
+    include_terms: list[str] = Field(
+        description="synonym set of which at least ONE must appear in "
+        "title/tags (word-prefix/suffix match) - hard filter for 'I want "
+        "specifically X' queries, e.g. ['lauf','run'] for running; keep "
+        "empty for broad/mood queries"
+    )
     age_min: int | None
     age_max: int | None
     gender_split_min: float | None = Field(
@@ -103,7 +109,8 @@ class SearchFilters(BaseModel):
 # partial bodies; these defaults fill the gaps.
 FILTER_DEFAULTS: dict = {
     "from_dt": None, "to_dt": None, "categories": None,
-    "exclude_categories": [], "exclude_terms": [], "age_min": None,
+    "exclude_categories": [], "exclude_terms": [], "include_terms": [],
+    "age_min": None,
     "age_max": None, "gender_split_min": None, "max_price": None,
     "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
     "outdoor": None, "energy": None, "language": None,
@@ -219,7 +226,10 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         'abend" = tomorrow 17:00-23:59; "am wochenende" = next Sat 00:00 - Sun '
         "23:59. No time mentioned = from now, no end.\n"
         "Only set a filter the query actually implies; everything else null/empty. "
-        "Negations (nicht/kein/ohne X) go to exclude_*.\n"
+        "Negations (nicht/kein/ohne X) go to exclude_*. When the user wants "
+        "a SPECIFIC activity/thing, put its German+English synonyms in "
+        "include_terms (['lauf','run'] for running); mood/vibe words go to "
+        "vibe_terms instead.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
         "when the user is emphatic ('unbedingt', 'muss', 'nur wenn').\n\n"
@@ -258,6 +268,23 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
         )
         params[key] = f"%{term}%"
         params[key + "raw"] = term
+    if f.include_terms:
+        # at least one synonym must appear: word-prefix (\mterm) or compound
+        # suffix (term\M) in the title, or as an exact vibe tag. Same
+        # boundary semantics as the ranker: "run" != "Führung",
+        # "lauf" == "Orientierungslauf"
+        import re as _re
+
+        alts = []
+        for i, term in enumerate(f.include_terms):
+            key = f"inc_term_{i}"
+            alts.append(
+                f"e.title ~* %({key})s "
+                f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false)"
+            )
+            params[key] = rf"\m{_re.escape(term)}|{_re.escape(term)}\M"
+            params[key + "raw"] = term
+        conditions.append("(" + " OR ".join(alts) + ")")
     if f.is_free:
         conditions.append("e.price_min = 0")
     elif f.max_price is not None:
@@ -329,15 +356,21 @@ def rank(rows: list[dict], f: SearchFilters,
     happened in SQL."""
     terms = [t.lower() for t in f.vibe_terms]
 
+    def hit(term: str, tokens: list[str]) -> bool:
+        # token prefix/suffix, not substring: "lauf" must match
+        # "orientierungslauf" (German compounds) but "run" must NOT match
+        # "führung"/"stadtrundfahrten"
+        return any(t.startswith(term) or t.endswith(term) for t in tokens)
+
     def score(row) -> float:
         s = preference_score(row, f, importance) * (row["confidence"] or 0.0)
         if terms:
-            haystack = " ".join([
+            tokens = " ".join([
                 (row["title"] or "").lower(),
                 " ".join(row.get("vibe_tags") or []),
                 " ".join(row.get("category") or []),
-            ])
-            hits = sum(1 for t in terms if t in haystack)
+            ]).split()
+            hits = sum(1 for t in terms if hit(t, tokens))
             s *= 0.5 + hits / len(terms)
         row["match_score"] = round(s, 4)  # exposed: consumers see the weighting
         return s

@@ -254,9 +254,12 @@ def _run_filters(filters, limit: int,
 
     with db.connect() as conn:
         where, params = build_sql(filters)
-        # soft preferences reorder, so the candidate pool must be wider than
-        # the page - at Linz scale a whole window fits comfortably
-        params["limit"] = max(limit * 3, 300)
+        # soft preferences reorder, so the pool must cover the WHOLE window -
+        # a small pool ordered by starts_at would only ever score the first
+        # days (bit us live: a 14-day running query missed day-3 events). At
+        # Linz scale a full window fits; the flag below keeps us honest.
+        pool = 2000
+        params["limit"] = pool + 1
         rows = conn.execute(
             f"""
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
@@ -275,12 +278,18 @@ def _run_filters(filters, limit: int,
             params,
         ).fetchall()
         freshness = _data_freshness(conn)
+    truncated = len(rows) > pool
+    rows = rows[:pool]
     for r in rows:
         r["age_range"] = str(r["age_range"]) if r["age_range"] else None
     return {
         "data_freshness": freshness,
         "parsed_filters": filters.model_dump(),
         "importance": importance or {},
+        # true = the window holds more rows than the ranking pool; results
+        # beyond the first `pool` by start time were not scored - narrow the
+        # window or add hard filters
+        "pool_truncated": truncated,
         "occurrences": rank(rows, filters, importance)[:limit],
     }
 

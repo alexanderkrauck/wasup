@@ -106,9 +106,11 @@ def test_hard_filters_never_leak(query, expects_exclusion):
             assert float(occ["price_min"]) <= f["max_price"], (
                 f"{query!r}: {occ['title']!r} over price cap"
             )
+        # parsed_filters are validator-normalized to tz-aware ISO strings;
+        # a naive one slipping through here IS the bug, so no guard clause
         starts = _dt(occ["starts_at"])
         window_from, window_to = _dt(f["from_dt"]), _dt(f["to_dt"])
-        if starts and window_from and starts.tzinfo and window_from.tzinfo:
+        if starts and window_from:
             assert starts >= window_from, f"{query!r}: {occ['title']!r} before window"
-        if starts and window_to and starts.tzinfo and window_to.tzinfo:
+        if starts and window_to:
             assert starts <= window_to, f"{query!r}: {occ['title']!r} after window"

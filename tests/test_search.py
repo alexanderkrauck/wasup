@@ -5,6 +5,9 @@ testable deterministic core."""
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from pydantic import ValidationError
+
 from eventindex.api.search import SearchFilters, build_sql, rank
 
 NOW = datetime.now(timezone.utc)
@@ -66,6 +69,25 @@ def test_exclusions_are_leakproof(conn):
     titles = _run(conn, _filters(exclude_terms=["techno"]))
     assert "Techno Rave" not in titles
     assert "Jazz Brunch" in titles
+
+
+def test_exclude_terms_do_not_drop_unenriched_events(conn):
+    # inferred IS NULL must mean "judge by title", never "hide the event"
+    _add(conn, "Sommerfest im Park")  # no inferred at all
+    _add(conn, "Techno Nacht")
+    conn.commit()
+    titles = _run(conn, _filters(exclude_terms=["techno"]))
+    assert "Sommerfest im Park" in titles
+    assert "Techno Nacht" not in titles
+
+
+def test_window_strings_validated_and_vienna_pinned():
+    f = _filters(from_dt="2026-07-08T17:00", to_dt="2026-07-08T23:59")
+    assert f.from_dt.endswith("+02:00")  # naive LLM output -> Europe/Vienna
+    _, params = build_sql(f)
+    assert params["from"].tzinfo is not None  # SQL sees a datetime, not text
+    with pytest.raises(ValidationError):
+        _filters(from_dt="morgen abend")  # non-ISO never reaches the DB
 
 
 def test_age_filter_never_matches_unknown(conn):

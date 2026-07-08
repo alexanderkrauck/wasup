@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from eventindex import config, llm
 
@@ -19,6 +19,19 @@ class SearchFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
     from_dt: str | None = Field(description="ISO datetime, start of wanted window")
     to_dt: str | None = Field(description="ISO datetime, end of wanted window")
+
+    @field_validator("from_dt", "to_dt")
+    @classmethod
+    def _valid_window(cls, v: str | None) -> str | None:
+        """LLM output must not reach SQL unvalidated: parse, and pin naive
+        datetimes to Vienna (the model thinks in local time; the session
+        timezone must never decide what 'heute abend' means)."""
+        if v is None:
+            return None
+        dt = datetime.fromisoformat(v)  # ValueError -> llm.complete retries
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=VIENNA)
+        return dt.isoformat()
     categories: list[str] | None = Field(description="wanted categories from the taxonomy, null = any")
     exclude_categories: list[str] = Field(description="categories the user does NOT want - hard guarantee")
     exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags - hard guarantee")
@@ -63,10 +76,12 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
     conditions = ["o.status = 'scheduled'"]
     params: dict = {}
     conditions.append("o.starts_at >= %(from)s")
-    params["from"] = f.from_dt or datetime.now(VIENNA)
+    params["from"] = (
+        datetime.fromisoformat(f.from_dt) if f.from_dt else datetime.now(VIENNA)
+    )
     if f.to_dt:
         conditions.append("o.starts_at <= %(to)s")
-        params["to"] = f.to_dt
+        params["to"] = datetime.fromisoformat(f.to_dt)
     if f.categories:
         conditions.append("e.category && %(cats)s")
         params["cats"] = f.categories
@@ -75,9 +90,11 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
         params["not_cats"] = f.exclude_categories
     for i, term in enumerate(f.exclude_terms):
         key = f"not_term_{i}"
+        # coalesce: an unenriched event (inferred IS NULL) must be judged by
+        # its title alone, not NULL-poisoned out of every negation query
         conditions.append(
             f"NOT (e.title ILIKE %({key})s "
-            f"OR e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text))"
+            f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false))"
         )
         params[key] = f"%{term}%"
         params[key + "raw"] = term

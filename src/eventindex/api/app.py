@@ -217,8 +217,7 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
     from eventindex.api.search import build_sql, parse_query, rank
 
     with db.connect() as conn:
-        filters = parse_query(conn, q)
-        conn.commit()  # the parse's budget ledger entry
+        filters = parse_query(conn, q)  # spend is ledgered on its own connection
         where, params = build_sql(filters)
         params["limit"] = limit * 3  # fetch extra, rank, cut
         rows = conn.execute(

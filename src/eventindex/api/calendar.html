@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wasup — was geht in Linz</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 2rem auto; max-width: 58rem; padding: 0 1rem; color: #111; }
+  h1 { margin-bottom: .2rem; }
+  .sub { color: #666; margin-top: 0; }
+  .controls { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center;
+              margin: 1.2rem 0; }
+  .controls input, .controls select, .controls button { font-size: 1rem;
+              padding: .35rem .6rem; }
+  h2 { border-bottom: 2px solid #111; padding-bottom: .2rem; margin: 2rem 0 .4rem; }
+  .occ { padding: .45rem 0; border-bottom: 1px solid #eee; display: flex;
+         gap: .9rem; align-items: baseline; }
+  .time { font-weight: 600; white-space: nowrap; min-width: 7rem; }
+  .title { color: #1a5bb0; }
+  .meta { color: #666; font-size: .9rem; }
+  .flag { background: #fdd; padding: 0 .35rem; border-radius: 3px;
+          font-size: .8rem; margin-left: .4rem; }
+  .flag.proj { background: #ffe9c4; }
+  #status { color: #666; }
+  footer { margin: 2.5rem 0 1rem; color: #666; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Wasup</h1>
+<p class="sub">Alle öffentlichen Veranstaltungen in und um Linz — roh, chronologisch,
+direkt aus dem Index. Für KI-Assistenten: <a href="/llms.txt">/llms.txt</a></p>
+
+<div class="controls">
+  <label>ab <input type="date" id="from"></label>
+  <select id="category"><option value="">alle Kategorien</option></select>
+  <button id="reload">Anzeigen</button>
+  <span id="status"></span>
+</div>
+
+<div id="list"></div>
+
+<div class="controls">
+  <button id="prev" disabled>&larr; Zurück</button>
+  <span id="page"></span>
+  <button id="next" disabled>Weiter &rarr;</button>
+</div>
+
+<footer>
+  <span id="freshness"></span> ·
+  <a href="/privacy">Datenschutz</a> ·
+  <a href="/llms.txt">API für Agenten</a> ·
+  Konfidenz und „projiziert" sind ehrlich: der Index behauptet nichts,
+  was er nicht belegen kann.
+</footer>
+
+<template id="occ-t">
+  <div class="occ">
+    <div class="time"></div>
+    <div>
+      <a class="title" target="_blank" rel="noopener"></a>
+      <span class="flags"></span>
+      <div class="meta"></div>
+    </div>
+  </div>
+</template>
+
+<script>
+"use strict";
+const CATEGORIES = {categories_json};
+const PAGE_SIZE = 100;
+const $ = id => document.getElementById(id);
+const dayFmt = new Intl.DateTimeFormat("de-AT",
+  { weekday: "long", day: "numeric", month: "long", year: "numeric",
+    timeZone: "Europe/Vienna" });
+const timeFmt = new Intl.DateTimeFormat("de-AT",
+  { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Vienna" });
+
+let cursorStack = [];   // cursors of previous pages ([] = page 1)
+let currentCursor = null;
+let nextCursor = null;
+
+for (const c of CATEGORIES) {
+  const o = document.createElement("option");
+  o.value = c; o.textContent = c;
+  $("category").appendChild(o);
+}
+$("from").value = new Date().toISOString().slice(0, 10);
+
+function price(min, max) {
+  if (min === 0 && (max === 0 || max === null)) return "gratis";
+  if (min === null && max === null) return null;
+  const f = v => v === null ? "?" : String(v).replace(".", ",");
+  return min !== null && max !== null && min !== max
+    ? `€ ${f(min)}–${f(max)}` : `€ ${f(min !== null ? min : max)}`;
+}
+
+function flag(text, cls) {
+  const s = document.createElement("span");
+  s.className = "flag" + (cls ? " " + cls : "");
+  s.textContent = text;
+  return s;
+}
+
+function render(occurrences) {
+  const list = $("list");
+  list.replaceChildren();
+  let day = null;
+  for (const o of occurrences) {
+    const start = new Date(o.starts_at);
+    const d = dayFmt.format(start);
+    if (d !== day) {
+      day = d;
+      const h = document.createElement("h2");
+      h.textContent = d;
+      list.appendChild(h);
+    }
+    const node = $("occ-t").content.cloneNode(true);
+    node.querySelector(".time").textContent = timeFmt.format(start)
+      + (o.ends_at ? "–" + timeFmt.format(new Date(o.ends_at)) : "");
+    const a = node.querySelector(".title");
+    a.textContent = o.title;
+    if (o.url) a.href = o.url; else a.removeAttribute("target");
+    const flags = node.querySelector(".flags");
+    if (o.projected) flags.appendChild(flag("projiziert", "proj"));
+    if (o.status && o.status !== "scheduled") flags.appendChild(flag(o.status));
+    const meta = [
+      o.venue_name, o.venue_address,
+      (o.category || []).join(", "),
+      price(o.price_min, o.price_max),
+      o.confidence !== null
+        ? "Konfidenz " + Math.round(o.confidence * 100) + " %" : null,
+    ].filter(Boolean).join(" · ");
+    node.querySelector(".meta").textContent = meta;
+    list.appendChild(node);
+  }
+  if (!occurrences.length) {
+    const p = document.createElement("p");
+    p.textContent = "Keine Veranstaltungen für diese Auswahl.";
+    list.appendChild(p);
+  }
+}
+
+async function load() {
+  $("status").textContent = "lädt …";
+  const params = new URLSearchParams({ limit: PAGE_SIZE });
+  if ($("from").value) params.set("from", $("from").value);
+  if ($("category").value) params.set("category", $("category").value);
+  if (currentCursor) params.set("cursor", currentCursor);
+  try {
+    const res = await fetch("/v1/occurrences?" + params);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const body = await res.json();
+    render(body.occurrences);
+    nextCursor = body.next_cursor;
+    $("next").disabled = !nextCursor;
+    $("prev").disabled = cursorStack.length === 0;
+    $("page").textContent = "Seite " + (cursorStack.length + 1);
+    $("status").textContent = "";
+    if (body.data_freshness)
+      $("freshness").textContent = "Stand: " + new Date(body.data_freshness)
+        .toLocaleString("de-AT", { timeZone: "Europe/Vienna" });
+    window.scrollTo(0, 0);
+  } catch (e) {
+    $("status").textContent = "Fehler: " + e.message;
+  }
+}
+
+function reset() { cursorStack = []; currentCursor = null; load(); }
+
+$("reload").addEventListener("click", reset);
+$("from").addEventListener("change", reset);
+$("category").addEventListener("change", reset);
+$("next").addEventListener("click", () => {
+  cursorStack.push(currentCursor); currentCursor = nextCursor; load();
+});
+$("prev").addEventListener("click", () => {
+  currentCursor = cursorStack.pop() ?? null; load();
+});
+
+load();
+</script>
+</body>
+</html>

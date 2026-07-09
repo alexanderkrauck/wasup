@@ -9,6 +9,7 @@ Bootstrap rule: while the api_key table has no active row, the API is open.
 Run: uv run uvicorn eventindex.api.app:app
 """
 
+import json
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -44,8 +45,9 @@ _EFFECTIVE_CONFIDENCE_SQL = """
 
 
 # discovery surfaces stay open like /docs: they carry no data, only the
-# instructions an agent needs before it has a key
-_OPEN_PATHS = {"/llms.txt", "/.well-known/api-catalog", "/privacy"}
+# instructions an agent needs before it has a key ("/" is the plain human
+# calendar page; the data it fetches goes through the rate-limited reads)
+_OPEN_PATHS = {"/", "/llms.txt", "/.well-known/api-catalog", "/privacy"}
 
 # read-only surfaces are keyless (public data, zero LLM cost - /v1/query is
 # pure Postgres by design) but rate-limited per IP. /v1/search stays keyed
@@ -165,6 +167,17 @@ def llms_txt():
         # text/plain per the llms.txt convention: some agent fetchers return
         # empty bodies for text/markdown (found by the first consumer)
         media_type="text/plain; charset=utf-8",
+    )
+
+
+@app.get("/", include_in_schema=False)
+def calendar_page():
+    """One plain HTML calendar view over the public read API (frontend scope
+    fence lifted for exactly this page by Alexander, 2026-07-09)."""
+    html = (Path(__file__).parent / "calendar.html").read_text()
+    return Response(
+        html.replace("{categories_json}", json.dumps(config.CATEGORIES)),
+        media_type="text/html; charset=utf-8",
     )
 
 

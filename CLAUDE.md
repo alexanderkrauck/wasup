@@ -52,7 +52,7 @@ Explicitly FORBIDDEN in v1, even as stubs, interfaces, or "preparation" (HURDLES
 - tier-D agentic crawls
 - ~~demographics/gender/fullness *inference*~~ — re-entry trigger FIRED 2026-07-06 (Alexander: agent search needs rich inferred attributes). In scope per H5: priors + explicit-text-evidence only, confidence-capped, labeled estimates.
 - takedown self-service endpoint (manual email suffices; the suppression heuristics of §9b ARE in scope)
-- any frontend
+- ~~any frontend~~ — re-entry trigger FIRED 2026-07-09 (Alexander: visualization page). In scope: exactly one dependency-free HTML calendar page over the public read API (`GET /`). Still forbidden: frameworks, SPA, build step, any second page without a new trigger.
 - multi-city support (no `city_id` columns "for later" - the design is city-agnostic by nature of the source registry; that is enough)
 
 Building any of these early = the exact tech-debt failure mode this file exists to prevent.

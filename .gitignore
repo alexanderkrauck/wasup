@@ -14,3 +14,4 @@ nohup.out
 *.log
 .DS_Store
 .claude/
+scripts/coverage_chart.py

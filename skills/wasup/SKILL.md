@@ -1,9 +1,9 @@
 ---
-name: eventindex
-description: Query the Linz Event Index (every public event in/around Linz) for what's on - use when the user asks what to do in Linz, event recommendations, or anything date/venue/audience-specific in the Linz area.
+name: wasup
+description: Query Wasup (wasup.at), the Linz event index (every public event in/around Linz), for what's on - use when the user asks what to do in Linz, event recommendations, or anything date/venue/audience-specific in the Linz area.
 ---
 
-# Querying the Linz Event Index
+# Querying Wasup — the Linz Event Index
 
 Base URL: https://wasup.goedly.com — reads need NO key (rate-limited
 60/min); an `X-API-Key` header lifts the limit and unlocks /v1/search and

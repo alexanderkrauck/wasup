@@ -7,9 +7,9 @@ one small VPS, systemd services, Postgres on the same box, no docker needed.
 
 ## 0. Decisions Alexander must make (blockers)
 
-- **Domain** (OPEN-QUESTIONS #7). Needed for TLS, .ics subscriptions, the
-  ChatGPT app, and every pitch deck. Suggestion tier: `linzevents.at` /
-  `eventindex.at` / a brandable name if multicity is the ambition.
+- **Domain** (OPEN-QUESTIONS #7) — decided: `wasup.at`, product name
+  "Wasup" (DECISIONS 2026-07-09; registration/A records Alexander's side).
+  Needed for TLS, .ics subscriptions, the ChatGPT app, and every pitch deck.
 - **Git remote** (OPEN-QUESTIONS #6 deferred it): deploys want `git pull`.
   Private GitHub repo is the boring default.
 

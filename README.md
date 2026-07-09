@@ -1,4 +1,4 @@
-# Linz Event Index
+# Wasup — Linz Event Index
 
 **An AI-native index of every public event in Linz, Austria** — from the
 Brucknerhaus concert down to the gym spinning class that exists only on the
@@ -64,7 +64,7 @@ Also: `GET /v1/occurrences` (raw listing), `GET /v1/events/{id}` (full
 provenance), `GET /v1/feed.ics` (any filter combo as a calendar
 subscription), `GET /v1/changes` (delta stream), `POST /v1/reports`
 (feedback feeds source trust). A drop-in Claude skill lives in
-`skills/eventindex/`.
+`skills/wasup/`.
 
 ## Architecture (one paragraph)
 

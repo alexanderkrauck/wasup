@@ -4,14 +4,13 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
-13. **Ticketmaster Discovery API key** (Phase A, 2026-07-09) - free developer key at developer.ticketmaster.com, gives structured AT inventory (prices, images). Modest Linz yield expected (oeticket/Eventim dominates Austria and has NO public API + an Akamai bot-wall we won't fight). Create key y/n?
-14. **Bandsintown partner app_id** (Phase A, 2026-07-09) - their events-by-location API needs an approved partner request (form, free, days-to-weeks). Catches artist-announced gigs venues never publish. Submit request y/n?
-    *(Researched and dropped from Phase A: Eventbrite API - public search endpoint removed 2020, API now only serves your-own-organizer events, our site crawl already yields; Songkick API - closed to new applicants; ra.co - bot-walled, no public API, nightlife coverage falls to Phase B/Instagram instead.)*
-
 9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
 11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
 
 ## Answered
+
+13. **Ticketmaster Discovery API key** → **no** (Alexander, 2026-07-09): Austria is Eventim country, Linz inventory thin; prices/images come from booking-schema extraction (backlog #8) instead. *(2026-07-09)*
+14. **Bandsintown partner app_id** → **no** ("fuck em", Alexander, 2026-07-09): artist-gig long tail for Linz is tiny, music already the strongest category. Phase A closed: tips.at + meinbezirk aggregators onboarded and crawling; Eventbrite/Meetup were already crawled; ra.co/Bandsintown/Songkick bot-walled (no evasion arms race), Eventbrite API dead for public search since 2020, Songkick API closed. *(2026-07-09)*
 
 7. **Domain name** -> **wasup.at**, product name "Wasup" (Alexander, 2026-07-09). Registration + A records his side; TLS/key-rotation/branding pass on DNS. *(2026-07-09)*
 

@@ -334,3 +334,36 @@ def test_recurrence_claim_expands_and_skips_summer_holidays(conn):
     days = [o["starts_at"].astimezone(timezone.utc).date().isoformat() for o in occs]
     assert "2026-09-08" not in days  # Sommerferien until Sep 13
     assert any(d == "2026-09-15" for d in days)
+
+
+def test_text_recurrence_verified_at_birth(conn, monkeypatch):
+    """A text-extracted rule the verifier rejects (wrong weekday) must never
+    become a series - the claim stays a one-off and the rejection is cached."""
+    import hashlib
+
+    from eventindex.resolve.recurrence import Recurrence
+
+    bad_rec = Recurrence(
+        freq="weekly", weekday="MO", week_of_month=None, interval=1,
+        time="18:00", duration_minutes=None, except_holidays=[],
+        valid_from=None, valid_until=None, as_stated="jeden Mittwoch 18:00",
+    )
+    monkeypatch.setattr(rb.llm, "complete", lambda *a, **k: bad_rec)
+    monkeypatch.setattr(recurrence, "verify", lambda *a, **k: False)  # net says no
+
+    sid = _source(conn, "runclub", 0.8)
+    desc = "Tempo-Einheit, jeden Mittwoch 18:00 am OK Platz"
+    _claim(conn, sid, _concert("Wednesday Tempo",
+                               starts="2026-07-08T18:00:00+02:00",
+                               venue="OK Platz", description=(desc, 0.9)),
+           "wednesday tempo|2026-07-08|x")
+    rb.rebuild(conn, now=NOW)
+
+    events, occs = _canon(conn)
+    assert events[0]["kind"] == "one_off"  # not a wrong-weekday series
+    assert len(occs) == 1                  # observed date only
+    key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    cached = conn.execute(
+        "SELECT recurrence FROM text_recurrence WHERE content_key = %s", (key,)
+    ).fetchone()
+    assert cached is not None and cached["recurrence"] is None  # rejected for good

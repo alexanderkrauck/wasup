@@ -249,6 +249,21 @@ def _text_recurrence(tx, c: Claim) -> Recurrence | None:
         return None  # not cached: transient failures may retry next rebuild
     if rec.freq in ("once", "irregular"):
         rec = None
+    if rec is not None:
+        # verify AT BIRTH: an inconsistent rule (live case: 'Wednesday Tempo'
+        # extracted as weekday=MO) must never enter grouping - a wrong-weekday
+        # series served 'tentative' is worse than the observed dates alone
+        holidays = recurrence.load_holidays(tx)
+        pairs = recurrence.expand(rec, holidays, anchor=c.starts_at)
+        try:
+            ok = recurrence.verify(tx, rec, [p[0] for p in pairs],
+                                   source_id=c.source_id)
+        except BudgetExceeded:
+            raise
+        except Exception:
+            return None  # unverifiable now: retry next rebuild, cache nothing
+        if not ok:
+            rec = None  # cached as null: rejected for good
     _cache_text_recurrence(content_key, rec)
     return rec
 

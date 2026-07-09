@@ -776,7 +776,13 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     "kind": "series" if is_series else "one_off",
                     "title": values.get("title", ""),
                     "description": values.get("description"),
-                    "category": [values["category"]] if values.get("category") else [],
+                    # taxonomy gate: deterministic extractors pass source-
+                    # native categories through ("Allgemein", "Schnellschach")
+                    # - canon publishes taxonomy values or unknown, never junk
+                    "category": (
+                        [c] if (c := str(values.get("category") or "").strip().lower())
+                        in config.CATEGORIES else []
+                    ),
                     "venue_id": rep.venue_id,
                     "lat": lat, "lon": lon,
                     "is_recurring": is_series,

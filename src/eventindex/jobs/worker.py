@@ -147,10 +147,17 @@ def main() -> None:
     args = parser.parse_args()
 
     with db.connect() as conn:
-        stale = requeue_stale(conn)
-        if stale:
-            log.warning("requeued %d stale running jobs", stale)
+        last_stale_check = 0.0
         while True:
+            # periodically, not just at startup: a job orphaned by a restart
+            # that happens < JOB_STALE_RUNNING_S after it started would
+            # otherwise stay 'running' for the whole life of this process
+            # (bit us live: a resolve job zombied for 19h, 2026-07-09)
+            if time.monotonic() - last_stale_check > 600:
+                last_stale_check = time.monotonic()
+                stale = requeue_stale(conn)
+                if stale:
+                    log.warning("requeued %d stale running jobs", stale)
             job = claim_next(conn)
             if job is not None:
                 run_job(conn, job)

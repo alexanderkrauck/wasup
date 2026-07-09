@@ -381,3 +381,20 @@ def test_source_fallback_geo_is_never_published(conn):
         "SELECT geo IS NULL AS no_geo FROM event WHERE title = 'Geheimnisvolle Lesung'"
     ).fetchone()
     assert row["no_geo"]  # unknown stays unknown, not the source's point
+
+
+def test_source_native_categories_never_reach_canon(conn):
+    """Deterministic extractors pass raw source categories through
+    ("Allgemein", "Schnellschach, Offen / Open" - found live 2026-07-09);
+    canon publishes taxonomy values or unknown, never junk."""
+    sid = _source(conn, "s1", 0.8)
+    _claim(conn, sid, _concert("Schachturnier", category=("Schnellschach, Offen / Open", 0.9)),
+           "schachturnier|2026-07-20|a")
+    _claim(conn, sid, _concert("Konzert", category=("Music", 0.9)),
+           "konzert|2026-07-20|b")
+    rb.rebuild(conn, now=NOW)
+    rows = {r["title"]: r["category"] for r in conn.execute(
+        "SELECT title, category FROM event"
+    ).fetchall()}
+    assert rows["Schachturnier"] == []      # junk -> unknown, not published
+    assert rows["Konzert"] == ["music"]     # case-normalized taxonomy value

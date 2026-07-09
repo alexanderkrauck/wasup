@@ -114,3 +114,7 @@ queries are COMPOSITIONS you build at query time. Examples:
 - `POST /v1/reports` `{occurrence_id, reason: wrong|cancelled|duplicate, note}` - flag bad data; feeds source trust.
 - `GET /v1/search?q=...` - natural-language convenience endpoint (the index
   parses it with its own LLM budget; agents should prefer POST /v1/query).
+- `POST /mcp` - MCP server (streamable HTTP, stateless, no auth): the same
+  read surface as tools (search_events, get_event, get_calendar_link,
+  search, fetch) for MCP clients - ChatGPT apps/connectors, Claude
+  connectors. Point your client at https://wasup.goedly.com/mcp

@@ -44,6 +44,9 @@ GET  /llms.txt                  the instruction sheet (llmstxt.org convention)
 GET  /.well-known/api-catalog   RFC 9727 discovery
 POST /v1/query                  structured search - the CALLING agent parses
                                 natural language; the index runs no LLM per query
+POST /mcp                       MCP server (streamable HTTP, stateless, no auth):
+                                the same read surface as tools, for ChatGPT
+                                apps/connectors and Claude connectors
 ```
 
 Query semantics: hard guarantees (time window, exclusions, categories,

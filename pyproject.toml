@@ -19,6 +19,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "python-dateutil>=2.9",
     "playwright>=1.45",
+    "mcp>=1.9",
 ]
 
 [dependency-groups]

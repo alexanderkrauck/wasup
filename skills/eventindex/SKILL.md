@@ -33,3 +33,6 @@ forward projection - tell the user when a recommendation rests on estimates.
 
 Details per event: `GET /v1/events/{id}`. Calendar: `/v1/feed.ics?...`.
 Wrong/cancelled data: `POST /v1/reports`.
+
+Prefer a connector? The same read surface is an MCP server at
+`{base}/mcp` (streamable HTTP, stateless, no auth).

@@ -10,12 +10,14 @@ Run: uv run uvicorn eventindex.api.app:app
 """
 
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config, db
@@ -105,8 +107,52 @@ def _require_api_key(request: Request) -> None:
     raise HTTPException(401, "API key required for this endpoint")
 
 
-app = FastAPI(title="eventindex", version="v1",
+from mcp.server.fastmcp.server import StreamableHTTPASGIApp  # noqa: E402
+
+from eventindex.api.mcp_server import mcp as _mcp  # noqa: E402
+
+_mcp.streamable_http_app()  # initializes the session manager
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # the MCP session manager needs a running task group; a plain Route's
+    # lifespan is never invoked, so the parent app runs it
+    async with _mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(title="eventindex", version="v1", lifespan=_lifespan,
               dependencies=[Depends(_require_api_key)])
+# an exact-path ASGI Route, not a Mount: mounting would 307-redirect
+# POST /mcp -> /mcp/, which MCP clients do not follow
+from starlette.routing import Route as _Route  # noqa: E402
+
+app.router.routes.append(_Route(
+    "/mcp", StreamableHTTPASGIApp(_mcp.session_manager),
+    methods=["GET", "POST", "DELETE"],
+))
+
+
+@app.middleware("http")
+async def _mcp_gate(request: Request, call_next):
+    """Mounted apps bypass FastAPI dependencies, so /mcp gets the same
+    treatment as the public reads here: keyless, rate-limited per IP,
+    a valid key lifts the limit."""
+    if request.url.path.startswith("/mcp"):
+        with db.connect() as conn:
+            keys_exist = conn.execute(
+                "SELECT 1 FROM api_key WHERE active LIMIT 1"
+            ).fetchone() is not None
+            if keys_exist and not _valid_key(conn, request):
+                try:
+                    _rate_limit(_client_ip(request))
+                except HTTPException as e:
+                    return JSONResponse(
+                        {"detail": e.detail}, status_code=e.status_code,
+                        headers=e.headers,
+                    )
+    return await call_next(request)
 
 
 @app.get("/llms.txt", include_in_schema=False)

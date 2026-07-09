@@ -28,7 +28,11 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 ## Querying (use this, it costs the index nothing)
 
 `POST /v1/query?limit=20` - body: any subset of the filter fields (JSON).
-Auth: header `X-API-Key` or query param `api_key`.
+**No API key needed for reads** (query, occurrences, events/{id}, feed.ics,
+changes) - anonymous access is rate-limited to 60 req/min per IP; a key
+(header `X-API-Key` or `?api_key=`) lifts the limit. Keys are required only
+for `/v1/search` (it spends the index's own LLM budget) and `POST
+/v1/reports`.
 
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna),
 `categories`, `exclude_categories`, `exclude_terms`, `include_terms`

@@ -88,18 +88,37 @@ def test_event_detail_404(client):
     assert client.get(f"/v1/events/{uuid.uuid4()}").status_code == 404
 
 
-def test_api_key_gate_with_bootstrap_open(conn, client):
-    assert client.get("/v1/occurrences").status_code == 200  # no keys -> open
+def test_reads_are_keyless_but_search_and_writes_are_gated(conn, client):
     conn.execute("INSERT INTO api_key (key, name) VALUES ('sekrit', 't')")
     conn.commit()
-    assert client.get("/v1/occurrences").status_code == 401
+    # public reads: keyless, even with keys registered
+    assert client.get("/v1/occurrences").status_code == 200
+    assert client.post("/v1/query", json={}).status_code == 200
+    assert client.get("/v1/feed.ics").status_code == 200
+    assert client.get("/v1/changes").status_code == 200
+    eid = conn.execute("SELECT id FROM event LIMIT 1").fetchone()["id"]
+    assert client.get(f"/v1/events/{eid}").status_code == 200
+    # budget-spending and writing endpoints stay keyed
+    assert client.get("/v1/search", params={"q": "x"}).status_code == 401
+    assert client.post(
+        "/v1/reports", json={"occurrence_id": str(uuid.uuid4()), "reason": "wrong"}
+    ).status_code == 401
+
+
+def test_anonymous_reads_are_rate_limited(conn, client, monkeypatch):
+    from eventindex.api import app as app_mod
+
+    conn.execute("INSERT INTO api_key (key, name) VALUES ('sekrit', 't')")
+    conn.commit()
+    monkeypatch.setattr(app_mod, "PUBLIC_READ_RATE_PER_MIN", 3)
+    app_mod._rate.clear()
+    codes = [client.get("/v1/occurrences").status_code for _ in range(5)]
+    assert codes[:3] == [200, 200, 200] and 429 in codes[3:]
+    # a key lifts the limit
     assert client.get(
         "/v1/occurrences", headers={"X-API-Key": "sekrit"}
     ).status_code == 200
-    # query-param form: what makes .ics calendar subscriptions workable
-    assert client.get(
-        "/v1/feed.ics", params={"api_key": "sekrit"}
-    ).status_code == 200
+    app_mod._rate.clear()
 
 
 def test_feed_ics_serves_filtered_calendar(client):
@@ -193,7 +212,7 @@ def test_discovery_surfaces_are_open_even_when_keys_exist(conn, client):
     catalog = client.get("/.well-known/api-catalog")
     assert catalog.status_code == 200
     assert "openapi.json" in catalog.text
-    assert client.post("/v1/query", json={}).status_code == 401  # data stays keyed
+    assert client.get("/v1/search", params={"q": "x"}).status_code == 401  # budget stays keyed
 
 
 def test_staleness_decay_is_computed_at_query_time(conn):

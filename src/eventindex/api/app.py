@@ -45,18 +45,64 @@ _EFFECTIVE_CONFIDENCE_SQL = """
 # instructions an agent needs before it has a key
 _OPEN_PATHS = {"/llms.txt", "/.well-known/api-catalog", "/privacy"}
 
+# read-only surfaces are keyless (public data, zero LLM cost - /v1/query is
+# pure Postgres by design) but rate-limited per IP. /v1/search stays keyed
+# because it spends OUR llm budget per call; /v1/reports because it writes.
+_PUBLIC_READS = {
+    ("GET", "/v1/occurrences"), ("POST", "/v1/query"),
+    ("GET", "/v1/feed.ics"), ("GET", "/v1/changes"),
+}
+PUBLIC_READ_RATE_PER_MIN = 60
+_rate: dict[str, list[float]] = {}  # ip -> recent request timestamps
+
+
+def _client_ip(request: Request) -> str:
+    # uvicorn sits behind Caddy on localhost; the real client is in XFF
+    fwd = request.headers.get("x-forwarded-for")
+    return fwd.split(",")[0].strip() if fwd else (
+        request.client.host if request.client else "unknown"
+    )
+
+
+def _rate_limit(ip: str) -> None:
+    import time as _time
+
+    now = _time.monotonic()
+    window = [t for t in _rate.get(ip, []) if now - t < 60]
+    if len(window) >= PUBLIC_READ_RATE_PER_MIN:
+        raise HTTPException(
+            429, "rate limit: 60 requests/min without an API key",
+            headers={"Retry-After": "60"},
+        )
+    window.append(now)
+    _rate[ip] = window
+    if len(_rate) > 10_000:  # bounded memory under address churn
+        _rate.clear()
+
+
+def _valid_key(conn, request: Request) -> bool:
+    key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+    return bool(key) and conn.execute(
+        "SELECT 1 FROM api_key WHERE key = %s AND active", (key,)
+    ).fetchone() is not None
+
 
 def _require_api_key(request: Request) -> None:
     if request.url.path in _OPEN_PATHS:
         return
+    path = request.url.path
+    is_public_read = (request.method, path) in _PUBLIC_READS or (
+        request.method == "GET" and path.startswith("/v1/events/")
+    )
     with db.connect() as conn:
         if conn.execute("SELECT 1 FROM api_key WHERE active LIMIT 1").fetchone() is None:
             return  # bootstrap: no keys registered yet -> open
-        key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-        if not key or conn.execute(
-            "SELECT 1 FROM api_key WHERE key = %s AND active", (key,)
-        ).fetchone() is None:
-            raise HTTPException(401, "missing or invalid API key")
+        if _valid_key(conn, request):
+            return  # keyed callers skip the anonymous rate limit
+    if is_public_read:
+        _rate_limit(_client_ip(request))
+        return
+    raise HTTPException(401, "API key required for this endpoint")
 
 
 app = FastAPI(title="eventindex", version="v1",

@@ -5,8 +5,9 @@ description: Query the Linz Event Index (every public event in/around Linz) for 
 
 # Querying the Linz Event Index
 
-Base URL: https://wasup.goedly.com  Auth: `X-API-Key` header or `?api_key=`
-- ask the user for their key once.
+Base URL: https://wasup.goedly.com — reads need NO key (rate-limited
+60/min); an `X-API-Key` header lifts the limit and unlocks /v1/search and
+/v1/reports.
 
 **First time in a session: fetch `GET {base}/llms.txt`** - it is the
 authoritative, always-current instruction sheet (semantics, filter fields,

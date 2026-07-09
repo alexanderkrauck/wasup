@@ -5,11 +5,12 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 ## Open
 
 
-7. **Domain name** - now actually needed: your `.ics` calendar subscription URL wants a stable host (phase 4 shipped 2026-07-07); any preference, or keep localhost until the VPS decision?
 9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
 11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
 
 ## Answered
+
+7. **Domain name** -> **wasup.at**, product name "Wasup" (Alexander, 2026-07-09). Registration + A records his side; TLS/key-rotation/branding pass on DNS. *(2026-07-09)*
 
 12. **Search API for §4d fan-out** → resolved with NO new account: OpenRouter web plugin (Exa engine), URLs via url_citation annotations, ~€1/month for 160 queries, budget-ledgered through the one LLM client. Research trail: Google CSE closed to new customers & dead 2027-01 (Alexander's screenshot confirmed); Gemini grounding free but ToS forbids using links for crawling; Brave vetoed by Alexander. Smoke test: "run club linz" → howwasyourdayclub.com at rank 2. *(2026-07-06)*
 

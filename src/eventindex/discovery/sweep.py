@@ -21,6 +21,8 @@ PLACES_CATEGORIES = [
     "Nachtclub", "Konzertlokal", "Fitnessstudio", "Kletterhalle", "Tanzschule",
     "Museum", "Galerie", "Theater", "Jugendzentrum", "Pfarre", "Sportverein",
     "Kulturverein", "Bibliothek", "Brettspiel Verein", "Volkshaus",
+    "Coworking Space", "Veranstaltungszentrum", "Buchhandlung", "Kino",
+    "Kabarett", "Kongresszentrum", "Brauerei",
 ]
 PLACES_COST_EUR = 0.03  # per text-search request, logged for governance
 MAX_PROBES_PER_SWEEP = 120
@@ -28,8 +30,8 @@ MAX_PROBES_PER_SWEEP = 120
 OVERPASS_QUERY = """
 [out:json][timeout:60];
 (
-  nwr["amenity"~"community_centre|theatre|arts_centre|social_centre"]({bbox});
-  nwr["leisure"~"sports_centre|fitness_centre|climbing|dance"]({bbox});
+  nwr["amenity"~"community_centre|theatre|arts_centre|social_centre|events_venue|conference_centre|cinema|nightclub"]({bbox});
+  nwr["leisure"~"sports_centre|fitness_centre|climbing|dance|bowling_alley|ice_rink"]({bbox});
   nwr["club"]({bbox});
 )->.all;
 nwr.all[~"^(website|contact:website)$"~"."]({bbox});
@@ -116,9 +118,28 @@ SEARCH_TERMS = [
     "community club", "stammtisch verein", "krafttraining kurse",
     "volleyball hobby", "wandern gruppe", "fotografie workshop",
     "kochkurs", "chor singen",
+    # 2026-07-10: the original list was pure leisure vocabulary - the whole
+    # business/institutional world was unfindable by construction (caught
+    # live when a consumer asked for startup/pitch events: tech2b, Startup
+    # Live, WKO were all absent). Below: a systematic pass over every
+    # event-emitting segment, not just the holes we tripped over.
+    "startup pitch event", "gründer treffen netzwerken", "tech meetup",
+    "vortrag diskussion wissenschaft", "poetry slam lesung",
+    "english speaking events expat", "senioren veranstaltungen programm",
+    "esports gaming turnier", "ehrenamt freiwilligenarbeit",
+    "open mic jam session", "kulinarik festival verkostung",
+    "freikirche moschee buddhistisch veranstaltungen",
+    "lgbtq queer veranstaltungen", "kinder ferienprogramm workshop",
+    "karrieremesse jobmesse", "bauernmarkt wochenmarkt",
+    "musikverein blasmusik konzert", "kampfsport training probetraining",
+    "radtreff ausfahrt", "pen and paper rollenspiel",
+    "meditation achtsamkeit kurs", "podiumsdiskussion politik",
+    "oldtimer treffen", "makerspace werkstatt kurs",
+    "festival sommerfest", "tanzabend ball",
 ]
-SEARCH_AREAS = ["Linz", "Linz Urfahr", "Leonding", "Traun"]
-MAX_SEARCHES_PER_SWEEP = 40  # matrix rotates; monthly cadence covers it all
+SEARCH_AREAS = ["Linz", "Linz Urfahr", "Leonding", "Traun",
+                "Enns", "Ansfelden", "Ottensheim", "Pasching"]
+MAX_SEARCHES_PER_SWEEP = 80  # matrix rotates; ~5 weekly sweeps cover it all
 _PORTAL_NOISE = (
     "linztermine", "facebook.", "instagram.", "eventbrite", "meetup.com",
     "tiktok.", "youtube.", "google.", "tripadvisor", "yelp.", "linkedin.",

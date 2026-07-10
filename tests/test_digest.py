@@ -60,3 +60,21 @@ def test_limit_warning_screams_when_productive_source_truncated():
 def test_no_limit_warning_without_hits():
     text = render(_stats(NOW - timedelta(hours=2)), NOW)
     assert "EVENTS ARE BEING MISSED" not in text
+
+
+def test_day_curve_anomaly_flags_capped_feed_signature():
+    from datetime import date
+
+    from eventindex.jobs.digest import day_curve_anomalies
+
+    # three Wednesdays at ~20 events, the fourth collapses to 3: the
+    # signature of a feed horizon ending mid-window
+    curve = [{"day": date(2026, 7, 15), "n": 20},
+             {"day": date(2026, 7, 22), "n": 21},
+             {"day": date(2026, 7, 29), "n": 19},
+             {"day": date(2026, 8, 5), "n": 3}]
+    flags = day_curve_anomalies(curve)
+    assert len(flags) == 1 and "2026-08-05" in flags[0]
+    # low-volume weekdays never alert (median gate)
+    quiet = [{"day": date(2026, 7, 13), "n": 2}, {"day": date(2026, 7, 20), "n": 0}]
+    assert day_curve_anomalies(quiet) == []

@@ -4,6 +4,8 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
+15. **Locality gate for aggregator junk** (2026-07-10) - global aggregators pad city listings with online events (measured: 19/49 Eventbrite-sourced events have zero locality evidence; e.g. a UK "Birth to 5 Matters" webinar). Proposed rebuild gate: events whose ONLY provenance is global aggregators AND no venue AND no geo AND foreign event URL -> not published (stays in claims). Current junk list: var/review/index-audit-*.md. Apply gate y/n?
+
 9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
 11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
 

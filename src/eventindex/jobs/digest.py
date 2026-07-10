@@ -47,6 +47,12 @@ def gather_stats(conn) -> dict:
         "WHERE j.status = 'pending' AND j.last_error LIKE '%%budget%%' "
         "AND j.run_after > now() AND s.yield_ema > 0"
     ).fetchall()
+    day_curve = conn.execute(
+        "SELECT o.starts_at::date AS day, count(DISTINCT o.event_id) AS n "
+        "FROM occurrence o WHERE o.status = 'scheduled' "
+        "AND o.starts_at BETWEEN now() AND now() + interval '28 days' "
+        "GROUP BY 1 ORDER BY 1"
+    ).fetchall()
     return {
         "crawls": crawls,
         "spend": spend,
@@ -55,7 +61,26 @@ def gather_stats(conn) -> dict:
         "qa": qa,
         "limits_hit": limits_hit,
         "budget_parked": budget_parked,
+        "day_curve": day_curve,
     }
+
+
+def day_curve_anomalies(day_curve: list[dict]) -> list[str]:
+    """Days holding < 50% of their weekday's median event count: the
+    signature of a capped feed the projection machinery didn't cover
+    (incompleteness red team, 2026-07-10). Pure function for testability."""
+    from statistics import median
+
+    by_weekday: dict[int, list[int]] = {}
+    for r in day_curve:
+        by_weekday.setdefault(r["day"].weekday(), []).append(r["n"])
+    flags = []
+    for r in day_curve:
+        med = median(by_weekday[r["day"].weekday()])
+        if med >= 4 and r["n"] < med * 0.5:
+            flags.append(f"{r['day']} ({r['day']:%a}): {r['n']} events, "
+                         f"weekday median {med:.0f}")
+    return flags
 
 
 def render(stats: dict, now: datetime) -> str:
@@ -101,6 +126,13 @@ def render(stats: dict, now: datetime) -> str:
     if stats["failed_jobs"]:
         for r in stats["failed_jobs"]:
             lines.append(f"  {r['kind']}: {r['n']}")
+    else:
+        lines.append("  none")
+
+    anomalies = day_curve_anomalies(stats.get("day_curve", []))
+    lines.append("day-curve anomalies (28d, capped-feed signature):")
+    if anomalies:
+        lines += [f"  {a}" for a in anomalies]
     else:
         lines.append("  none")
 

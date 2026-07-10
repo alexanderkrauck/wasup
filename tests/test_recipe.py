@@ -157,3 +157,65 @@ def test_date_parse_rate_check():
     result = validate(_recipe(), payloads)
     assert not result.ok
     assert any("date_parse_rate" in r for r in result.reasons)
+
+
+def test_date_range_format_and_chunking():
+    """{from}/{to} honor the site's date format and split into windows for
+    sites that cap results per query (the linztermine lesson)."""
+    r = _recipe(
+        entry_urls=["https://x.at/suche?from={from}&to={to}"],
+        pagination=Pagination(type="date_range_param", months_ahead=2,
+                              date_format="%d.%m.%Y", chunk_days=31),
+    )
+    assert page_urls(r, now=NOW) == [
+        "https://x.at/suche?from=06.07.2026&to=05.08.2026",
+        "https://x.at/suche?from=06.08.2026&to=05.09.2026",
+    ]
+
+
+def test_date_templates_expand_for_any_pagination_type():
+    """Date windows are orthogonal to the pagination mechanics: a next_click
+    recipe may start from a date-filtered listing."""
+    r = _recipe(
+        entry_urls=["https://x.at/suche?from={from}&to="],
+        pagination=Pagination(type="next_click", next_selector="a.next",
+                              months_ahead=1, date_format="%d.%m.%Y"),
+    )
+    assert page_urls(r, now=NOW) == ["https://x.at/suche?from=06.07.2026&to="]
+
+
+def test_interactive_pagination_coerces_headless_render():
+    r = _recipe(
+        pagination=Pagination(type="next_click", next_selector="a.next"),
+    )
+    assert r.render == "headless"
+
+
+def test_next_click_states_are_harvested_per_page(conn):
+    """A next_click fetch returns one HTML per page STATE (a replacing
+    paginator destroys earlier pages); every state must be extracted."""
+    r = _recipe(
+        entry_urls=["https://x.at/suche"],
+        pagination=Pagination(type="next_click", next_selector="a.next",
+                              max_pages=5),
+    )
+    payloads, result = run_recipe(
+        r, {"id": None}, conn, fetch_page=lambda u: [LISTING, LISTING_P2], now=NOW
+    )
+    assert [p["title"]["value"] for p in payloads] == [
+        "Sommerkonzert", "Flohmarkt am Platz", "Yoga im Park", "Repair Cafe",
+    ]
+    assert result.ok
+
+
+def test_next_click_states_respect_page_cap(conn):
+    r = _recipe(
+        entry_urls=["https://x.at/suche"],
+        pagination=Pagination(type="next_click", next_selector="a.next",
+                              max_pages=1),
+        validation={"min_items": 2, "required_fields": ["title", "starts_at"]},
+    )
+    payloads, _ = run_recipe(
+        r, {"id": None}, conn, fetch_page=lambda u: [LISTING, LISTING_P2], now=NOW
+    )
+    assert len(payloads) == 3  # the state beyond the cap is not extracted

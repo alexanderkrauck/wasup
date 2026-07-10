@@ -36,23 +36,82 @@ def _checkpoint_with(monkeypatch, reply: str):
 
 
 def test_checkpoint_extends_on_credible_estimate(monkeypatch):
-    cap, turns, wall = _checkpoint_with(monkeypatch, (
+    (cap, turns, wall), expected = _checkpoint_with(monkeypatch, (
         '{"expected_events_per_crawl": 100, "expects_success": true, '
         '"rationale": "large calendar"}'
     ))
     assert cap == config.ONBOARD_HARD_CAP_EUR
+    assert expected == 100  # the estimate feeds the coverage gate
 
 
 def test_checkpoint_fails_closed_on_garbage(monkeypatch):
-    cap, turns, wall = _checkpoint_with(monkeypatch, "I think it looks promising!")
+    (cap, turns, wall), expected = _checkpoint_with(
+        monkeypatch, "I think it looks promising!")
     assert (cap, turns, wall) == (config.ONBOARD_SESSION_CAP_EUR,
                                   config.ONBOARD_MAX_TURNS,
                                   config.ONBOARD_WALL_CLOCK_S)
+    assert expected is None
 
 
 def test_checkpoint_keeps_base_when_agent_expects_failure(monkeypatch):
-    cap, _, _ = _checkpoint_with(monkeypatch, (
+    (cap, _, _), expected = _checkpoint_with(monkeypatch, (
         '{"expected_events_per_crawl": 100, "expects_success": false, '
         '"rationale": "login wall"}'
     ))
     assert cap == config.ONBOARD_SESSION_CAP_EUR
+    assert expected is None
+
+
+def test_zero_items_hint_blames_params_when_content_is_reachable():
+    """The old blanket 'needs headless' hint misdiagnosed linztermine (its
+    HTML is server-rendered; the URL params were wrong) and sent retries
+    into a dead end."""
+    from eventindex.discovery.onboard import _diagnose_zero_items
+
+    assert "parameters or pagination" in _diagnose_zero_items("http", True)
+    assert "parameters or pagination" in _diagnose_zero_items("headless", True)
+
+
+def test_zero_items_hint_suggests_headless_only_without_http_content():
+    from eventindex.discovery.onboard import _diagnose_zero_items
+
+    assert "headless" in _diagnose_zero_items("http", False)
+    assert "entry URL" in _diagnose_zero_items("headless", False)
+
+
+def test_page_count_extrapolates_next_click_depth():
+    from eventindex.discovery.onboard import _page_count
+    from eventindex.fetch.recipe import Pagination, Recipe
+
+    flat = Recipe(entry_urls=["https://x.at/suche?from={from}&to={to}"],
+                  pagination=Pagination(type="date_range_param", months_ahead=3,
+                                        chunk_days=31))
+    assert _page_count(flat) == 3  # one page per window
+    deep = Recipe(entry_urls=["https://x.at/suche?from={from}&to={to}"],
+                  pagination=Pagination(type="next_click", next_selector="a.n",
+                                        months_ahead=3, chunk_days=31,
+                                        max_pages=20))
+    assert _page_count(deep) == 60  # 3 windows x 20 states
+
+
+def test_coverage_gate_rejects_first_page_only_recipes(conn, monkeypatch):
+    """A recipe that validates at 15 items/window while the agent itself
+    estimated ~1000 events is the 'valid but 4%-of-the-site' failure mode
+    (linztermine attempt 2) - it must bounce back to the agent."""
+    from eventindex.discovery import onboard as ob
+    from eventindex.fetch.recipe import Pagination, Recipe, ValidationResult
+
+    r = Recipe(entry_urls=["https://x.at/suche?from={from}&to={to}"],
+               pagination=Pagination(type="date_range_param", months_ahead=3,
+                                     chunk_days=31))
+    fake_payloads = [{"title": {"value": f"E{i}"},
+                      "starts_at": {"value": "2030-01-01 10:00"}} for i in range(15)]
+    monkeypatch.setattr(ob, "run_recipe", lambda *a, **k: (
+        fake_payloads, ValidationResult(ok=True, items=15, reasons=[])))
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 expected_events=1000)
+    assert error is not None and "COVERAGE TOO LOW" in error
+    # with a matching estimate the same recipe passes
+    payloads, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                        expected_events=40)
+    assert error is None

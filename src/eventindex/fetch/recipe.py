@@ -13,7 +13,7 @@ from typing import Callable, Literal
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from eventindex import config
 
@@ -22,11 +22,13 @@ log = logging.getLogger("eventindex.recipe")
 # per-crawl hard caps (§cost-governance ring 1), recipe values are clamped.
 # Deliberately generous (completeness > thrift; per-source budgets are the
 # real governor): pagination depth must never be why we miss events.
-MAX_PAGES_HARD = 60
+# 100: a portal paginating 15 items/page needs ~75 pages for its full
+# calendar (linztermine); dailies stop early via all_fingerprints_seen.
+MAX_PAGES_HARD = 100
 MAX_DETAIL_FETCHES = 60
 PAGINATION_TYPES = Literal[
-    "url_param", "next_link", "load_more_click", "infinite_scroll",
-    "calendar_nav", "date_range_param", "form_post", "none",
+    "url_param", "next_link", "next_click", "load_more_click",
+    "infinite_scroll", "calendar_nav", "date_range_param", "form_post", "none",
 ]
 
 
@@ -36,9 +38,19 @@ class Pagination(BaseModel):
     param: str | None = Field(None, description="url_param: query param name")
     start: int = 1
     max_pages: int = 10
-    next_selector: str | None = Field(None, description="next_link: CSS for the next <a>")
+    next_selector: str | None = Field(
+        None, description="next_link: CSS for the next <a>. next_click: CSS "
+        "for a next-page control that swaps the list in place via JS "
+        "(JSF/PrimeFaces paginators, href='#' + onclick) - every page state "
+        "is harvested, so it also covers plain load-more/append UIs.")
     click_selector: str | None = Field(None, description="load_more_click: CSS for the button")
     months_ahead: int = Field(3, description="calendar_nav/date_range_param horizon")
+    date_format: str | None = Field(
+        None, description="strftime for {from}/{to}, e.g. '%d.%m.%Y' when the "
+        "site wants German dates. Default ISO (%Y-%m-%d).")
+    chunk_days: int | None = Field(
+        None, description="split the {from}/{to} horizon into windows of N "
+        "days (one URL each) for sites that cap results per query")
 
 
 MAX_MONTHS_AHEAD = 12
@@ -57,8 +69,9 @@ class Recipe(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version: int = 1
     entry_urls: list[str] = Field(
-        description="templates; {n}=page, {year}/{month}=calendar, "
-        "{from}/{to}=ISO dates. Plain URL list is the universal fallback (H3.3)."
+        description="templates; {n}=page, {year}/{month}=calendar, {from}/{to}"
+        "=dates (pagination.date_format, default ISO). Date templates expand "
+        "for every pagination type. Plain URL list is the universal fallback (H3.3)."
     )
     render: Literal["http", "headless"] = "http"
     pagination: Pagination
@@ -73,6 +86,14 @@ class Recipe(BaseModel):
     stop_conditions: list[Literal["date_older_than_now", "all_fingerprints_seen"]] = []
     validation: Validation = Validation()
 
+    @model_validator(mode="after")
+    def _interactive_needs_headless(self):
+        # clicking/scrolling only exists in a browser; an agent that forgets
+        # render='headless' must not produce a recipe that silently no-ops
+        if self.pagination.type in ("next_click", "load_more_click", "infinite_scroll"):
+            self.render = "headless"
+        return self
+
 
 class ValidationResult(BaseModel):
     ok: bool
@@ -82,10 +103,39 @@ class ValidationResult(BaseModel):
 
 # ------------------------------------------------------------- pagination
 
+def _expand_dates(entry: str, p: Pagination, now: datetime) -> list[str]:
+    """Fill {year}/{month} or {from}/{to} templates -> 1+ concrete URLs.
+    Orthogonal to the pagination mechanics: a next_click or url_param recipe
+    may also carry date windows (chunk_days splits the horizon for sites
+    that cap results per query)."""
+    months = min(p.months_ahead, MAX_MONTHS_AHEAD)
+    if "{year}" in entry or "{month}" in entry:
+        urls, (y, m) = [], (now.year, now.month)
+        for _ in range(months):
+            urls.append(entry.replace("{year}", str(y)).replace("{month}", f"{m:02d}"))
+            m += 1
+            if m > 12:
+                m, y = 1, y + 1
+        return urls
+    if "{from}" in entry or "{to}" in entry:
+        fmt = p.date_format or "%Y-%m-%d"
+        horizon = 31 * months
+        step = min(p.chunk_days or horizon, horizon)
+        urls, day = [], 0
+        while day < horizon:
+            frm = (now + timedelta(days=day)).strftime(fmt)
+            to = (now + timedelta(days=min(day + step - 1, horizon))).strftime(fmt)
+            urls.append(entry.replace("{from}", frm).replace("{to}", to))
+            day += step
+        return urls
+    return [entry]
+
+
 def page_urls(recipe: Recipe, now: datetime | None = None) -> list[str]:
     """Expand entry_urls + pagination into the concrete URL sequence.
-    Interactive types (load_more_click, infinite_scroll) return the entry
-    urls; their expansion happens in the headless fetcher."""
+    Interactive types (next_click, load_more_click, infinite_scroll) return
+    their (date-expanded) entry urls; the state expansion happens in the
+    headless fetcher."""
     from zoneinfo import ZoneInfo
 
     now = now or datetime.now(ZoneInfo(config.TIMEZONE))
@@ -93,25 +143,12 @@ def page_urls(recipe: Recipe, now: datetime | None = None) -> list[str]:
     max_pages = min(p.max_pages, MAX_PAGES_HARD)
     urls: list[str] = []
     for entry in recipe.entry_urls:
-        if p.type == "url_param" and "{n}" in entry:
-            urls += [entry.replace("{n}", str(n)) for n in range(p.start, p.start + max_pages)]
-        elif p.type in ("calendar_nav", "date_range_param"):
-            months = min(p.months_ahead, MAX_MONTHS_AHEAD)
-            if "{year}" in entry or "{month}" in entry:
-                y, m = now.year, now.month
-                for _ in range(months):
-                    urls.append(entry.replace("{year}", str(y)).replace("{month}", f"{m:02d}"))
-                    m += 1
-                    if m > 12:
-                        m, y = 1, y + 1
-            elif "{from}" in entry or "{to}" in entry:
-                frm = now.date().isoformat()
-                to = (now + timedelta(days=31 * months)).date().isoformat()
-                urls.append(entry.replace("{from}", frm).replace("{to}", to))
-            else:
-                urls.append(entry)
-        else:  # next_link (followed dynamically), none, interactive types
-            urls.append(entry)
+        for dated in _expand_dates(entry, p, now):
+            if p.type == "url_param" and "{n}" in dated:
+                urls += [dated.replace("{n}", str(n))
+                         for n in range(p.start, p.start + max_pages)]
+            else:  # next_link (followed dynamically), none, interactive types
+                urls.append(dated)
     return urls[: MAX_PAGES_HARD]
 
 
@@ -261,48 +298,58 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
         if url in visited:
             continue
         visited.add(url)
-        html = fetch_page(url)
-        if html is None:
+        fetched = fetch_page(url)
+        if fetched is None:
             continue
-        pages += 1
+        # a next_click fetch returns one HTML per harvested page state; each
+        # state counts against page_cap like a fetched page
+        states = fetched if isinstance(fetched, list) else [fetched]
 
-        if recipe.field_selectors:
-            page_payloads = extract_with_selectors(recipe, html, url)
-        else:
-            _, page_payloads = cascade_extract(
-                source, _FakeResult(html, url), tx, job_id=job_id
-            )
+        stop = False
+        for html in states[: max(page_cap - pages, 0)]:
+            pages += 1
 
-        if recipe.follow_detail:
-            for durl in detail_urls(recipe, html, url)[:detail_budget]:
-                if durl in visited:
-                    continue
-                visited.add(durl)
-                detail_budget -= 1
-                dhtml = fetch_page(durl)
-                if dhtml is None:
-                    continue
-                _, detail_payloads = cascade_extract(
-                    source, _FakeResult(dhtml, durl), tx, job_id=job_id
+            if recipe.field_selectors:
+                page_payloads = extract_with_selectors(recipe, html, url)
+            else:
+                _, page_payloads = cascade_extract(
+                    source, _FakeResult(html, url), tx, job_id=job_id
                 )
-                page_payloads += detail_payloads
 
-        payloads += page_payloads
+            if recipe.follow_detail:
+                for durl in detail_urls(recipe, html, url)[:detail_budget]:
+                    if durl in visited:
+                        continue
+                    visited.add(durl)
+                    detail_budget -= 1
+                    dhtml = fetch_page(durl)
+                    if dhtml is None:
+                        continue
+                    _, detail_payloads = cascade_extract(
+                        source, _FakeResult(dhtml, durl), tx, job_id=job_id
+                    )
+                    page_payloads += detail_payloads
 
-        # stop conditions
-        if "date_older_than_now" in recipe.stop_conditions and page_payloads:
-            dates = [
-                parse_dt(p["starts_at"]["value"]) for p in page_payloads if "starts_at" in p
-            ]
-            dates = [d for d in dates if d]
-            if dates and max(dates) < (now or datetime.now()).astimezone():
+            payloads += page_payloads
+
+            # stop conditions
+            if "date_older_than_now" in recipe.stop_conditions and page_payloads:
+                dates = [
+                    parse_dt(p["starts_at"]["value"]) for p in page_payloads if "starts_at" in p
+                ]
+                dates = [d for d in dates if d]
+                if dates and max(dates) < (now or datetime.now()).astimezone():
+                    stop = True
+                    break
+            if seen_fps is not None and page_payloads and _all_seen(
+                page_payloads, seen_fps, source
+            ):
+                stop = True
                 break
-        if seen_fps is not None and page_payloads and _all_seen(
-            page_payloads, seen_fps, source
-        ):
+            if (nxt := next_url(recipe, html, url)) is not None:
+                queue.append(nxt)
+        if stop:
             break
-        if (nxt := next_url(recipe, html, url)) is not None:
-            queue.append(nxt)
 
     return payloads
 
@@ -322,7 +369,18 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
     import httpx
 
     if recipe.render == "headless":
-        from eventindex.fetch.headless import render_page
+        from eventindex.fetch.headless import render_page, render_states
+
+        if recipe.pagination.type == "next_click":
+            max_states = min(recipe.pagination.max_pages, MAX_PAGES_HARD)
+
+            def fetch_next_click(url: str) -> list[bytes] | None:
+                time.sleep(config.CRAWL_DELAY_S)
+                return render_states(
+                    url, recipe.pagination.next_selector, max_states=max_states
+                )
+
+            return fetch_next_click
 
         def fetch_headless(url: str) -> bytes | None:
             time.sleep(config.CRAWL_DELAY_S)

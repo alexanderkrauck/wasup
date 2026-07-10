@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="de">
+<!-- Replace-style paginator in the JSF/PrimeFaces mold: the next control is
+     href="#" + onclick, each page REPLACES the list, the control's <li>
+     gets class "disabled" on the last page. Fixture for render_states. -->
+<body>
+<div id="list"></div>
+<ul class="pagination">
+  <li id="nextli"><a id="next" href="#" onclick="nextPage(); return false;"
+    aria-label="Nächste Seite">Nächste</a></li>
+</ul>
+<script>
+const pages = [
+  [["Konzert Alpha", "2030-08-01 19:00"], ["Lesung Beta", "2030-08-02 18:00"]],
+  [["Markt Gamma", "2030-09-03 09:00"], ["Kino Delta", "2030-09-03 20:00"]],
+  [["Kurs Epsilon", "2030-10-04 17:00"]],
+];
+let i = 0;
+function renderList() {
+  document.getElementById("list").innerHTML = pages[i].map(p =>
+    '<div class="event"><h3>' + p[0] + '</h3><span class="date">' + p[1] +
+    '</span></div>').join("");
+  if (i === pages.length - 1)
+    document.getElementById("nextli").className = "disabled";
+}
+function nextPage() { if (i < pages.length - 1) { i++; renderList(); } }
+renderList();
+</script>
+</body>
+</html>

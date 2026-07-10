@@ -103,3 +103,32 @@ def test_failed_writes_roll_back_with_the_job(conn, monkeypatch):
     run_job(conn, claim_next(conn))
 
     assert conn.execute("SELECT count(*) AS n FROM crawl_log").fetchone()["n"] == 0
+
+
+def test_final_onboard_failure_degrades_recipeless_source(conn, monkeypatch):
+    """A source whose onboarding definitively failed must leave the crawl
+    rotation (it would otherwise keep crawling in the hintless fallback mode
+    it was escalated to escape); a source that still has a working recipe
+    keeps it."""
+    def bad_onboard(job, tx):
+        raise RuntimeError("onboarding ended without recipe (exhausted)")
+
+    monkeypatch.setitem(handlers.HANDLERS, "onboard", bad_onboard)
+    src = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust) VALUES ('deep', "
+        "'https://x.at/', 'website', 2, 0.8) RETURNING id"
+    ).fetchone()["id"]
+    with conn.transaction():
+        enqueue(conn, "onboard", {"source_id": str(src)})
+
+    for _ in range(config.JOB_MAX_ATTEMPTS):
+        conn.execute("UPDATE jobs SET run_after = now()")
+        conn.commit()
+        run_job(conn, claim_next(conn))
+
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE kind = 'onboard'"
+    ).fetchone()["status"] == "failed"
+    assert conn.execute(
+        "SELECT status FROM source WHERE id = %s", (src,)
+    ).fetchone()["status"] == "degraded"

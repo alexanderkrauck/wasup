@@ -119,6 +119,18 @@ def run_job(conn, job: dict) -> None:
                     "last_error = %s WHERE id = %s",
                     (error, job["id"]),
                 )
+                if job["kind"] == "onboard" and job["payload"].get("source_id"):
+                    # a source whose onboarding definitively failed must not
+                    # keep crawling in the hintless fallback mode it was
+                    # escalated to escape (linztermine deep, 2026-07-09:
+                    # 3 failed onboards, then daily homepage crawls yielding
+                    # 5 events). degraded = out of crawl scheduling, visible
+                    # in the digest's failed-jobs section.
+                    conn.execute(
+                        "UPDATE source SET status = 'degraded' "
+                        "WHERE id = %s AND recipe IS NULL",
+                        (job["payload"]["source_id"],),
+                    )
             else:
                 backoff = config.JOB_RETRY_BACKOFF_S * 5 ** (job["attempts"] - 1)
                 conn.execute(

@@ -32,11 +32,22 @@ events/courses/Termine.
 Method:
 1. navigate to the entry URL; find where the event/course listing lives.
 2. Classify pagination by LOOKING at the page and links: numbered pages
-   (url_param with {n} template), a "weiter/next" link (next_link), a
-   load-more button (load_more_click), infinite scroll, month calendar URLs
-   (calendar_nav with {year}/{month}), date-range params ({from}/{to}), or
-   none. If nothing fits, use type "none" and list concrete listing URLs as
-   entry_urls - that always works.
+   (url_param with {n} template), a "weiter/next" link with a real href
+   (next_link), a next/paginator control that swaps the list IN PLACE via
+   JavaScript - href="#", onclick, JSF/PrimeFaces "ui-paginator" (next_click
+   with next_selector; render becomes headless automatically), a load-more
+   button (load_more_click), infinite scroll, month calendar URLs
+   (calendar_nav with {year}/{month}), date-range params ({from}/{to}; set
+   pagination.date_format to the site's format, e.g. "%d.%m.%Y" - the
+   default is ISO), or none. If nothing fits, use type "none" and list
+   concrete listing URLs as entry_urls - that always works.
+   VERIFY, never assume: every click/navigate observation reports whether
+   the page's links changed. A ?page=2 URL or a click that leaves the links
+   unchanged is NOT working pagination - do not build a recipe on it.
+   Date windows and next_click COMBINE: entry_urls with {from}/{to} plus
+   pagination type next_click clicks through every window - use this when a
+   date-filtered listing still paginates in-page. A recipe that only ever
+   sees the first page of each window misses most of the site.
 3. Propose field_selectors ONLY if 3+ item nodes share a stable structure
    (check with read_dom). If the DOM is messy, OMIT field_selectors entirely -
    the interpreter then uses LLM extraction, which always works. Selectors are
@@ -44,8 +55,10 @@ Method:
 4. render: "headless" only if the page text is empty/JS-shell via plain HTTP
    (the entry page you see IS rendered; check read_dom for a <noscript> hint
    or suspiciously little text).
-5. Call emit_recipe with the recipe plus sample_titles: 3-8 event titles you
-   actually saw on the listing - they verify your recipe.
+5. Call emit_recipe with the recipe, sample_titles (3-8 event titles you
+   actually saw on the listing - they verify your recipe), and
+   expected_events_on_site (your honest estimate; a recipe reaching far
+   fewer events than your estimate is rejected).
 
 6. DEPTH IS MANDATORY: if the site can show events weeks or months ahead
    (month navigation, date filters, "später"/next-month arrows, season
@@ -81,7 +94,13 @@ def _tools() -> list[dict]:
         tool("emit_recipe", "Submit the final recipe. Ends the session if it validates.",
              {"recipe": Recipe.model_json_schema(),
               "sample_titles": {"type": "array", "items": {"type": "string"},
-                                "minItems": 3, "maxItems": 8}}),
+                                "minItems": 3, "maxItems": 8},
+              "expected_events_on_site": {
+                  "type": "integer",
+                  "description": "your realistic estimate of distinct upcoming "
+                  "events the WHOLE site currently lists (use the site's own "
+                  "result counter if it shows one); the recipe is validated "
+                  "against this"}}),
         tool("give_up", "Declare the site not onboardable and end the session.",
              {"reason": {"type": "string"}}),
     ]
@@ -92,6 +111,7 @@ class Browser:
     """Thin sync-Playwright session; one page per onboarding run."""
 
     page: object = None
+    _prev_links: frozenset = frozenset()
 
     def _ensure(self):
         if self.page is None:
@@ -111,7 +131,21 @@ class Browser:
             k in l.lower() for k in ("event", "termin", "veranstalt", "programm",
                                      "kurs", "kalender", "page=", "weiter", "next")
         )][:40]
-        return (f"URL: {page.url}\nTITLE: {page.title()}\n\nVISIBLE TEXT:\n{text}\n\n"
+        # link-set diff: the agent's instrument for verifying that a
+        # pagination attempt actually changed the content (a JSF ?page=n
+        # that returns page 1 again looks identical only through this lens)
+        current = frozenset(links)
+        if not self._prev_links:
+            delta = ""
+        elif current == self._prev_links:
+            delta = ("\nLINKS DELTA vs previous view: UNCHANGED - if you "
+                     "expected a new page, this pagination does NOT work.")
+        else:
+            new = len(current - self._prev_links)
+            gone = len(self._prev_links - current)
+            delta = f"\nLINKS DELTA vs previous view: +{new} new / -{gone} gone."
+        self._prev_links = current
+        return (f"URL: {page.url}\nTITLE: {page.title()}{delta}\n\nVISIBLE TEXT:\n{text}\n\n"
                 f"EVENT-ISH LINKS:\n" + "\n".join(eventish))
 
     COOKIE_SELECTORS = (
@@ -181,7 +215,7 @@ class Session:
         return str(path)
 
 
-def _http_text_len(url: str) -> int:
+def _http_text(url: str) -> str:
     import httpx
 
     from eventindex.extract.llm_text import html_to_text
@@ -189,9 +223,39 @@ def _http_text_len(url: str) -> int:
     try:
         resp = httpx.get(url, headers={"User-Agent": config.USER_AGENT},
                          timeout=20, follow_redirects=True)
-        return len(html_to_text(resp.content))
+        return html_to_text(resp.content)
     except httpx.HTTPError:
-        return 0
+        return ""
+
+
+def _http_text_len(url: str) -> int:
+    return len(_http_text(url))
+
+
+def _diagnose_zero_items(render: str, titles_in_http: bool) -> str:
+    """Why did the recipe extract nothing? Checked against evidence instead
+    of guessing (the old blanket 'needs headless' hint sent agents into a
+    dead end on sites whose HTML is fine but whose URL params were wrong)."""
+    if titles_in_http:
+        return ("HINT: your sample_titles ARE present in a plain-HTTP fetch of "
+                "the recipe's first URL - the content is reachable; your "
+                "entry-URL parameters or pagination are wrong (does date_format "
+                "match the site? do page params actually change the results?)")
+    if render == "http":
+        return ("HINT: the content is NOT in a plain-HTTP fetch - this site "
+                "likely needs render='headless', or an interactive pagination "
+                "type (next_click / load_more_click)")
+    return ("HINT: even the first rendered page yielded nothing - the entry "
+            "URL is probably wrong; navigate to it and re-check")
+
+
+def _zero_items_hint(recipe: Recipe, sample_titles: list[str]) -> str:
+    from eventindex.fetch.recipe import page_urls
+
+    urls = page_urls(recipe)
+    text = _http_text(urls[0]).lower() if urls else ""
+    found = any(t.lower()[:40] in text for t in sample_titles if t)
+    return _diagnose_zero_items(recipe.render, found)
 
 
 def _spent_on_job(tx, job_id) -> float:
@@ -226,8 +290,10 @@ def _extended_rings(expected_events: int) -> tuple[float, int, int]:
 
 def _value_checkpoint(tx, messages, session, model, source, job_id):
     """Ask the agent - inside the same (prefix-cached) conversation - whether
-    finishing is worth more budget. Returns the new rings. Fail-closed: an
-    unparseable answer or expected failure keeps the base rings."""
+    finishing is worth more budget. Returns (rings, expected_events); the
+    estimate doubles as the coverage yardstick in self-validation.
+    Fail-closed: an unparseable answer or expected failure keeps the base
+    rings."""
     messages.append({"role": "user", "content":
         "CHECKPOINT - your session allowance is nearly exhausted. Answer with "
         "ONLY a JSON object, no prose, no code fences: "
@@ -245,17 +311,97 @@ def _value_checkpoint(tx, messages, session, model, source, job_id):
         est = YieldEstimate.model_validate_json(content)
     except ValidationError:
         session.record("value_checkpoint", {}, "unparseable estimate -> base rings")
-        return base
+        return base, None
     session.record("value_checkpoint", {},
                    f"expected={est.expected_events_per_crawl} "
                    f"success={est.expects_success} | {est.rationale[:200]}")
     if not est.expects_success or est.expected_events_per_crawl <= 0:
-        return base
-    return _extended_rings(est.expected_events_per_crawl)
+        return base, None
+    return _extended_rings(est.expected_events_per_crawl), est.expected_events_per_crawl
+
+
+def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
+    """How far the FULL recipe really reaches: walk its pagination to the
+    deepest reachable page and extract only that one. The trimmed validation
+    sees ~3 pages, and a chronological listing shows next week on page 1 no
+    matter how deep the pagination goes - without this probe a correct
+    next_click recipe could never pass a min-horizon requirement."""
+    import httpx
+
+    from eventindex.fetch.recipe import (
+        MAX_PAGES_HARD, _FakeResult, extract_with_selectors, next_url, page_urls,
+    )
+    from eventindex.jobs.handlers import _claim_horizon_days
+
+    p = recipe.pagination
+    urls = page_urls(recipe)
+    if not urls:
+        return None
+    url, html = urls[-1], None
+    depth = min(p.max_pages, MAX_PAGES_HARD)
+    if p.type == "next_click":
+        from eventindex.fetch.headless import render_states
+
+        states = render_states(url, p.next_selector, max_states=depth)
+        html = states[-1] if states else None
+    elif p.type in ("load_more_click", "infinite_scroll"):
+        from eventindex.fetch.headless import render_page
+
+        # accumulating UIs: the final DOM already contains the deep items
+        html = render_page(
+            url,
+            click_selector=p.click_selector if p.type == "load_more_click" else None,
+            scroll=p.type == "infinite_scroll",
+        )
+    else:
+        def _get(u: str) -> bytes | None:
+            if recipe.render == "headless":
+                from eventindex.fetch.headless import render_page
+
+                return render_page(u)
+            try:
+                resp = httpx.get(u, headers={"User-Agent": config.USER_AGENT},
+                                 timeout=25, follow_redirects=True)
+                return resp.content
+            except httpx.HTTPError:
+                return None
+
+        html = _get(url)  # last expanded URL ({n}/{year}/{month}/{from}/{to})
+        if p.type == "next_link" and html is not None:
+            for _ in range(depth):
+                nxt = next_url(recipe, html, url)
+                if nxt is None or nxt == url:
+                    break
+                url = nxt
+                if (h := _get(url)) is None:
+                    break
+                html = h
+    if html is None:
+        return None
+    if recipe.field_selectors:
+        payloads = extract_with_selectors(recipe, html, url)
+    else:
+        from eventindex.extract import extract as cascade_extract
+
+        _, payloads = cascade_extract(source, _FakeResult(html, url), tx,
+                                      job_id=job_id)
+    return _claim_horizon_days(payloads)
+
+
+def _page_count(recipe: Recipe) -> int:
+    """How many page fetches/states one crawl of this recipe visits (the
+    extrapolation basis for the coverage gate)."""
+    from eventindex.fetch.recipe import MAX_PAGES_HARD, page_urls
+
+    urls = len(page_urls(recipe))
+    if recipe.pagination.type == "next_click":
+        return min(urls * recipe.pagination.max_pages, MAX_PAGES_HARD)
+    return urls
 
 
 def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
-                   min_horizon_days: int | None = None):
+                   min_horizon_days: int | None = None,
+                   expected_events: int | None = None):
     """H3.2: run the fresh recipe through the real interpreter; extracted
     events must overlap with what the agent saw."""
     # trimmed copy: few pages, no detail-following - birth validation checks
@@ -265,23 +411,44 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
     trimmed.pagination.max_pages = min(trimmed.pagination.max_pages, 3)
     trimmed.follow_detail = False
     payloads, validation = run_recipe(trimmed, source, tx, job_id=job_id)
+    if expected_events and validation.ok and payloads:
+        # coverage gate: hold the recipe against the agent's OWN yield
+        # estimate. Catches the 'valid but 4%-of-the-site' recipe (a
+        # date-window whose page 2+ sits behind a JS paginator validates
+        # fine at 15 items/window and silently drops the rest).
+        reach = len(payloads) * max(
+            _page_count(recipe) / max(_page_count(trimmed), 1), 1)
+        if reach * 5 < expected_events:
+            return None, (
+                f"COVERAGE TOO LOW: you estimated ~{expected_events} events on "
+                f"this site, but this recipe reaches ~{reach:.0f} per crawl. "
+                "Most likely each entry URL/window only shows its FIRST page. "
+                "If the listing has an in-page paginator (href='#', "
+                "ui-paginator, 'Nächste'), use pagination type next_click - "
+                "entry_urls may still carry {from}/{to} windows - and set "
+                "max_pages high enough. Emit again."
+            )
     if min_horizon_days and validation.ok:
         from eventindex.jobs.handlers import _claim_horizon_days
 
         horizon = _claim_horizon_days(payloads) or 0
         if horizon < min_horizon_days:
+            # the trimmed crawl proves content, not depth - probe the real one
+            deep = _deep_probe_horizon(recipe, source, tx, job_id)
+            horizon = max(horizon, deep if deep is not None else horizon)
+        if horizon < min_horizon_days:
             return None, (
-                f"HORIZON TOO SHALLOW: recipe yield reaches only {horizon:.0f} "
-                f"days ahead, required >= {min_horizon_days}. The site publishes "
-                "further - find the month/date navigation (calendar_nav with "
-                "{year}/{month}, date_range {from}/{to}) and emit again."
+                f"HORIZON TOO SHALLOW: recipe yield reaches only {horizon:.1f} "
+                f"days ahead (the deepest page your pagination reaches was "
+                f"checked too), required >= {min_horizon_days}. The site "
+                "publishes further - reach it via month/date navigation "
+                "(calendar_nav {year}/{month}, date_range {from}/{to} with the "
+                "site's date_format) or a deeper paginator, and emit again."
             )
     if not validation.ok:
         reason = f"interpreter validation failed: {'; '.join(validation.reasons)}"
-        if validation.items == 0 and recipe.render == "http":
-            reason += (" | HINT: you see a JavaScript-RENDERED page, but the "
-                       "interpreter fetched plain HTTP and got nothing - this "
-                       "site likely needs render='headless'")
+        if validation.items == 0:
+            reason += " | " + _zero_items_hint(trimmed, sample_titles)
         return None, reason
     got_titles = " || ".join(
         (p.get("title", {}).get("value") or "").lower() for p in payloads
@@ -321,6 +488,7 @@ def onboard_source(tx, source: dict, job_id, model: str,
     max_turns = config.ONBOARD_MAX_TURNS
     wall_s = config.ONBOARD_WALL_CLOCK_S
     checkpointed = False
+    expected_events: int | None = None
     turns = 0
     try:
         while turns < max_turns:
@@ -334,7 +502,7 @@ def onboard_source(tx, source: dict, job_id, model: str,
                 # approaching a base ring: one value checkpoint may extend
                 # the allowance (deterministic gate, hard rings above)
                 checkpointed = True
-                cap_eur, max_turns, wall_s = _value_checkpoint(
+                (cap_eur, max_turns, wall_s), expected_events = _value_checkpoint(
                     tx, messages, session, model, source, job_id
                 )
             if elapsed > wall_s:
@@ -359,7 +527,7 @@ def onboard_source(tx, source: dict, job_id, model: str,
                 except json.JSONDecodeError:
                     args = {}
                 observation = _execute(name, args, browser, source, tx, job_id,
-                                       min_horizon_days)
+                                       min_horizon_days, expected_events)
                 if isinstance(observation, Recipe):
                     recipe_result, outcome = observation, "recipe"
                     session.record(name, args, "recipe accepted")
@@ -386,7 +554,8 @@ def onboard_source(tx, source: dict, job_id, model: str,
 
 
 def _execute(name, args, browser: Browser, source, tx, job_id,
-             min_horizon_days: int | None = None):
+             min_horizon_days: int | None = None,
+             expected_events: int | None = None):
     try:
         if name == "navigate":
             return browser.navigate(args["url"])
@@ -406,6 +575,9 @@ def _execute(name, args, browser: Browser, source, tx, job_id,
             payloads, error = _self_validate(
                 recipe, args.get("sample_titles", []), source, tx, job_id,
                 min_horizon_days=min_horizon_days,
+                # the emit-time estimate is fresher than the checkpoint one
+                expected_events=args.get("expected_events_on_site")
+                or expected_events,
             )
             if error:
                 return f"SELF-VALIDATION FAILED: {error}\nFix the recipe and emit again."

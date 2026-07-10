@@ -219,3 +219,30 @@ def test_next_click_states_respect_page_cap(conn):
         r, {"id": None}, conn, fetch_page=lambda u: [LISTING, LISTING_P2], now=NOW
     )
     assert len(payloads) == 3  # the state beyond the cap is not extracted
+
+
+def test_truncation_is_reported_not_silent(conn):
+    """Limits that cut a crawl short surface in the validation result
+    (Alexander 2026-07-10: a productive source hitting a cap must scream)."""
+    r = _recipe(
+        entry_urls=["https://x.at/suche"],
+        pagination=Pagination(type="next_click", next_selector="a.next",
+                              max_pages=1),
+        validation={"min_items": 2, "required_fields": ["title", "starts_at"]},
+    )
+    _, result = run_recipe(
+        r, {"id": None}, conn, fetch_page=lambda u: [LISTING, LISTING_P2], now=NOW
+    )
+    assert result.truncated is not None and "page cap" in result.truncated
+
+
+def test_unfetched_queued_urls_are_reported(conn):
+    r = _recipe(
+        entry_urls=[f"https://x.at/events?p={i}" for i in range(1, 6)],
+        pagination=Pagination(type="none", max_pages=2),
+        validation={"min_items": 2, "required_fields": ["title", "starts_at"]},
+    )
+    pages = {f"https://x.at/events?p={i}": LISTING for i in range(1, 6)}
+    _, result = run_recipe(r, {"id": None}, conn,
+                           fetch_page=lambda u: pages.get(u), now=NOW)
+    assert result.truncated is None  # entry urls are never silently dropped

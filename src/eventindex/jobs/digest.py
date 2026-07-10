@@ -31,12 +31,30 @@ def gather_stats(conn) -> dict:
         "SELECT detail FROM crawl_log WHERE detail LIKE 'qa:%' "
         "AND started_at >= now() - interval '24 hours' ORDER BY started_at"
     ).fetchall()
+    # productive sources that hit a hard limit: events were demonstrably
+    # left behind (page/state caps) or the source is parked on budget -
+    # either way the index is silently incomplete without a loud flag
+    limits_hit = conn.execute(
+        "SELECT s.name, cl.events_found, cl.detail FROM crawl_log cl "
+        "JOIN source s ON s.id = cl.source_id "
+        "WHERE cl.detail LIKE '%%LIMIT-TRUNCATED%%' AND cl.events_found > 0 "
+        "AND cl.started_at >= now() - interval '24 hours' "
+        "ORDER BY cl.events_found DESC"
+    ).fetchall()
+    budget_parked = conn.execute(
+        "SELECT s.name, s.yield_ema, j.last_error FROM jobs j "
+        "JOIN source s ON s.id = (j.payload->>'source_id')::uuid "
+        "WHERE j.status = 'pending' AND j.last_error LIKE '%%budget%%' "
+        "AND j.run_after > now() AND s.yield_ema > 0"
+    ).fetchall()
     return {
         "crawls": crawls,
         "spend": spend,
         "failed_jobs": failed_jobs,
         "last_success": last_success,
         "qa": qa,
+        "limits_hit": limits_hit,
+        "budget_parked": budget_parked,
     }
 
 
@@ -53,6 +71,17 @@ def render(stats: dict, now: datetime) -> str:
             "!" * 60,
             "",
         ]
+
+    if stats.get("limits_hit") or stats.get("budget_parked"):
+        lines += ["!" * 60,
+                  "!! LIMITS HIT ON PRODUCTIVE SOURCES - EVENTS ARE BEING MISSED"]
+        for r in stats.get("limits_hit", []):
+            lines.append(f"!!  {r['name']} ({r['events_found']} events indexed, "
+                         f"more exist): {r['detail'][-120:]}")
+        for r in stats.get("budget_parked", []):
+            lines.append(f"!!  {r['name']} (yield_ema {r['yield_ema']:.0f}) "
+                         f"parked: {r['last_error'][:80]}")
+        lines += ["!" * 60, ""]
 
     lines.append("crawls (24h):")
     if stats["crawls"]:

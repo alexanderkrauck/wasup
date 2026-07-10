@@ -42,3 +42,21 @@ def test_qa_section_renders_check_results():
 
 def test_qa_section_flags_silence():
     assert "QA loop did not run" in render(_stats(NOW), NOW)
+
+
+def test_limit_warning_screams_when_productive_source_truncated():
+    stats = _stats(NOW - timedelta(hours=2))
+    stats["limits_hit"] = [{"name": "linztermine (site, deep)",
+                            "events_found": 426,
+                            "detail": "method=recipe v2 LIMIT-TRUNCATED: state cap 100 hit"}]
+    stats["budget_parked"] = [{"name": "big portal", "yield_ema": 300.0,
+                               "last_error": "source monthly budget - waiting"}]
+    text = render(stats, NOW)
+    assert "EVENTS ARE BEING MISSED" in text
+    assert "linztermine (site, deep)" in text
+    assert "big portal" in text
+
+
+def test_no_limit_warning_without_hits():
+    text = render(_stats(NOW - timedelta(hours=2)), NOW)
+    assert "EVENTS ARE BEING MISSED" not in text

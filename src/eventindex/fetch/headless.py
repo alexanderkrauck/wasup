@@ -79,12 +79,14 @@ _NEXT_EXHAUSTED_JS = """e =>
 
 def render_states(
     url: str, next_selector: str | None, max_states: int
-) -> list[bytes] | None:
+) -> tuple[list[bytes], bool] | None:
     """next_click pagination: harvest EVERY page state - unlike load-more
     (accumulating DOM, final snapshot suffices), a JSF/PrimeFaces-style
     paginator REPLACES the list in place, so each state must be captured
     before the next click. Stops on missing/disabled control or when a
-    click no longer changes the DOM."""
+    click no longer changes the DOM. Returns (states, more_available):
+    more_available=True means max_states cut the walk short while the next
+    control was still active - the caller must NOT let that stay silent."""
     context = None
     try:
         context = _get_browser().new_context(user_agent=config.USER_AGENT)
@@ -93,10 +95,14 @@ def render_states(
         page.wait_for_timeout(1500)
 
         states = [page.content()]
-        while next_selector and len(states) < max_states:
+        more = False
+        while next_selector:
             button = page.query_selector(next_selector)
             if (button is None or not button.is_visible()
                     or button.evaluate(_NEXT_EXHAUSTED_JS)):
+                break
+            if len(states) >= max_states:
+                more = True  # limit hit with pages still ahead
                 break
             button.click()
             page.wait_for_timeout(1200)
@@ -104,7 +110,7 @@ def render_states(
             if content == states[-1]:  # no-op click: not a working paginator
                 break
             states.append(content)
-        return [s.encode() for s in states]
+        return [s.encode() for s in states], more
     except Exception as e:
         log.warning("headless states failed %s: %s", url, e)
         return None

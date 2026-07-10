@@ -44,7 +44,10 @@ class Pagination(BaseModel):
         "(JSF/PrimeFaces paginators, href='#' + onclick) - every page state "
         "is harvested, so it also covers plain load-more/append UIs.")
     click_selector: str | None = Field(None, description="load_more_click: CSS for the button")
-    months_ahead: int = Field(3, description="calendar_nav/date_range_param horizon")
+    months_ahead: int = Field(
+        3, description="date/calendar template horizon in months. Cover the "
+        "site's WHOLE published horizon (an open-ended range - empty to= - "
+        "is better than many windows when the site allows it).")
     date_format: str | None = Field(
         None, description="strftime for {from}/{to}, e.g. '%d.%m.%Y' when the "
         "site wants German dates. Default ISO (%Y-%m-%d).")
@@ -53,7 +56,10 @@ class Pagination(BaseModel):
         "days (one URL each) for sites that cap results per query")
 
 
-MAX_MONTHS_AHEAD = 12
+# completeness bound: index EVERYTHING a site publishes, up to 5 years out
+# (Alexander 2026-07-10) - the real governors are MAX_PAGES_HARD + budgets,
+# never an arbitrary calendar cutoff
+MAX_MONTHS_AHEAD = 60
 
 
 class Validation(BaseModel):
@@ -99,6 +105,10 @@ class ValidationResult(BaseModel):
     ok: bool
     items: int
     reasons: list[str]
+    # set when a hard limit (page cap, state cap) cut the crawl short while
+    # more content was demonstrably available - events are being MISSED and
+    # that must never stay silent (Alexander 2026-07-10)
+    truncated: str | None = None
 
 
 # ------------------------------------------------------------- pagination
@@ -270,13 +280,14 @@ def run_recipe(
     page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
     detail_budget = MAX_DETAIL_FETCHES  # per CRAWL, as the §cost-governance caps promise
     try:
-        payloads = _crawl_pages(
+        payloads, truncated = _crawl_pages(
             recipe, source, tx, job_id, fetch_page, queue, visited, page_cap,
             detail_budget, seen_fps, now, cascade_extract, parse_dt,
         )
     finally:
         if owns_fetcher and (close := getattr(fetch_page, "close", None)):
             close()
+    truncated = truncated or getattr(fetch_page, "truncated", None)
 
     # dedupe identical payloads (listing + detail double-extraction)
     unique, keys = [], set()
@@ -285,13 +296,16 @@ def run_recipe(
         if key not in keys:
             keys.add(key)
             unique.append(p)
-    return unique, validate(recipe, unique)
+    result = validate(recipe, unique)
+    result.truncated = truncated
+    return unique, result
 
 
 def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                  page_cap, detail_budget, seen_fps, now, cascade_extract,
-                 parse_dt) -> list[dict]:
+                 parse_dt) -> tuple[list[dict], str | None]:
     payloads: list[dict] = []
+    truncated: str | None = None
     pages = 0
     while queue and pages < page_cap:
         url = queue.pop(0)
@@ -304,6 +318,9 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
         # a next_click fetch returns one HTML per harvested page state; each
         # state counts against page_cap like a fetched page
         states = fetched if isinstance(fetched, list) else [fetched]
+        if len(states) > page_cap - pages:
+            truncated = (f"page cap {page_cap} dropped "
+                         f"{len(states) - (page_cap - pages)} harvested states")
 
         stop = False
         for html in states[: max(page_cap - pages, 0)]:
@@ -349,9 +366,14 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
             if (nxt := next_url(recipe, html, url)) is not None:
                 queue.append(nxt)
         if stop:
-            break
+            return payloads, truncated
 
-    return payloads
+    if queue and any(u not in visited for u in queue):
+        # the loop ended on page_cap, not on an empty queue: pre-expanded
+        # URLs (date windows, calendar months) were never fetched
+        truncated = truncated or (
+            f"page cap {page_cap} hit with {len(queue)} queued urls unfetched")
+    return payloads, truncated
 
 
 class _FakeResult:
@@ -376,10 +398,19 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
 
             def fetch_next_click(url: str) -> list[bytes] | None:
                 time.sleep(config.CRAWL_DELAY_S)
-                return render_states(
+                result = render_states(
                     url, recipe.pagination.next_selector, max_states=max_states
                 )
+                if result is None:
+                    return None
+                states, more = result
+                if more:
+                    fetch_next_click.truncated = (
+                        f"state cap {max_states} hit at {url} with the next "
+                        "control still active")
+                return states
 
+            fetch_next_click.truncated = None
             return fetch_next_click
 
         def fetch_headless(url: str) -> bytes | None:

@@ -183,6 +183,10 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     _insert_claims(tx, source, crawl_id, payloads)
     _update_source_stats(tx, job, source, payloads, "recipe")
     detail = f"method=recipe v{source['recipe_version']}"
+    if validation.truncated and payloads:
+        # a productive source hit a hard limit: events exist beyond the cap
+        # and were NOT indexed - the digest turns this into a loud warning
+        detail += f" LIMIT-TRUNCATED: {validation.truncated[:150]}"
     if not healthy:
         detail += f" UNHEALTHY({degraded_count}): " + "; ".join(validation.reasons)[:200]
     _log_crawl(tx, crawl_id, job, source["id"], "ok" if healthy else "error",

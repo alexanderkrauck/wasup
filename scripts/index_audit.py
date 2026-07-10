@@ -74,7 +74,10 @@ def main() -> None:
         lines.append(f"## Aggregator-only events with zero locality evidence: {len(junk)}")
         lines.append("(candidates for a rebuild-side locality gate - see OPEN-QUESTIONS)")
         for r in junk:
-            foreign = "" if (r["url"] or "").find(".at/") >= 0 else " [foreign URL]"
+            from urllib.parse import urlparse
+
+            host = urlparse(r["url"] or "").netloc
+            foreign = "" if host.endswith(".at") else " [foreign URL]"
             lines.append(f"- {r['title'][:70]}{foreign} <{r['url']}> ({', '.join(r['sources'])})")
         lines.append("")
 

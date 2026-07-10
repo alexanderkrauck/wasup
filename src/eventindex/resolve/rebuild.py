@@ -725,6 +725,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
 
         newly_negative: list[uuid.UUID] = []
         suppressed: list[str] = []
+        aggregator_junk: list[str] = []
         for g in groups:
             pairs, tentative, rrule_text, projected = _occurrences_for(
                 conn, g, holidays, now
@@ -752,6 +753,16 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     f"{values.get('title', '')} | {values.get('address')} | "
                     f"{values.get('organizer')}"
                 )
+            if _is_global_aggregator_junk(
+                g["claims"], values.get("url"), rep.venue_id, lat
+            ):
+                # not published at all (claims stay; the gate is part of the
+                # pure rebuild function, so a later local claim or .at URL
+                # resurrects the event automatically)
+                aggregator_junk.append(
+                    f"{values.get('title', '')} | {values.get('url')}"
+                )
+                continue
 
             conn.execute(
                 """
@@ -825,6 +836,8 @@ def rebuild(conn, now: datetime | None = None) -> dict:
         _confirmation_sweep(conn, newly_negative)
         _dump_venue_review(resolver.created, now, venue_notes)
         _dump_review("suppressed", suppressed, now)
+        _dump_review("aggregator-junk", aggregator_junk, now)
+        stats["aggregator_junk"] = len(aggregator_junk)
         stats["enrich_pending"] = _apply_enrichment(conn)
     return stats
 
@@ -886,6 +899,28 @@ _ORG_WORDS = {
     "haus", "bar", "café", "cafe", "theater", "museum", "galerie", "stadt",
     "linz", "team", "gruppe", "band", "orchester", "kulturverein",
 }
+
+
+# global platforms pad thin city listings with online/foreign events (found
+# live 2026-07-10: Boston career fairs and a NASA launch served as Linz
+# events, all via Eventbrite). Austria-local aggregators (linztermine, tips,
+# meinbezirk, eventfinder) are NOT in this set - their whole scope is local,
+# so placeless events from them are real events with lazy markup.
+_GLOBAL_AGGREGATOR_RE = re.compile(r"eventbrite|meetup", re.I)
+
+
+def _is_global_aggregator_junk(claims, url: str | None, venue_id, lat) -> bool:
+    """No venue, no geo, ONLY global-platform provenance, and an event URL
+    outside .at => an online/foreign event padded into the city listing.
+    Conservative by construction: any local corroboration or .at URL keeps
+    the event published."""
+    from urllib.parse import urlparse
+
+    if venue_id is not None or lat is not None:
+        return False
+    if not all(_GLOBAL_AGGREGATOR_RE.search(c.source_name or "") for c in claims):
+        return False
+    return not urlparse(url or "").netloc.endswith(".at")
 
 
 def _is_private_intent(address: str | None, organizer: str | None) -> bool:

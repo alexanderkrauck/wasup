@@ -398,3 +398,34 @@ def test_source_native_categories_never_reach_canon(conn):
     ).fetchall()}
     assert rows["Schachturnier"] == []      # junk -> unknown, not published
     assert rows["Konzert"] == ["music"]     # case-normalized taxonomy value
+
+
+def test_global_aggregator_junk_is_not_published(conn):
+    """Eventbrite pads thin city listings with online/foreign events (live
+    2026-07-10: Boston career fairs and a NASA launch served as Linz
+    events). Global-platform-only + placeless + non-.at URL => unpublished;
+    any .at URL or local corroboration keeps the event."""
+    eb = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust) VALUES "
+        "('Eventbrite Linz', 'https://www.eventbrite.at/d/linz/', 'website', 3, 0.6) "
+        "RETURNING id"
+    ).fetchone()["id"]
+    local = _source(conn, "posthof", 0.9)
+
+    def eb_claim(title, url, fp):
+        fields = {"title": (title, 0.95),
+                  "starts_at": ("2026-07-20T19:00:00+02:00", 0.95),
+                  "url": (url, 0.95)}
+        _claim(conn, eb, fields, fp)
+
+    eb_claim("Boston Career Fair", "https://www.eventbrite.com/e/boston-1", "boston|x")
+    eb_claim("Linzer Sommerkurs", "https://www.eventbrite.at/e/linz-1", "sommerkurs|x")
+    # foreign URL but corroborated by a local source -> stays
+    eb_claim("Kulturfest", "https://www.eventbrite.com/e/kultur-1", "kulturfest|x")
+    _claim(conn, local, _concert("Kulturfest", venue=None), "kulturfest|x")
+    rb.rebuild(conn, now=NOW)
+
+    titles = {r["title"] for r in conn.execute("SELECT title FROM event").fetchall()}
+    assert "Boston Career Fair" not in titles
+    assert "Linzer Sommerkurs" in titles
+    assert "Kulturfest" in titles

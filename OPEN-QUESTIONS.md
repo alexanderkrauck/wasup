@@ -4,12 +4,12 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
-15. **Locality gate for aggregator junk** (2026-07-10) - global aggregators pad city listings with online events (measured: 19/49 Eventbrite-sourced events have zero locality evidence; e.g. a UK "Birth to 5 Matters" webinar). Proposed rebuild gate: events whose ONLY provenance is global aggregators AND no venue AND no geo AND foreign event URL -> not published (stays in claims). Current junk list: var/review/index-audit-*.md. Apply gate y/n?
-
 9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
 11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
 
 ## Answered
+
+15. **Locality gate for aggregator junk** → applied, **decided by the agent under the 2026-07-10 full-autonomy grant - veto here if wrong.** Evidence: Boston/Las Vegas career fairs and a NASA launch were being served as Linz events (all Eventbrite, non-.at URLs, zero locality data). Gate (rebuild-side, pure function, fully reversible): only-global-platform provenance (eventbrite|meetup) AND no venue AND no geo AND non-.at event URL → unpublished; suppressed titles dumped to var/review/aggregator-junk-*.md. Austria-local aggregators (linztermine/tips/meinbezirk/eventfinder) are exempt by design - their placeless events are real events with lazy markup. *(2026-07-10)*
 
 13. **Ticketmaster Discovery API key** → **no** (Alexander, 2026-07-09): Austria is Eventim country, Linz inventory thin; prices/images come from booking-schema extraction (backlog #8) instead. *(2026-07-09)*
 14. **Bandsintown partner app_id** → **no** ("fuck em", Alexander, 2026-07-09): artist-gig long tail for Linz is tiny, music already the strongest category. Phase A closed: tips.at + meinbezirk aggregators onboarded and crawling; Eventbrite/Meetup were already crawled; ra.co/Bandsintown/Songkick bot-walled (no evasion arms race), Eventbrite API dead for public search since 2020, Songkick API closed. *(2026-07-09)*

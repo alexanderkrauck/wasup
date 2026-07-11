@@ -13,7 +13,7 @@ import httpx
 
 from eventindex import config
 from eventindex.budget import record_spend
-from eventindex.discovery.probe import domain_of, known_domains
+from eventindex.discovery.probe import domain_of, is_known, known_domains
 
 log = logging.getLogger("eventindex.sweep")
 
@@ -219,7 +219,7 @@ def discover(tx, channel: str, job_id=None) -> tuple[int, int]:
     }
     for url in urls:
         domain = domain_of(url)
-        if not domain or domain in known or domain in queued_domains \
+        if not domain or is_known(domain, known) or domain in queued_domains \
                 or domain in already_queued:
             continue
         if enqueued >= MAX_PROBES_PER_SWEEP:

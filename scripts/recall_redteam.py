@@ -16,7 +16,7 @@ import sys
 from datetime import date, datetime, timedelta
 
 from eventindex import config, db, llm
-from eventindex.discovery.probe import domain_of, known_domains
+from eventindex.discovery.probe import domain_of, is_known, known_domains
 from eventindex.discovery.sweep import _PORTAL_NOISE
 from eventindex.jobs.worker import enqueue
 
@@ -120,7 +120,7 @@ def main() -> None:
             for title, d, url in misses:
                 domain = domain_of(url)
                 probed = ""
-                if domain and domain not in known \
+                if domain and not is_known(domain, known) \
                         and not any(n in url for n in _SKIP_DOMAINS):
                     enqueue(conn, "probe",
                             {"url": url, "discovered_via": "recall_redteam"})

@@ -43,13 +43,31 @@ def domain_of(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def is_owned_by(host: str, probed: str) -> bool:
+    """True when host is the probed domain itself or one of its own
+    subdomains (events.x.at under x.at). This is the only kind of
+    listing_url a probe may adopt: page text is untrusted input, anything
+    off the probed site would register an arbitrary third party. Distinct
+    tenants on shared platforms (a.jimdo.com vs b.jimdo.com) stay distinct
+    - a sibling subdomain is never "owned"."""
+    return host == probed or host.endswith("." + probed)
+
+
+def is_known(domain: str, known: set[str]) -> bool:
+    """A candidate domain is known if a source exists on that host OR on
+    any subdomain of it: a source registered at events.x.at must make the
+    x.at apex known, or every future sweep re-probes it forever (no
+    convergence)."""
+    return domain in known or any(k.endswith("." + domain) for k in known)
+
+
 def known_domains(tx) -> set[str]:
     return {domain_of(r["url"]) for r in tx.execute("SELECT url FROM source")}
 
 
 def probe_url(tx, url: str, discovered_via: str, job_id=None) -> dict:
     """Returns {"outcome": registered|known|rejected|error, ...}."""
-    if domain_of(url) in known_domains(tx):
+    if is_known(domain_of(url), known_domains(tx)):
         return {"outcome": "known"}
     time.sleep(config.CRAWL_DELAY_S)
     try:
@@ -82,12 +100,15 @@ def probe_url(tx, url: str, discovered_via: str, job_id=None) -> dict:
     if score < REGISTER:
         return {"outcome": "rejected", "score": score, "detail": verdict.suggested_name}
 
-    # the model may suggest a deeper listing URL, but only ON the probed
-    # domain: page text is untrusted input, and an off-domain URL would both
-    # register an arbitrary third-party site and leave the probed domain
-    # unknown (so every future sweep re-probes it - no convergence)
+    # the model may suggest a deeper listing URL, but only on the probed
+    # site itself or its own subdomains (events.factory300.at under
+    # factory300.at - the exact-host rule cost us that listing and the
+    # onboard exhausted from the bare homepage, found live 2026-07-11);
+    # is_known() keeps the apex known afterwards, so sweeps still converge
     source_url = str(resp.url)
-    if verdict.listing_url and domain_of(verdict.listing_url) == domain_of(source_url):
+    if verdict.listing_url and is_owned_by(
+        domain_of(verdict.listing_url), domain_of(source_url)
+    ):
         source_url = verdict.listing_url
     row = tx.execute(
         """

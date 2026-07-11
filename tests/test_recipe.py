@@ -261,3 +261,12 @@ def test_llm_wrapped_arrays_are_unwrapped():
     assert r.entry_urls == ["https://x.at/events"]
     assert r.validation.required_fields == ["title", "starts_at"]
     assert r.stop_conditions == ["date_older_than_now"]
+
+
+def test_nested_llm_wrapped_arrays_are_unwrapped():
+    r = Recipe(
+        entry_urls=["https://x.at/events"],
+        pagination=Pagination(type="none"),
+        validation={"required_fields": {"item": {"item": ["title", "starts_at"]}}},
+    )
+    assert r.validation.required_fields == ["title", "starts_at"]

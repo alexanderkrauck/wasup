@@ -64,13 +64,11 @@ MAX_MONTHS_AHEAD = 60
 
 def _coerce_list(v):
     """LLM tool-call quirk: some models wrap array params as
-    {'item': [...]}/{'items': [...]} or send a lone string. Unwrap instead
-    of burning whole onboarding sessions on schema retries (a prod session
-    spent 6 emits failing on exactly this, 2026-07-11)."""
-    if isinstance(v, dict) and len(v) == 1:
-        inner = next(iter(v.values()))
-        if isinstance(inner, list):
-            return inner
+    {'item': [...]} - even NESTED ({'item': {'item': [...]}}) - or send a
+    lone string. Unwrap instead of burning whole onboarding sessions on
+    schema retries (prod sessions failed on both shapes, 2026-07-11)."""
+    while isinstance(v, dict) and len(v) == 1:
+        v = next(iter(v.values()))
     if isinstance(v, str):
         return [v]
     return v

@@ -121,8 +121,19 @@ def render_states(
         reason = "exhausted"
         while next_selector:
             button = page.query_selector(next_selector)
-            if (button is None or not button.is_visible()
-                    or button.evaluate(_NEXT_EXHAUSTED_JS)):
+            if button is None:
+                # under load (shared box, parallel crawls) widgets render
+                # late; a session declared working paginations dead over
+                # exactly this (prod 2026-07-11) - wait before giving up
+                try:
+                    page.wait_for_selector(next_selector, state="attached",
+                                           timeout=4000)
+                except Exception:
+                    break
+                button = page.query_selector(next_selector)
+                if button is None:
+                    break
+            if not button.is_visible() or button.evaluate(_NEXT_EXHAUSTED_JS):
                 break
             if len(states) >= max_states:
                 reason = "cap"  # limit hit with pages still ahead
@@ -130,6 +141,9 @@ def render_states(
             button.click()
             page.wait_for_timeout(1200)
             content = page.content()
+            if content == states[-1]:  # slow AJAX? one more chance
+                page.wait_for_timeout(2500)
+                content = page.content()
             if content == states[-1]:  # no-op click: not a working paginator
                 reason = "noop"
                 break

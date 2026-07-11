@@ -121,8 +121,8 @@ def test_required_horizon_scales_with_reported_site_horizon():
     from eventindex.discovery.onboard import _required_horizon
 
     assert _required_horizon(21, None) == 21
-    assert _required_horizon(21, 700) == 560  # 80% of what the agent saw
-    assert _required_horizon(21, 10_000) == 1460  # 5-year cap
+    assert abs(_required_horizon(21, 700) - 490) < 0.01  # 70% of what the agent saw
+    assert abs(_required_horizon(21, 10_000) - 1277.5) < 0.01  # 5-year cap
     assert _required_horizon(None, None) == 0
 
 

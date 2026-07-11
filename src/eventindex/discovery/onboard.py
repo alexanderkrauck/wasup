@@ -442,7 +442,10 @@ def _required_horizon(min_horizon_days: int | None,
     arbitrary few-months window is not a valid recipe choice."""
     required = float(min_horizon_days or 0)
     if site_horizon_days:
-        required = max(required, min(site_horizon_days, 5 * 365) * 0.8)
+        # 0.7, not 0.8: recurring events stretch the page count, so even a
+        # correct full walk's deepest page sits below the absolute horizon
+        # (a working 458d/640d recipe was rejected at 0.8, 2026-07-11)
+        required = max(required, min(site_horizon_days, 5 * 365) * 0.7)
     return required
 
 
@@ -508,6 +511,16 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
         reason = f"interpreter validation failed: {'; '.join(validation.reasons)}"
         if validation.items == 0:
             reason += " | " + _zero_items_hint(trimmed, sample_titles)
+        if (recipe.field_selectors or recipe.item_scope) and (
+            validation.items == 0
+            or any("date_parse" in r or "required field" in r
+                   for r in validation.reasons)
+        ):
+            # agents burn 10+ emits fiddling with selectors instead of
+            # dropping them (2026-07-11); selectors are an optimization
+            reason += (" | TIP: OMIT field_selectors AND item_scope entirely "
+                       "- the interpreter's selector-free LLM extraction "
+                       "always works. Emit the minimal recipe.")
         return None, reason
     got_titles = " || ".join(
         (p.get("title", {}).get("value") or "").lower() for p in payloads

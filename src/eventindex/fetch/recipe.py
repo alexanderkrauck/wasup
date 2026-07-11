@@ -331,6 +331,7 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
     payloads: list[dict] = []
     truncated: str | None = None
     pages = 0
+    seen_streak = 0  # all_fingerprints_seen needs sustained evidence
     while queue and pages < page_cap:
         url = queue.pop(0)
         if url in visited:
@@ -382,11 +383,18 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                 if dates and max(dates) < (now or datetime.now()).astimezone():
                     stop = True
                     break
-            if seen_fps is not None and page_payloads and _all_seen(
-                page_payloads, seen_fps, source
-            ):
-                stop = True
-                break
+            if seen_fps is not None and page_payloads:
+                # one fully-known page is NOT proof the rest is known: a
+                # history of shallow crawls leaves page 1 claimed and pages
+                # 2+ virgin (a 75-page walk was discarded over this,
+                # 2026-07-11). Demand a sustained streak.
+                if _all_seen(page_payloads, seen_fps, source):
+                    seen_streak += 1
+                    if seen_streak >= 3:
+                        stop = True
+                        break
+                else:
+                    seen_streak = 0
             if (nxt := next_url(recipe, html, url)) is not None:
                 queue.append(nxt)
         if stop:

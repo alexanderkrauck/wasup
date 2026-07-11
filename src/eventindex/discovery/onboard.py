@@ -340,75 +340,80 @@ def _value_checkpoint(tx, messages, session, model, source, job_id):
     return _extended_rings(est.expected_events_per_crawl), est.expected_events_per_crawl
 
 
-def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
-    """How far the FULL recipe really reaches: walk its pagination to the
-    deepest reachable page and extract only that one. The trimmed validation
-    sees ~3 pages, and a chronological listing shows next week on page 1 no
-    matter how deep the pagination goes - without this probe a correct
-    next_click recipe could never pass a min-horizon requirement."""
+def _probe_url_deepest_html(recipe: Recipe, url: str) -> tuple[bytes | None, str]:
+    """Deepest page state reachable from one entry URL, per pagination type."""
     import httpx
 
-    from eventindex.fetch.recipe import (
-        MAX_PAGES_HARD, _FakeResult, extract_with_selectors, next_url, page_urls,
-    )
+    from eventindex.fetch.recipe import MAX_PAGES_HARD, next_url
 
     p = recipe.pagination
-    urls = page_urls(recipe)
-    if not urls:
-        return None
-    url, html = urls[-1], None
     depth = min(p.max_pages, MAX_PAGES_HARD)
     if p.type == "next_click":
         from eventindex.fetch.headless import render_states
 
         result = render_states(url, p.next_selector, max_states=depth)
-        html = result[0][-1] if result and result[0] else None
-    elif p.type in ("load_more_click", "infinite_scroll"):
+        return (result[0][-1] if result and result[0] else None), url
+    if p.type in ("load_more_click", "infinite_scroll"):
         from eventindex.fetch.headless import render_page
 
         # accumulating UIs: the final DOM already contains the deep items
-        html = render_page(
+        return render_page(
             url,
             click_selector=p.click_selector if p.type == "load_more_click" else None,
             scroll=p.type == "infinite_scroll",
-        )
-    else:
-        def _get(u: str) -> bytes | None:
-            if recipe.render == "headless":
-                from eventindex.fetch.headless import render_page
+        ), url
 
-                return render_page(u)
-            try:
-                resp = httpx.get(u, headers={"User-Agent": config.USER_AGENT},
-                                 timeout=25, follow_redirects=True)
-                return resp.content
-            except httpx.HTTPError:
-                return None
+    def _get(u: str) -> bytes | None:
+        if recipe.render == "headless":
+            from eventindex.fetch.headless import render_page
 
-        html = _get(url)  # last expanded URL ({n}/{year}/{month}/{from}/{to})
-        if p.type == "next_link" and html is not None:
-            for _ in range(depth):
-                nxt = next_url(recipe, html, url)
-                if nxt is None or nxt == url:
-                    break
-                url = nxt
-                if (h := _get(url)) is None:
-                    break
-                html = h
-    if html is None:
-        return None
-    if recipe.field_selectors:
-        payloads = extract_with_selectors(recipe, html, url)
-    else:
-        from eventindex.extract import extract as cascade_extract
+            return render_page(u)
+        try:
+            resp = httpx.get(u, headers={"User-Agent": config.USER_AGENT},
+                             timeout=25, follow_redirects=True)
+            return resp.content
+        except httpx.HTTPError:
+            return None
 
-        _, payloads = cascade_extract(source, _FakeResult(html, url), tx,
-                                      job_id=job_id)
-    # 95th percentile: max is fooled by a single far-dated row on the last
-    # page (an open query capped at ~1134 rows ending Nov 2026 passed a
-    # 460-day requirement over one 2028 outlier, 2026-07-11); the median
-    # in turn sits below the genuine deep end and rejected working recipes.
-    return _percentile_horizon_days(payloads, 0.95)
+    html = _get(url)
+    if p.type == "next_link" and html is not None:
+        for _ in range(depth):
+            nxt = next_url(recipe, html, url)
+            if nxt is None or nxt == url:
+                break
+            url = nxt
+            if (h := _get(url)) is None:
+                break
+            html = h
+    return html, url
+
+
+def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
+    """How far the FULL recipe really reaches: walk the pagination to its
+    deepest NON-EMPTY page and extract only that one. Probes entry URLs from
+    the back: a windowed recipe whose horizon exceeds the site's has empty
+    trailing windows, and an empty 2031 window says nothing about how deep
+    the recipe reaches (it rejected correct recipes as '0 days', 2026-07-12)."""
+    from eventindex.fetch.recipe import _FakeResult, extract_with_selectors, page_urls
+
+    urls = page_urls(recipe)
+    for url in list(reversed(urls))[:6]:
+        html, final_url = _probe_url_deepest_html(recipe, url)
+        if html is None:
+            continue
+        if recipe.field_selectors:
+            payloads = extract_with_selectors(recipe, html, final_url)
+        else:
+            from eventindex.extract import extract as cascade_extract
+
+            _, payloads = cascade_extract(source, _FakeResult(html, final_url),
+                                          tx, job_id=job_id)
+        # 95th percentile: max is fooled by a single far-dated row on the
+        # last page; the median undershoots the genuine deep end
+        horizon = _percentile_horizon_days(payloads, 0.95)
+        if horizon is not None:
+            return horizon
+    return None
 
 
 def _percentile_horizon_days(payloads: list[dict], q: float) -> float | None:
@@ -550,7 +555,10 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
     hits = sum(1 for t in sample_titles if t.lower()[:40] in got_titles)
     if hits / max(len(sample_titles), 1) < 0.5:
         return None, (f"only {hits}/{len(sample_titles)} of your sample_titles were "
-                      "found by the recipe - selectors or pagination are wrong")
+                      "found by the recipe - selectors or pagination are wrong. "
+                      "NOTE: validation only visits the recipe's FIRST pages/"
+                      "windows - sample_titles must be events you saw THERE, "
+                      "not from deep in the calendar.")
     return payloads, None
 
 

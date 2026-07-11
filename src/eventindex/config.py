@@ -66,7 +66,7 @@ RECIPE_MIN_HORIZON_DAYS = 21      # escalated recipes must reach at least this
 # evidence, the code decides; a lying model still can't pass the hard rings.
 ONBOARD_MAX_TURNS = 25
 ONBOARD_SESSION_CAP_EUR = 0.60  # H3.5: one-time per source; hard sites cost more
-ONBOARD_WALL_CLOCK_S = 1000  # raised from 600 (Alexander 2026-07-08)
+ONBOARD_WALL_CLOCK_S = 1500  # 600->1000 (2026-07-08); ->1500: gate validations run inside turns (2026-07-11)
 ONBOARD_EUR_PER_EXPECTED_EVENT = 0.03  # one-time spend justified per expected event/crawl
 ONBOARD_HARD_CAP_EUR = 2.50
 ONBOARD_HARD_MAX_TURNS = 60

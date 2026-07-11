@@ -294,3 +294,22 @@ def test_stop_conditions_skip_to_next_window(conn):
                              fetch_page=lambda u: pages.get(u), now=NOW)
     titles = [p["title"]["value"] for p in payloads]
     assert "Sommerkonzert" in titles  # window 2 was still crawled
+
+
+def test_next_click_budget_multiplies_windows_by_states(conn):
+    """3 window urls x max_pages 3 must allow 9 states - the old max()
+    formula capped the whole crawl at 3 and starved the coverage gate's
+    measurement (2026-07-11)."""
+    r = _recipe(
+        entry_urls=[f"https://x.at/w{i}" for i in (1, 2, 3)],
+        pagination=Pagination(type="next_click", next_selector="a.next",
+                              max_pages=3),
+        validation={"min_items": 2, "required_fields": ["title", "starts_at"]},
+    )
+    payloads, result = run_recipe(
+        r, {"id": None}, conn,
+        fetch_page=lambda u: [LISTING, LISTING_P2] if u.endswith("w1")
+        else [LISTING_P2 if u.endswith("w2") else LISTING],
+        now=NOW,
+    )
+    assert result.pages == 4  # 2 + 1 + 1 states, none dropped by the cap

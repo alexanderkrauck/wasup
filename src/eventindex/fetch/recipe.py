@@ -300,8 +300,14 @@ def run_recipe(
     queue = list(urls)
     # the pre-expanded URL list (calendar months x entry urls) is already
     # bounded by MAX_MONTHS_AHEAD; max_pages must not silently truncate it -
-    # it governs dynamic next_link chains beyond the expansion
-    page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
+    # it governs dynamic next_link chains beyond the expansion. next_click
+    # harvests up to max_pages STATES per url, so its budget multiplies
+    # (window x states) - the old max() capped a 3-window validation at 3
+    # total states and starved the coverage gate's measurement (2026-07-11)
+    if recipe.pagination.type == "next_click":
+        page_cap = min(len(urls) * recipe.pagination.max_pages, MAX_PAGES_HARD)
+    else:
+        page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
     detail_budget = MAX_DETAIL_FETCHES  # per CRAWL, as the §cost-governance caps promise
     try:
         payloads, truncated, pages = _crawl_pages(

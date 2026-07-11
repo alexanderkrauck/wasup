@@ -66,7 +66,9 @@ ONBOARD_WALL_CLOCK_S = 1000  # raised from 600 (Alexander 2026-07-08)
 ONBOARD_EUR_PER_EXPECTED_EVENT = 0.03  # one-time spend justified per expected event/crawl
 ONBOARD_HARD_CAP_EUR = 2.50
 ONBOARD_HARD_MAX_TURNS = 60
-ONBOARD_HARD_WALL_CLOCK_S = 1800
+# 3600: validation got heavier (headless trimmed runs + deep probes eat wall
+# clock inside agent turns); 1800 killed a converging session 2026-07-11
+ONBOARD_HARD_WALL_CLOCK_S = 3600
 TRAJECTORY_DIR = VAR_DIR / "trajectories"
 
 # Worker

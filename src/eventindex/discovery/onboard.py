@@ -46,7 +46,9 @@ Method:
    unchanged is NOT working pagination - do not build a recipe on it.
    For next_click, ALWAYS click your exact next_selector once before
    emitting and confirm the LINKS DELTA changed - pages often carry a
-   decorative second paginator whose clicks do nothing.
+   decorative second paginator whose clicks do nothing. Build the selector
+   from the CLICKED ELEMENT line of the click that WORKED (prefer stable
+   attributes: aria-label, rel, id) - never a lookalike from memory.
    Date windows and next_click COMBINE: entry_urls with {from}/{to} plus
    pagination type next_click clicks through every window - use this when a
    date-filtered listing still paginates in-page. A recipe that only ever
@@ -185,9 +187,13 @@ class Browser:
         el = page.query_selector(selector)
         if el is None:
             return f"no element matches {selector!r}"
+        # echo the clicked element's identity: a recipe's next_selector must
+        # name the EXACT control that worked, and agents kept emitting
+        # lookalike selectors of decorative paginators (prod, 2026-07-11)
+        identity = el.evaluate("e => e.cloneNode(false).outerHTML")[:300]
         el.click()
         page.wait_for_timeout(1200)
-        return self.observe()
+        return f"CLICKED ELEMENT: {identity}\n" + self.observe()
 
     def scroll(self) -> str:
         page = self._ensure()

@@ -64,3 +64,19 @@ def test_deep_probe_reports_last_page_horizon():
     # the fixture's last page is dated 2030-10-04 - far beyond any
     # min-horizon requirement, and months beyond its page 1
     assert horizon is not None and horizon > 365
+
+
+def test_browser_click_echoes_element_identity():
+    """The agent must be able to copy the EXACT control it successfully
+    clicked into next_selector - lookalike selectors of decorative
+    paginators were the top onboarding failure (prod, 2026-07-11)."""
+    from eventindex.discovery.onboard import Browser
+
+    b = Browser()
+    try:
+        b.navigate(FIXTURE)
+        out = b.click("a#next")
+        assert "CLICKED ELEMENT:" in out
+        assert 'aria-label="Nächste Seite"' in out
+    finally:
+        b.close()

@@ -214,3 +214,25 @@ def test_validation_ignores_stop_conditions(conn, monkeypatch):
     ob._self_validate(r, ["E"], {"id": None}, conn, None)
     assert seen["stops"] == []
     assert r.stop_conditions == ["all_fingerprints_seen", "date_older_than_now"]
+
+
+def test_validation_clamps_expanded_urls(conn, monkeypatch):
+    """A chunk_days=2 template expands to ~365 window urls; validation must
+    walk at most 3 concrete pages, not the whole expansion (a validation
+    crawl ran >1h inside one agent turn, 2026-07-11)."""
+    from eventindex.discovery import onboard as ob
+    from eventindex.fetch.recipe import Pagination, Recipe, ValidationResult, page_urls
+
+    seen = {}
+
+    def fake_run(trimmed, *a, **k):
+        seen["urls"] = len(page_urls(trimmed))
+        return ([{"title": {"value": "E"}, "starts_at": {"value": "2030-01-01"}}] * 5,
+                ValidationResult(ok=True, items=5, reasons=[], pages=3))
+
+    monkeypatch.setattr(ob, "run_recipe", fake_run)
+    r = Recipe(entry_urls=["https://x.at/suche?from={from}&to={to}"],
+               pagination=Pagination(type="date_range_param", months_ahead=24,
+                                     chunk_days=2))
+    ob._self_validate(r, ["E"], {"id": None}, conn, None)
+    assert seen["urls"] == 3

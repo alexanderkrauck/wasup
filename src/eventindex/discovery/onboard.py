@@ -464,9 +464,14 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
     events must overlap with what the agent saw."""
     # trimmed copy: few pages, no detail-following - birth validation checks
     # the core; the first real crawl + self-healing contract check the rest
+    from eventindex.fetch.recipe import page_urls
+
     trimmed = recipe.model_copy(deep=True)
-    trimmed.entry_urls = trimmed.entry_urls[:3]
     trimmed.pagination.max_pages = min(trimmed.pagination.max_pages, 3)
+    # clamp AFTER template expansion: a chunk_days=2 recipe expands one
+    # entry template into ~365 window urls, and a validation crawl walked
+    # them for over an hour inside a single agent turn (2026-07-11)
+    trimmed.entry_urls = page_urls(trimmed)[:3]
     trimmed.follow_detail = False
     # validation measures the recipe's MECHANICS; early-stop optimizations
     # sabotage the measurement (all_fingerprints_seen halted validation on

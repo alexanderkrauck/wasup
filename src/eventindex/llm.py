@@ -33,6 +33,29 @@ def _get_client() -> OpenAI:
     return _client
 
 
+def _create(**kwargs):
+    """One SDK call with transient-failure retries. OpenRouter occasionally
+    returns a non-JSON body (gateway hiccup) that the SDK fails to parse,
+    and a single blip must not kill a 40-minute crawl (2026-07-11)."""
+    import json
+    import time
+
+    from openai import APIConnectionError, APIStatusError
+
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            return _get_client().chat.completions.create(**kwargs)
+        except (json.JSONDecodeError, APIConnectionError) as e:
+            last = e
+        except APIStatusError as e:
+            if e.status_code not in (408, 429, 500, 502, 503, 504):
+                raise
+            last = e
+        time.sleep(5 * (attempt + 1))
+    raise last
+
+
 def _cost_eur(usage) -> tuple[float, int, int]:
     tokens_in = getattr(usage, "prompt_tokens", 0) or 0
     tokens_out = getattr(usage, "completion_tokens", 0) or 0
@@ -64,7 +87,7 @@ def chat(
     extra_body: dict = {"usage": {"include": True}}
     if plugins:
         extra_body["plugins"] = plugins
-    response = _get_client().chat.completions.create(
+    response = _create(
         model=model,
         messages=messages,
         max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
@@ -102,7 +125,7 @@ def complete(
 
     last_error: ValidationError | None = None
     for _ in range(2):
-        response = _get_client().chat.completions.create(
+        response = _create(
             model=model,
             messages=messages,
             max_tokens=config.LLM_MAX_OUTPUT_TOKENS,

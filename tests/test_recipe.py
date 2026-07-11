@@ -246,3 +246,18 @@ def test_unfetched_queued_urls_are_reported(conn):
     _, result = run_recipe(r, {"id": None}, conn,
                            fetch_page=lambda u: pages.get(u), now=NOW)
     assert result.truncated is None  # entry urls are never silently dropped
+
+
+def test_llm_wrapped_arrays_are_unwrapped():
+    """Some models serialize array tool params as {'item': [...]} - a prod
+    session burned 6 emits on exactly this (2026-07-11); coerce it."""
+    r = Recipe(
+        entry_urls={"items": ["https://x.at/events"]},
+        pagination=Pagination(type="none"),
+        validation={"min_items": 3,
+                    "required_fields": {"item": ["title", "starts_at"]}},
+        stop_conditions="date_older_than_now",
+    )
+    assert r.entry_urls == ["https://x.at/events"]
+    assert r.validation.required_fields == ["title", "starts_at"]
+    assert r.stop_conditions == ["date_older_than_now"]

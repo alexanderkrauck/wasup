@@ -13,7 +13,7 @@ from typing import Callable, Literal
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from eventindex import config
 
@@ -62,11 +62,27 @@ class Pagination(BaseModel):
 MAX_MONTHS_AHEAD = 60
 
 
+def _coerce_list(v):
+    """LLM tool-call quirk: some models wrap array params as
+    {'item': [...]}/{'items': [...]} or send a lone string. Unwrap instead
+    of burning whole onboarding sessions on schema retries (a prod session
+    spent 6 emits failing on exactly this, 2026-07-11)."""
+    if isinstance(v, dict) and len(v) == 1:
+        inner = next(iter(v.values()))
+        if isinstance(inner, list):
+            return inner
+    if isinstance(v, str):
+        return [v]
+    return v
+
+
 class Validation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     min_items: int = 3
     required_fields: list[str] = ["title", "starts_at"]
     date_parse_rate: float = 0.9
+
+    _lists = field_validator("required_fields", mode="before")(_coerce_list)
 
 
 class Recipe(BaseModel):
@@ -91,6 +107,8 @@ class Recipe(BaseModel):
     detail_url_selector: str | None = Field(None, description="CSS for the detail link")
     stop_conditions: list[Literal["date_older_than_now", "all_fingerprints_seen"]] = []
     validation: Validation = Validation()
+
+    _lists = field_validator("entry_urls", "stop_conditions", mode="before")(_coerce_list)
 
     @model_validator(mode="after")
     def _interactive_needs_headless(self):

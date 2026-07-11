@@ -255,7 +255,9 @@ def onboard(job: dict, tx) -> list[dict]:
         "SELECT *, ST_Y(geo) AS lat, ST_X(geo) AS lon FROM source WHERE id = %s",
         (job["payload"]["source_id"],),
     ).fetchone()
-    model = config.MODEL_MINI if job["attempts"] <= 1 else config.MODEL_MID
+    model = (config.MODEL_MINI if job["attempts"] <= 1
+             else config.MODEL_MID if job["attempts"] == 2
+             else config.MODEL_FRONTIER)
     reason = job["payload"].get("reason")
     min_horizon = (config.RECIPE_MIN_HORIZON_DAYS
                    if reason and "completeness" in reason else None)

@@ -37,6 +37,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # recipe-success rate in the digest degrades.
 MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx, text-only
 MODEL_MID = "minimax/minimax-m3"            # $0.30/$1.20, 1M ctx, text+image+video
+# frontier re-added 2026-07-11 (was dropped 2026-07-07 as unused): the final
+# onboarding attempt on gate-heavy sites needs it - mid wall-clocked 4x on a
+# row-capped JSF portal while satisfying coverage+horizon+window constraints
+MODEL_FRONTIER = "z-ai/glm-5.2"
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 

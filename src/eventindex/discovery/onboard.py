@@ -518,14 +518,16 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
             deep = _deep_probe_horizon(recipe, source, tx, job_id)
             horizon = max(horizon, deep if deep is not None else horizon)
         if horizon < required_horizon:
+            span = recipe.pagination.months_ahead * 31
             return None, (
                 f"HORIZON TOO SHALLOW: recipe yield reaches only {horizon:.1f} "
                 f"days ahead (the deepest page your pagination reaches was "
                 f"checked too), required >= {required_horizon:.0f} (you "
                 f"reported the site publishes ~{site_horizon_days or '?'} days "
-                "out; the recipe must cover the site's WHOLE horizon). Use an "
-                "open-ended date range (empty to=) if the site allows it, or "
-                "raise months_ahead / max_pages, and emit again."
+                f"out). NOTE your months_ahead={recipe.pagination.months_ahead} "
+                f"makes the date templates span only ~{span} days - raise it "
+                "to cover the reported horizon, and/or raise max_pages. "
+                "Emit again."
             )
     if not validation.ok:
         reason = f"interpreter validation failed: {'; '.join(validation.reasons)}"

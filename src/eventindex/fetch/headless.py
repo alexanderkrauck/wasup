@@ -16,6 +16,24 @@ MAX_SCROLLS = 15
 
 _browser = None
 
+# cookie walls hide content and can swallow paginator clicks; the onboarding
+# agent dismisses them, so the crawler that executes its recipe must too
+COOKIE_SELECTORS = (
+    ".cc_btn_accept_all, #onetrust-accept-btn-handler, "
+    "[class*='cookie'] button, [id*='cookie'] [class*='accept'], "
+    "button[class*='accept'], a[class*='cc_btn']"
+)
+
+
+def _dismiss_cookies(page) -> None:
+    try:
+        banner = page.query_selector(COOKIE_SELECTORS)
+        if banner and banner.is_visible():
+            banner.click()
+            page.wait_for_timeout(600)
+    except Exception:
+        pass
+
 
 def _get_browser():
     global _browser
@@ -40,6 +58,7 @@ def render_page(
         page = context.new_page()
         page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
+        _dismiss_cookies(page)
 
         if click_selector:
             for _ in range(MAX_CLICKS):
@@ -79,38 +98,43 @@ _NEXT_EXHAUSTED_JS = """e =>
 
 def render_states(
     url: str, next_selector: str | None, max_states: int
-) -> tuple[list[bytes], bool] | None:
+) -> tuple[list[bytes], str] | None:
     """next_click pagination: harvest EVERY page state - unlike load-more
     (accumulating DOM, final snapshot suffices), a JSF/PrimeFaces-style
     paginator REPLACES the list in place, so each state must be captured
-    before the next click. Stops on missing/disabled control or when a
-    click no longer changes the DOM. Returns (states, more_available):
-    more_available=True means max_states cut the walk short while the next
-    control was still active - the caller must NOT let that stay silent."""
+    before the next click. Returns (states, stop_reason):
+      'exhausted' - the next control vanished/disabled: natural end
+      'cap'       - max_states cut the walk short with pages still ahead;
+                    the caller must NOT let that stay silent
+      'noop'      - the click changed nothing: the selector matches a dead
+                    control (the failure mode that yielded 15/1134 events
+                    on linztermine prod, 2026-07-10)"""
     context = None
     try:
         context = _get_browser().new_context(user_agent=config.USER_AGENT)
         page = context.new_page()
         page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
+        _dismiss_cookies(page)
 
         states = [page.content()]
-        more = False
+        reason = "exhausted"
         while next_selector:
             button = page.query_selector(next_selector)
             if (button is None or not button.is_visible()
                     or button.evaluate(_NEXT_EXHAUSTED_JS)):
                 break
             if len(states) >= max_states:
-                more = True  # limit hit with pages still ahead
+                reason = "cap"  # limit hit with pages still ahead
                 break
             button.click()
             page.wait_for_timeout(1200)
             content = page.content()
             if content == states[-1]:  # no-op click: not a working paginator
+                reason = "noop"
                 break
             states.append(content)
-        return [s.encode() for s in states], more
+        return [s.encode() for s in states], reason
     except Exception as e:
         log.warning("headless states failed %s: %s", url, e)
         return None

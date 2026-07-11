@@ -148,3 +148,47 @@ def test_horizon_gate_rejects_recipes_short_of_site_horizon(conn, monkeypatch):
     _, error = ob._self_validate(r, ["E"], {"id": None}, conn, None,
                                  min_horizon_days=21, site_horizon_days=700)
     assert error is None
+
+
+def test_median_horizon_resists_single_far_outlier():
+    """One long-running exhibition on page 1 must not impersonate recipe
+    depth (prod linztermine shipped a 15-event recipe past the max-based
+    horizon check, 2026-07-10)."""
+    from eventindex.discovery.onboard import _median_horizon_days
+
+    near = [{"starts_at": {"value": "2026-07-12 10:00"}} for _ in range(9)]
+    outlier = [{"starts_at": {"value": "2028-01-01 10:00"}}]
+    horizon = _median_horizon_days(near + outlier)
+    assert horizon is not None and horizon < 10
+
+
+def test_coverage_gate_trusts_measurement_over_plan(conn, monkeypatch):
+    """A next_click recipe planning 80 pages but measuring 1 fetched state
+    (dead selector) must not pass on plan-based extrapolation."""
+    from eventindex.discovery import onboard as ob
+    from eventindex.fetch.recipe import Pagination, Recipe, ValidationResult
+
+    r = Recipe(entry_urls=["https://x.at/suche?from={from}&to="],
+               pagination=Pagination(type="next_click", next_selector="a.dead",
+                                     max_pages=80))
+    payloads = [{"title": {"value": f"E{i}"},
+                 "starts_at": {"value": "2030-01-01 10:00"}} for i in range(15)]
+
+    def fake_run(trimmed, *a, **k):
+        return payloads, ValidationResult(
+            ok=True, items=15, reasons=[], pages=1,
+            pagination_noop="clicking 'a.dead' changed nothing")
+
+    monkeypatch.setattr(ob, "run_recipe", fake_run)
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 expected_events=1100)
+    assert error is not None and "COVERAGE TOO LOW" in error
+    assert "DEAD control" in error
+
+    def fake_run_ok(trimmed, *a, **k):
+        return payloads, ValidationResult(ok=True, items=15, reasons=[], pages=3)
+
+    monkeypatch.setattr(ob, "run_recipe", fake_run_ok)
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 expected_events=1100)
+    assert error is None  # fully-measured pagination extrapolates honestly

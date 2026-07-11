@@ -11,9 +11,9 @@ FIXTURE = (Path(__file__).parent / "fixtures" / "paginator.html").as_uri()
 
 
 def test_render_states_harvests_every_page_and_stops_on_disabled():
-    states, more = render_states(FIXTURE, "a#next", max_states=10)
+    states, reason = render_states(FIXTURE, "a#next", max_states=10)
     assert len(states) == 3  # 3 pages, then the disabled control stops the loop
-    assert more is False  # natural end, nothing was cut off
+    assert reason == "exhausted"  # natural end, nothing was cut off
     joined = b"\n".join(states)
     for title in (b"<h3>Konzert Alpha</h3>", b"<h3>Markt Gamma</h3>",
                   b"<h3>Kurs Epsilon</h3>"):
@@ -24,17 +24,26 @@ def test_render_states_harvests_every_page_and_stops_on_disabled():
 
 
 def test_render_states_without_selector_returns_single_state():
-    states, more = render_states(FIXTURE, None, max_states=10)
+    states, reason = render_states(FIXTURE, None, max_states=10)
     assert len(states) == 1
-    assert more is False
+    assert reason == "exhausted"
 
 
 def test_render_states_reports_pages_left_behind_at_the_cap():
     """A limit that cuts a productive walk short must never be silent
-    (Alexander 2026-07-10) - the caller gets more_available=True."""
-    states, more = render_states(FIXTURE, "a#next", max_states=2)
+    (Alexander 2026-07-10) - the caller gets stop_reason 'cap'."""
+    states, reason = render_states(FIXTURE, "a#next", max_states=2)
     assert len(states) == 2
-    assert more is True  # page 3 existed and was cut off
+    assert reason == "cap"  # page 3 existed and was cut off
+
+
+def test_render_states_detects_dead_next_control():
+    """The prod-linztermine trap: a visible, enabled paginator control whose
+    click changes nothing must be reported as 'noop', not mistaken for a
+    natural end."""
+    states, reason = render_states(FIXTURE, "a#dead", max_states=10)
+    assert len(states) == 1
+    assert reason == "noop"
 
 
 def test_deep_probe_reports_last_page_horizon():

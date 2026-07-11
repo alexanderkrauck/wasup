@@ -109,6 +109,12 @@ class ValidationResult(BaseModel):
     # more content was demonstrably available - events are being MISSED and
     # that must never stay silent (Alexander 2026-07-10)
     truncated: str | None = None
+    # pages/states actually fetched: coverage judgments must extrapolate
+    # from measurement, never from the recipe's plan (a dead next_selector
+    # fetches 1 state however large max_pages is)
+    pages: int = 0
+    # a next_click whose click changed nothing - dead control
+    pagination_noop: str | None = None
 
 
 # ------------------------------------------------------------- pagination
@@ -280,7 +286,7 @@ def run_recipe(
     page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
     detail_budget = MAX_DETAIL_FETCHES  # per CRAWL, as the §cost-governance caps promise
     try:
-        payloads, truncated = _crawl_pages(
+        payloads, truncated, pages = _crawl_pages(
             recipe, source, tx, job_id, fetch_page, queue, visited, page_cap,
             detail_budget, seen_fps, now, cascade_extract, parse_dt,
         )
@@ -298,12 +304,14 @@ def run_recipe(
             unique.append(p)
     result = validate(recipe, unique)
     result.truncated = truncated
+    result.pages = pages
+    result.pagination_noop = getattr(fetch_page, "pagination_noop", None)
     return unique, result
 
 
 def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                  page_cap, detail_budget, seen_fps, now, cascade_extract,
-                 parse_dt) -> tuple[list[dict], str | None]:
+                 parse_dt) -> tuple[list[dict], str | None, int]:
     payloads: list[dict] = []
     truncated: str | None = None
     pages = 0
@@ -366,14 +374,14 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
             if (nxt := next_url(recipe, html, url)) is not None:
                 queue.append(nxt)
         if stop:
-            return payloads, truncated
+            return payloads, truncated, pages
 
     if queue and any(u not in visited for u in queue):
         # the loop ended on page_cap, not on an empty queue: pre-expanded
         # URLs (date windows, calendar months) were never fetched
         truncated = truncated or (
             f"page cap {page_cap} hit with {len(queue)} queued urls unfetched")
-    return payloads, truncated
+    return payloads, truncated, pages
 
 
 class _FakeResult:
@@ -403,14 +411,19 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
                 )
                 if result is None:
                     return None
-                states, more = result
-                if more:
+                states, reason = result
+                if reason == "cap":
                     fetch_next_click.truncated = (
                         f"state cap {max_states} hit at {url} with the next "
                         "control still active")
+                elif reason == "noop":
+                    fetch_next_click.pagination_noop = (
+                        f"clicking {recipe.pagination.next_selector!r} at {url} "
+                        f"changed nothing after state {len(states)}")
                 return states
 
             fetch_next_click.truncated = None
+            fetch_next_click.pagination_noop = None
             return fetch_next_click
 
         def fetch_headless(url: str) -> bytes | None:

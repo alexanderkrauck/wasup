@@ -8,6 +8,9 @@
 <ul class="pagination">
   <li id="nextli"><a id="next" href="#" onclick="nextPage(); return false;"
     aria-label="Nächste Seite">Nächste</a></li>
+  <!-- decorative dead control (the prod-linztermine trap): visible,
+       enabled, clicking it changes nothing -->
+  <li id="deadli"><a id="dead" href="#" onclick="return false;">Nächste</a></li>
 </ul>
 <script>
 const pages = [

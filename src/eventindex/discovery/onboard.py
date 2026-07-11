@@ -44,6 +44,9 @@ Method:
    VERIFY, never assume: every click/navigate observation reports whether
    the page's links changed. A ?page=2 URL or a click that leaves the links
    unchanged is NOT working pagination - do not build a recipe on it.
+   For next_click, ALWAYS click your exact next_selector once before
+   emitting and confirm the LINKS DELTA changed - pages often carry a
+   decorative second paginator whose clicks do nothing.
    Date windows and next_click COMBINE: entry_urls with {from}/{to} plus
    pagination type next_click clicks through every window - use this when a
    date-filtered listing still paginates in-page. A recipe that only ever
@@ -156,11 +159,11 @@ class Browser:
         return (f"URL: {page.url}\nTITLE: {page.title()}{delta}\n\nVISIBLE TEXT:\n{text}\n\n"
                 f"EVENT-ISH LINKS:\n" + "\n".join(eventish))
 
-    COOKIE_SELECTORS = (
-        ".cc_btn_accept_all, #onetrust-accept-btn-handler, "
-        "[class*='cookie'] button, [id*='cookie'] [class*='accept'], "
-        "button[class*='accept'], a[class*='cc_btn']"
-    )
+    @property
+    def COOKIE_SELECTORS(self):
+        from eventindex.fetch.headless import COOKIE_SELECTORS
+
+        return COOKIE_SELECTORS
 
     def navigate(self, url: str) -> str:
         page = self._ensure()
@@ -339,7 +342,6 @@ def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
     from eventindex.fetch.recipe import (
         MAX_PAGES_HARD, _FakeResult, extract_with_selectors, next_url, page_urls,
     )
-    from eventindex.jobs.handlers import _claim_horizon_days
 
     p = recipe.pagination
     urls = page_urls(recipe)
@@ -393,7 +395,26 @@ def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
 
         _, payloads = cascade_extract(source, _FakeResult(html, url), tx,
                                       job_id=job_id)
-    return _claim_horizon_days(payloads)
+    return _median_horizon_days(payloads)
+
+
+def _median_horizon_days(payloads: list[dict]) -> float | None:
+    """Median (not max) days-ahead of a page's events: the deepest page of a
+    working deep recipe lies mostly in the far future; a single long-running
+    exhibition on page 1 must not impersonate depth (prod linztermine,
+    2026-07-10)."""
+    from datetime import datetime, timezone
+    from statistics import median
+
+    from eventindex.extract import parse_dt
+
+    dates = [parse_dt(p["starts_at"]["value"]) for p in payloads
+             if "starts_at" in p]
+    dates = [d for d in dates if d is not None]
+    if not dates:
+        return None
+    now = datetime.now(timezone.utc)
+    return round(median((d - now).total_seconds() / 86400 for d in dates), 1)
 
 
 def _page_count(recipe: Recipe) -> int:
@@ -434,26 +455,35 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
     payloads, validation = run_recipe(trimmed, source, tx, job_id=job_id)
     if expected_events and validation.ok and payloads:
         # coverage gate: hold the recipe against the agent's OWN yield
-        # estimate. Catches the 'valid but 4%-of-the-site' recipe (a
-        # date-window whose page 2+ sits behind a JS paginator validates
-        # fine at 15 items/window and silently drops the rest).
-        reach = len(payloads) * max(
-            _page_count(recipe) / max(_page_count(trimmed), 1), 1)
+        # estimate. Extrapolate ONLY when the trimmed run actually paginated
+        # as planned - a dead next_selector fetches one state no matter what
+        # max_pages promises (prod linztermine shipped 15/1134 events through
+        # the plan-based version of this gate, 2026-07-10).
+        planned = _page_count(trimmed)
+        if validation.pages >= planned:
+            reach = len(payloads) * max(_page_count(recipe) / max(planned, 1), 1)
+        else:
+            reach = len(payloads)  # pagination stopped early: measurement only
         if reach * 5 < expected_events:
+            noop = (f" Your next_selector is a DEAD control: "
+                    f"{validation.pagination_noop}. Pick the element whose "
+                    "click actually changes the LINKS DELTA."
+                    if validation.pagination_noop else "")
             return None, (
                 f"COVERAGE TOO LOW: you estimated ~{expected_events} events on "
-                f"this site, but this recipe reaches ~{reach:.0f} per crawl. "
-                "Most likely each entry URL/window only shows its FIRST page. "
-                "If the listing has an in-page paginator (href='#', "
+                f"this site, but this recipe reaches ~{reach:.0f} per crawl "
+                f"({validation.pages} page states fetched, {planned} planned)."
+                + noop +
+                " If the listing has an in-page paginator (href='#', "
                 "ui-paginator, 'Nächste'), use pagination type next_click - "
                 "entry_urls may still carry {from}/{to} windows - and set "
                 "max_pages high enough. Emit again."
             )
     required_horizon = _required_horizon(min_horizon_days, site_horizon_days)
     if required_horizon and validation.ok:
-        from eventindex.jobs.handlers import _claim_horizon_days
-
-        horizon = _claim_horizon_days(payloads) or 0
+        # median, not max: one long-running exhibition on page 1 must not
+        # impersonate depth
+        horizon = _median_horizon_days(payloads) or 0
         if horizon < required_horizon:
             # the trimmed crawl proves content, not depth - probe the real one
             deep = _deep_probe_horizon(recipe, source, tx, job_id)

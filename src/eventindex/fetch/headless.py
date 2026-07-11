@@ -119,6 +119,7 @@ def render_states(
 
         states = [page.content()]
         reason = "exhausted"
+        stop_detail = ""
         while next_selector:
             button = page.query_selector(next_selector)
             if button is None:
@@ -129,11 +130,16 @@ def render_states(
                     page.wait_for_selector(next_selector, state="attached",
                                            timeout=4000)
                 except Exception:
-                    break
+                    pass
                 button = page.query_selector(next_selector)
                 if button is None:
+                    stop_detail = "button-missing"
                     break
-            if not button.is_visible() or button.evaluate(_NEXT_EXHAUSTED_JS):
+            if not button.is_visible():
+                stop_detail = "button-invisible"
+                break
+            if button.evaluate(_NEXT_EXHAUSTED_JS):
+                stop_detail = "button-disabled"
                 break
             if len(states) >= max_states:
                 reason = "cap"  # limit hit with pages still ahead
@@ -148,6 +154,13 @@ def render_states(
                 reason = "noop"
                 break
             states.append(content)
+        # diagnosis line: sessions kept measuring fewer states than
+        # standalone runs of identical recipes (2026-07-11); this names the
+        # exact stop branch, page state, and title in the worker journal
+        log.info("render_states url=%s states=%d stop=%s%s title=%r len=%d",
+                 url, len(states), reason,
+                 f"({stop_detail})" if stop_detail else "",
+                 page.title()[:80], len(states[-1]))
         return [s.encode() for s in states], reason
     except Exception as e:
         log.warning("headless states failed %s: %s", url, e)

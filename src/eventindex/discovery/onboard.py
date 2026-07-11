@@ -401,7 +401,14 @@ def _deep_probe_horizon(recipe: Recipe, source, tx, job_id) -> float | None:
 
         _, payloads = cascade_extract(source, _FakeResult(html, url), tx,
                                       job_id=job_id)
-    return _median_horizon_days(payloads)
+    # max, not median, is correct HERE: the coverage gate has already proven
+    # the pagination mechanically works (measured, not planned) before the
+    # horizon check runs, so this page really is the deep end - and its
+    # median sits below the last event date by construction (a working
+    # recipe was rejected 460d vs 462d over this, 2026-07-11)
+    from eventindex.jobs.handlers import _claim_horizon_days
+
+    return _claim_horizon_days(payloads)
 
 
 def _median_horizon_days(payloads: list[dict]) -> float | None:

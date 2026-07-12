@@ -38,9 +38,10 @@ for `/v1/search` (it spends the index's own LLM budget) and `POST
 
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna),
 `categories`, `exclude_categories`, `exclude_terms`, `include_terms`
-(synonym set, at least ONE must appear in title/tags - use for "specifically
-X" queries, e.g. `["lauf","run"]` for running; word-boundary-aware),
-`max_price`, `is_free`, `required_attributes`.
+(synonym set, at least ONE must appear in title/tags/venue name - use for
+"specifically X" queries, e.g. `["lauf","run"]` for running or
+`["factory300"]` for events at/by a named venue or organizer;
+word-boundary-aware), `max_price`, `is_free`, `required_attributes`.
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,

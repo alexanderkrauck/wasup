@@ -22,8 +22,14 @@ def _filters(**kw):
 
 
 def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
-         kid=None, kid_conf=0.6, price=None, gender=None, gender_conf=None):
+         kid=None, kid_conf=0.6, price=None, gender=None, gender_conf=None,
+         venue=None):
     event_id = uuid.uuid4()
+    venue_id = None
+    if venue:
+        venue_id = uuid.uuid4()
+        conn.execute("INSERT INTO venue (id, name) VALUES (%s, %s)",
+                     (venue_id, venue))
     inferred = {}
     if energy:
         inferred["energy"] = energy
@@ -36,14 +42,14 @@ def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
         "INSERT INTO event (id, kind, title, category, confidence, status, "
         "expected_age_range, expected_age_range_confidence, "
         "expected_gender_split, expected_gender_split_confidence, "
-        "inferred, price_min) VALUES "
+        "inferred, price_min, venue_id) VALUES "
         "(%s, 'one_off', %s, %s, 0.9, 'confirmed', "
         " CASE WHEN %s::int IS NULL THEN NULL ELSE int4range(%s, %s, '[]') END, "
-        " 0.5, %s, %s, %s, %s)",
+        " 0.5, %s, %s, %s, %s, %s)",
         (event_id, title, category or [],
          age[0] if age else None, age[0] if age else None,
          age[1] if age else None, gender, gender_conf,
-         Jsonb(inferred) if inferred else None, price),
+         Jsonb(inferred) if inferred else None, price, venue_id),
     )
     conn.execute(
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
@@ -59,6 +65,7 @@ def _run(conn, filters):
         f"SELECT e.title, 0.9::float AS confidence, e.category, "
         f"e.inferred->'vibe_tags' AS vibe_tags, {attribute_select()} "
         f"FROM occurrence o JOIN event e ON e.id = o.event_id "
+        f"LEFT JOIN venue v ON v.id = e.venue_id "
         f"WHERE {where} LIMIT %(limit)s", params,
     ).fetchall()
     return [r["title"] for r in rank(rows, filters)]
@@ -240,3 +247,19 @@ def test_registry_covers_every_soft_filter_field():
 def test_unknown_required_attribute_is_rejected():
     with pytest.raises(ValidationError):
         _filters(required_attributes=["favourite_color"])
+
+
+def test_include_terms_match_venue_name(conn):
+    """'events from factory300' names a venue/organizer, not a title word -
+    a consumer query came back empty over this (2026-07-12)."""
+    _add(conn, "Community Oktoberfest", venue="factory300")
+    _add(conn, "Sommerkonzert")
+    titles = _run(conn, _filters(include_terms=["factory300"]))
+    assert titles == ["Community Oktoberfest"]
+
+
+def test_exclude_terms_match_venue_and_spare_venueless(conn):
+    _add(conn, "Community Oktoberfest", venue="factory300")
+    _add(conn, "Sommerkonzert")  # no venue: must NOT be null-poisoned out
+    titles = _run(conn, _filters(exclude_terms=["factory300"]))
+    assert titles == ["Sommerkonzert"]

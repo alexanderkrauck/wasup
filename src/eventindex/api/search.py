@@ -62,12 +62,12 @@ class SearchFilters(BaseModel):
 
     categories: list[str] | None = Field(description="wanted categories from the taxonomy, null = any")
     exclude_categories: list[str] = Field(description="categories the user does NOT want - hard guarantee")
-    exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags - hard guarantee")
+    exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags/venue - hard guarantee")
     include_terms: list[str] = Field(
         description="synonym set of which at least ONE must appear in "
-        "title/tags (word-prefix/suffix match) - hard filter for 'I want "
-        "specifically X' queries, e.g. ['lauf','run'] for running; keep "
-        "empty for broad/mood queries"
+        "title/tags/venue name (word-prefix/suffix match) - hard filter for "
+        "'I want specifically X' queries, e.g. ['lauf','run'] for running or "
+        "['factory300'] for a venue/organizer; keep empty for broad/mood queries"
     )
     age_min: int | None
     age_max: int | None
@@ -277,9 +277,11 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
     for i, term in enumerate(f.exclude_terms):
         key = f"not_term_{i}"
         # coalesce: an unenriched event (inferred IS NULL) must be judged by
-        # its title alone, not NULL-poisoned out of every negation query
+        # its title alone, not NULL-poisoned out of every negation query;
+        # same for venue-less events (v.name NULL)
         conditions.append(
             f"NOT (e.title ILIKE %({key})s "
+            f"OR coalesce(v.name ILIKE %({key})s, false) "
             f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false))"
         )
         params[key] = f"%{term}%"
@@ -294,8 +296,12 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
         alts = []
         for i, term in enumerate(f.include_terms):
             key = f"inc_term_{i}"
+            # venue name included: "events from factory300" names a venue/
+            # organizer, and nothing else in the schema can reach it (a
+            # consumer query came back empty over this, 2026-07-12)
             alts.append(
                 f"e.title ~* %({key})s "
+                f"OR coalesce(v.name ~* %({key})s, false) "
                 f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false)"
             )
             params[key] = rf"\m{_re.escape(term)}|{_re.escape(term)}\M"

@@ -1,0 +1,9 @@
+<!doctype html>
+<html><body>
+<div id="list">loading…</div>
+<script>
+fetch("./events.json").then(r => r.json()).then(d => {
+  document.getElementById("list").textContent = d.events.map(e => e.name).join(", ");
+});
+</script>
+</body></html>

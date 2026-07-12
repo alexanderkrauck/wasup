@@ -31,6 +31,11 @@ events/courses/Termine.
 
 Method:
 1. navigate to the entry URL; find where the event/course listing lives.
+   Watch the API RESPONSES list in every observation: a JS app reveals its
+   data API there. A public JSON endpoint that returns the events (navigate
+   to it to verify!) is the BEST possible recipe - entry_urls=[that URL],
+   render='http', pagination none/url_param. Prefer it over scraping the
+   rendered page.
 2. Classify pagination by LOOKING at the page and links: numbered pages
    (url_param with {n} template), a "weiter/next" link with a real href
    (next_link), a next/paginator control that swaps the list IN PLACE via
@@ -128,6 +133,10 @@ class Browser:
 
     page: object = None
     _prev_links: frozenset = frozenset()
+    _api_calls: dict = field(default_factory=dict)  # url -> status
+
+    _API_NOISE = ("locale", "translation", "umami", "analytics", "cdn.",
+                  "googleapis", "gstatic", "/sys/", "validDomains")
 
     def _ensure(self):
         if self.page is None:
@@ -135,7 +144,24 @@ class Browser:
 
             ctx = _get_browser().new_context(user_agent=config.USER_AGENT)
             self.page = ctx.new_page()
+            # SPAs reveal their data API in network traffic; without this
+            # an agent can only guess endpoints (factory300's Nexudus page
+            # is a broken shell while /api/public/events works, 2026-07-12)
+            self.page.on("response", self._track_api)
         return self.page
+
+    def _track_api(self, response) -> None:
+        try:
+            url = response.url
+            ctype = response.headers.get("content-type", "")
+            if ("json" in ctype or "/api/" in url) and not any(
+                n in url for n in self._API_NOISE
+            ):
+                self._api_calls[url.split("?")[0]] = response.status
+                if len(self._api_calls) > 40:
+                    self._api_calls.pop(next(iter(self._api_calls)))
+        except Exception:
+            pass
 
     def observe(self) -> str:
         page = self._ensure()
@@ -161,8 +187,13 @@ class Browser:
             gone = len(self._prev_links - current)
             delta = f"\nLINKS DELTA vs previous view: +{new} new / -{gone} gone."
         self._prev_links = current
+        api = ""
+        if self._api_calls:
+            listed = list(self._api_calls.items())[-10:]
+            api = "\n\nAPI RESPONSES SEEN (the page's own data traffic):\n" + "\n".join(
+                f"{u} ({s})" for u, s in listed)
         return (f"URL: {page.url}\nTITLE: {page.title()}{delta}\n\nVISIBLE TEXT:\n{text}\n\n"
-                f"EVENT-ISH LINKS:\n" + "\n".join(eventish))
+                f"EVENT-ISH LINKS:\n" + "\n".join(eventish) + api)
 
     @property
     def COOKIE_SELECTORS(self):

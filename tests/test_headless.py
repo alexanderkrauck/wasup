@@ -80,3 +80,29 @@ def test_browser_click_echoes_element_identity():
         assert 'aria-label="Nächste Seite"' in out
     finally:
         b.close()
+
+
+def test_browser_surfaces_page_api_traffic():
+    """A JS app reveals its data API in network traffic; the agent must see
+    it (factory300's Nexudus page is a broken shell while its public JSON
+    API works, 2026-07-12)."""
+    import http.server
+    import threading
+
+    from eventindex.discovery.onboard import Browser
+
+    fixtures = Path(__file__).parent / "fixtures"
+    handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
+        *a, directory=str(fixtures), **kw)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    b = Browser()
+    try:
+        out = b.navigate(f"http://127.0.0.1:{port}/spa.html")
+        assert "API RESPONSES SEEN" in out
+        assert "events.json" in out
+        assert "Demo Night" in out  # the SPA rendered from its API
+    finally:
+        b.close()
+        srv.shutdown()

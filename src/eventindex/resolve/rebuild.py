@@ -342,6 +342,57 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         else:
             remaining.extend(cs)
 
+    # pass 2.5: a group whose venue never RESOLVED must not duplicate the
+    # same-titled group that did - the 176 dup pairs remaining after the
+    # first repair rebuild were all {no-venue, venue} twins of one series
+    # (2026-07-13). Merge only unambiguous, corroborated cases: every claim
+    # venue-less, exactly ONE venue-bearing group with the same normalized
+    # title, and at least one shared local date (two different "Sommerfest"
+    # series must not collapse; same-title events at two REAL venues -
+    # Clubabend - stay distinct anyway).
+    def _days(claims: list[Claim]) -> set:
+        return {c.starts_at.astimezone(VIENNA).date() for c in claims}
+
+    with_venue: dict[str, list[str]] = defaultdict(list)
+    for key, g in groups.items():
+        if any(c.venue_id for c in g["claims"]):
+            with_venue[normalize_title(g["claims"][0].title)].append(key)
+
+    def _venue_twin_target(ntitle: str, days: set) -> dict | None:
+        owners = with_venue.get(ntitle, [])
+        if len(owners) != 1:
+            return None
+        target = groups.get(owners[0])
+        if target is None or not (days & _days(target["claims"])):
+            return None
+        return target
+
+    for key in list(groups):
+        g = groups[key]
+        if any(c.venue_id for c in g["claims"]):
+            continue
+        target = _venue_twin_target(
+            normalize_title(g["claims"][0].title), _days(g["claims"])
+        )
+        if target is not None and target is not g:
+            target["claims"].extend(g["claims"])
+            target["recurrence"] = target["recurrence"] or g["recurrence"]
+            target["rrule_raw"] = target["rrule_raw"] or g["rrule_raw"]
+            del groups[key]
+    still_remaining = []
+    for c in remaining:
+        target = None
+        if c.venue_id is None:
+            target = _venue_twin_target(
+                normalize_title(c.title),
+                {c.starts_at.astimezone(VIENNA).date()},
+            )
+        if target is not None:
+            target["claims"].append(c)
+        else:
+            still_remaining.append(c)
+    remaining = still_remaining
+
     # pass 3: one-offs - block by (day, venue-cell) AND by (day, leading
     # title words). The second key catches cross-venue duplicates where one
     # source's claims carried the wrong/no venue (red-team 2026-07-07: the

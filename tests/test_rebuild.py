@@ -538,3 +538,52 @@ def test_no_event_row_ever_lacks_occurrences(conn):
     titles = [r["title"] for r in conn.execute("SELECT title FROM event")]
     assert titles == ["Turnen"]
     assert conn.execute("SELECT count(*) AS n FROM occurrence").fetchone()["n"] == 1
+
+
+def test_venueless_twin_joins_the_resolved_series(conn):
+    """Post-repair follow-up 2026-07-13: 176 remaining dup pairs were all
+    {no-venue, venue} twins of one series."""
+    a = _source(conn, "s1", 0.8)
+    b = _source(conn, "s2", 0.7)
+    for d in ("2026-07-17", "2026-07-24", "2026-07-31"):
+        _claim(conn, a, _concert("Basic Training", starts=f"{d}T19:15:00+02:00",
+                                 venue="Sportunion Tanzsportklub"),
+               f"basic training|{d}|va")
+        # aggregator carries the same rows without a resolvable venue
+        fields = _concert("Basic Training", starts=f"{d}T19:15:00+02:00")
+        del fields["venue_name"]
+        _claim(conn, b, fields, f"basic training|{d}|")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    observed = conn.execute(
+        "SELECT count(*) AS n FROM occurrence WHERE NOT projected"
+    ).fetchone()["n"]
+    assert observed == 3  # the weekly cadence may project extras on top
+
+
+def test_same_title_at_two_real_venues_stays_distinct(conn):
+    a = _source(conn, "s1", 0.8)
+    for d in ("2026-08-06", "2026-09-03", "2026-10-01"):
+        _claim(conn, a, _concert("Clubabend", starts=f"{d}T19:30:00+02:00",
+                                 venue="HTL Leonding"), f"clubabend|{d}|v1")
+        _claim(conn, a, _concert("Clubabend", starts=f"{d}T19:30:00+02:00",
+                                 venue="Naturfreundeheim Traun"), f"clubabend|{d}|v2")
+    rb.rebuild(conn, now=NOW)
+    events, _ = _canon(conn)
+    assert len(events) == 2
+
+
+def test_venueless_singleton_with_foreign_dates_stays_apart(conn):
+    """Date corroboration required: a different 'Sommerfest' elsewhere on a
+    different day must not be eaten by the venue-bearing series."""
+    a = _source(conn, "s1", 0.8)
+    for d in ("2026-07-17", "2026-07-24", "2026-07-31"):
+        _claim(conn, a, _concert("Sommerfest", starts=f"{d}T18:00:00+02:00",
+                                 venue="F10 Sportfabrik"), f"sommerfest|{d}|v")
+    fields = _concert("Sommerfest", starts="2026-08-22T14:00:00+02:00")
+    del fields["venue_name"]
+    _claim(conn, a, fields, "sommerfest|2026-08-22|")
+    rb.rebuild(conn, now=NOW)
+    events, _ = _canon(conn)
+    assert len(events) == 2

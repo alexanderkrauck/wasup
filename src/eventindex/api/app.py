@@ -352,6 +352,8 @@ def occurrences(
         SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status, o.projected,
                o.availability, o.last_confirmed_at, o.time_unknown,
                (o.starts_at < %(from)s) AS ongoing,
+               CASE WHEN o.time_unknown THEN e.inferred->'start_time'
+                    END AS start_time_estimate,
                e.title, e.category, e.price_min, e.price_max, e.url,
                e.kind, e.organizer, e.status AS event_status,
                e.booking_url, e.registration_required,
@@ -456,6 +458,8 @@ def _run_filters(filters, limit: int,
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
                    o.projected, o.time_unknown,
                    (o.starts_at < %(from)s) AS ongoing,
+                   CASE WHEN o.time_unknown THEN e.inferred->'start_time'
+                        END AS start_time_estimate,
                    e.title, e.category, e.price_min, e.price_max, e.url,
                    e.kind, e.organizer, e.status AS event_status,
                    e.booking_url, e.registration_required,

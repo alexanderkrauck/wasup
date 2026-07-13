@@ -21,7 +21,10 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
   an observed weekly/biweekly series (beyond what its source feed shows).
   Treat as "expected, unconfirmed".
 - **`time_unknown: true`** = the source stated only a DATE; `starts_at` shows
-  midnight as a placeholder, not a real time. `ongoing: true` = the
+  midnight as a placeholder, not a real time. When available,
+  `start_time_estimate` carries an LLM-estimated typical start time
+  ({value: "HH:MM", confidence, evidence}) - an estimate, clearly not a
+  confirmed time; the index also re-fetches detail pages to find real times. `ongoing: true` = the
   occurrence started before your window but is still running (exhibitions,
   festivals) - windows use OVERLAP semantics, not starts-only.
 - **Geography default**: results are gated to ~15 km around Linz; events

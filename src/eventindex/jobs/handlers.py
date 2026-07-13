@@ -449,8 +449,58 @@ def discover(job: dict, tx) -> list[dict]:
     return []
 
 
+def timefix(tx, job) -> list[dict]:
+    """Audit A4 (Alexander 2026-07-13: find the real time): re-fetch the
+    detail page of an event whose future occurrences are date-only; the
+    cascade's TIMED claims replace the midnight placeholders at the next
+    rebuild (occurrence folding keys date-only claims by local day)."""
+    import re as _re
+
+    from eventindex.fetch import FETCHED, fetch
+
+    event_id = job["payload"]["event_id"]
+    row = tx.execute(
+        "SELECT e.url, s.id, s.name, "
+        "       ST_Y(s.geo) AS lat, ST_X(s.geo) AS lon "
+        "FROM event e "
+        "JOIN identity i ON i.event_id = e.id "
+        "JOIN event_claim c ON c.fingerprint = i.fingerprint "
+        "JOIN source s ON s.id = c.source_id "
+        "WHERE e.id = %s AND s.kind <> 'internal' "
+        "ORDER BY s.trust DESC LIMIT 1",
+        (event_id,),
+    ).fetchone()
+    if not row or not row["url"] or _re.match(r"^https?://[^/]+/?$", row["url"]):
+        return []
+    # detail pages are HTML regardless of how the SOURCE is normally
+    # consumed (the linztermine feed is XML, its event pages are not)
+    source = dict(row) | {
+        "url": row["url"], "kind": "website", "last_content_hash": None,
+        "http_etag": None, "http_last_modified": None,
+    }
+    result = fetch(source)
+    if result.status != FETCHED:
+        return []
+    method, payloads = extract(source, result, tx, job_id=job["id"])
+    timed = [
+        p for p in payloads
+        if (v := str(p.get("starts_at", {}).get("value") or ""))
+        and "T" in v.replace(" ", "T") and v[-8:] not in ("00:00:00",)
+        and not v.endswith("00:00")
+    ]
+    if timed:
+        _insert_claims(tx, source, None, timed)
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, source_id, finished_at, status, detail) "
+        "VALUES (%s, %s, now(), 'ok', %s)",
+        (job["id"], source["id"],
+         f"timefix[{method}]: {len(timed)} timed claims"),
+    )
+    return []
+
+
 HANDLERS = {
     "crawl": crawl, "resolve": resolve, "enrich": enrich,
     "onboard": onboard, "probe": probe, "discover": discover,
-    "qa_check": qa_check,
+    "qa_check": qa_check, "timefix": timefix,
 }

@@ -22,6 +22,7 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "interaction_structure": "optional",
         "energy": "high",
         "vibe_tags": ["techno", "student", "loud"],
+        "start_time": {"value": "23:00", "confidence": 0.3, "evidence": None},
     })
 
 

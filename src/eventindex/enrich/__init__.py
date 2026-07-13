@@ -38,6 +38,13 @@ class _BoolEst(BaseModel):
     evidence: str | None
 
 
+class _TimeEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str | None = Field(description="HH:MM, 24h local, or null")
+    confidence: float
+    evidence: str | None
+
+
 class Enrichment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # descriptions live in the prompt: strict schema mode forbids
@@ -53,12 +60,15 @@ class Enrichment(BaseModel):
     solo_friendly: _BoolEst
     interaction_structure: Literal["none", "optional", "built_in"] | None
     energy: Literal["low", "medium", "high"] | None
-    vibe_tags: list[str] = Field(description="3-6 short lowercase vibe words")
+    vibe_tags: list[str] = Field(
+        description="3-6 short lowercase vibe words - single words or "
+        "two-word phrases, NEVER commentary or parentheses")
+    start_time: _TimeEst
 
 
 # bump when the Enrichment schema gains fields: old cache rows lack them, so
 # a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def content_key(event: dict) -> str:
@@ -106,7 +116,11 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "'built_in' = rotation/teams/pair work forces it (Salsa mixer, pub "
         "quiz with assigned teams, language tandem), 'optional' = easy but "
         "not forced (Stammtisch, board game cafe), 'none' = you can stay "
-        "silent throughout (concert, cinema, lecture).\n\n"
+        "silent throughout (concert, cinema, lecture). "
+        "start_time: the typical LOCAL start time (HH:MM) for this kind of "
+        "event - used only when the source stated no time; estimate from "
+        "the event type (Sunday mass ~09:30, club night ~23:00, "
+        "Vernissage ~19:00).\n\n"
         f"CATEGORY PRIOR: {prior}\n"
         f"TITLE: {event.get('title')}\n"
         f"DESCRIPTION: {(event.get('description') or '')[:1200]}\n"
@@ -119,12 +133,37 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
     for entry in attributes.values():  # the cap is code, not model discipline
         if isinstance(entry, dict) and "confidence" in entry:
             entry["confidence"] = min(entry["confidence"], CONFIDENCE_CAP)
+    _sanity_clamp(attributes)
     tx.execute(
         "INSERT INTO enrichment (content_key, attributes, model) VALUES (%s, %s, %s) "
         "ON CONFLICT (content_key) DO NOTHING",
         (key, Jsonb(attributes), config.MODEL_MINI),
     )
     return attributes
+
+
+_TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+
+
+def _sanity_clamp(attributes: dict) -> None:
+    """Deterministic guards (audit A11: age range [18,7251), attendance 0,
+    LLM commentary leaking into vibe_tags). Estimates stay estimates, but
+    impossible values become unknown."""
+    lo = attributes.get("age_min", {}).get("value")
+    hi = attributes.get("age_max", {}).get("value")
+    if lo is not None and hi is not None and not (0 <= lo <= hi <= 100):
+        attributes["age_min"]["value"] = None
+        attributes["age_max"]["value"] = None
+    att = attributes.get("expected_attendance", {})
+    if att.get("value") is not None and att["value"] < 1:
+        att["value"] = None
+    attributes["vibe_tags"] = [
+        t.strip().lower() for t in attributes.get("vibe_tags", [])
+        if t.strip() and len(t.strip()) <= 25 and "(" not in t
+    ][:6]
+    st = attributes.get("start_time", {})
+    if st.get("value") is not None and not _TIME_RE.match(str(st["value"])):
+        st["value"] = None
 
 
 def apply_to_event(tx, event_id, attributes: dict) -> None:
@@ -165,7 +204,7 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
                 k: attributes[k] for k in
                 ("language", "kid_friendly", "newcomer_friendly", "outdoor",
                  "solo_friendly", "interaction_structure", "energy",
-                 "vibe_tags") if k in attributes
+                 "vibe_tags", "start_time") if k in attributes
             }),
         },
     )

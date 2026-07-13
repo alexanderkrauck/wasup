@@ -145,6 +145,32 @@ def enqueue_nightly_qa(conn) -> bool:
     return True
 
 
+TIMEFIX_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
+
+
+def enqueue_timefix(conn) -> int:
+    """Every future date-only occurrence earns one detail-page re-fetch per
+    30 days to find the real start time (Alexander 2026-07-13, audit A4)."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT e.id FROM event e
+        JOIN occurrence o ON o.event_id = e.id
+        WHERE o.time_unknown AND o.status = 'scheduled'
+          AND o.starts_at >= now()
+          AND e.url IS NOT NULL AND e.url !~ '^https?://[^/]+/?$'
+          AND NOT EXISTS (
+            SELECT 1 FROM jobs j WHERE j.kind = 'timefix'
+              AND j.payload->>'event_id' = e.id::text
+              AND j.created_at > now() - interval '30 days')
+        LIMIT %s
+        """,
+        (TIMEFIX_BATCH,),
+    ).fetchall()
+    for r in rows:
+        enqueue(conn, "timefix", {"event_id": str(r["id"])})
+    return len(rows)
+
+
 def schedule(conn) -> int:
     flagged = completeness_escalation(conn)
     if flagged:
@@ -157,6 +183,9 @@ def schedule(conn) -> int:
         print(f"escalated {broken} persistently erroring sources to re-onboarding")
     if enqueue_nightly_qa(conn):
         print("enqueued the daily qa_check sample")
+    fixed = enqueue_timefix(conn)
+    if fixed:
+        print(f"enqueued {fixed} timefix detail fetches (date-only events)")
     rows = conn.execute(
         """
         WITH proximate AS (

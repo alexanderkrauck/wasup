@@ -47,6 +47,14 @@ def gather_stats(conn) -> dict:
         "WHERE j.status = 'pending' AND j.last_error LIKE '%%budget%%' "
         "AND j.run_after > now() AND s.yield_ema > 0"
     ).fetchall()
+    degraded_productive = conn.execute(
+        "SELECT s.name, s.status, count(DISTINCT i.event_id) AS events "
+        "FROM source s JOIN event_claim c ON c.source_id = s.id "
+        "JOIN identity i ON i.fingerprint = c.fingerprint "
+        "WHERE s.status IN ('degraded', 'dormant') "
+        "GROUP BY 1, 2 HAVING count(DISTINCT i.event_id) > 0 "
+        "ORDER BY 3 DESC"
+    ).fetchall()
     day_curve = conn.execute(
         "SELECT o.starts_at::date AS day, count(DISTINCT o.event_id) AS n "
         "FROM occurrence o WHERE o.status = 'scheduled' "
@@ -60,6 +68,7 @@ def gather_stats(conn) -> dict:
         "last_success": last_success,
         "qa": qa,
         "limits_hit": limits_hit,
+        "degraded_productive": degraded_productive,
         "budget_parked": budget_parked,
         "day_curve": day_curve,
     }
@@ -106,6 +115,14 @@ def render(stats: dict, now: datetime) -> str:
         for r in stats.get("budget_parked", []):
             lines.append(f"!!  {r['name']} (yield_ema {r['yield_ema']:.0f}) "
                          f"parked: {r['last_error'][:80]}")
+        lines += ["!" * 60, ""]
+
+    if stats.get("degraded_productive"):
+        lines += ["!" * 60,
+                  "!! PRODUCTIVE SOURCES DEGRADED - THEIR EVENTS WILL GO STALE"]
+        for r in stats["degraded_productive"]:
+            lines.append(f"!!  {r['name']} ({r['status']}): "
+                         f"{r['events']} events in canon")
         lines += ["!" * 60, ""]
 
     lines.append("crawls (24h):")

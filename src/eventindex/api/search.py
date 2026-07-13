@@ -57,6 +57,7 @@ ENUM_CONFIDENCE = 0.5  # energy/language are stored without their own confidence
 SOFT_ATTRIBUTES = frozenset({
     "age", "gender_split_min", "kid_friendly", "newcomer_friendly",
     "outdoor", "energy", "language", "solo_friendly", "interaction_structure",
+    "sex_service_context",
 })
 
 
@@ -125,6 +126,11 @@ class SearchFilters(BaseModel):
     )
     energy: Literal["low", "medium", "high"] | None
     language: Literal["de", "en"] | None
+    sex_service_context: bool | None = Field(
+        description="event at a commercial sex establishment (Bordell, "
+        "strip club, swinger club) - NOT mere 18+ nightlife; set false BY "
+        "DEFAULT, leave unset only if the user asks for that milieu"
+    )
     required_attributes: list[str] = Field(
         description="attribute names the user makes NON-NEGOTIABLE "
         "('unbedingt', 'muss') - enforced as hard filters instead of "
@@ -184,7 +190,7 @@ FILTER_DEFAULTS: dict = {
     "age_max": None, "gender_split_min": None, "max_price": None,
     "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
     "outdoor": None, "solo_friendly": None, "interaction_structure": None,
-    "energy": None, "language": None,
+    "energy": None, "language": None, "sex_service_context": None,
     "required_attributes": [], "vibe_terms": [],
     "near": None, "radius": None,
 }
@@ -248,6 +254,7 @@ ATTRIBUTES: dict[str, Attribute] = {
     "newcomer_friendly": _inferred_bool("newcomer_friendly"),
     "outdoor": _inferred_bool("outdoor"),
     "solo_friendly": _inferred_bool("solo_friendly"),
+    "sex_service_context": _inferred_bool("sex_service_context"),
     "interaction_structure": Attribute(
         kind="enum", value_sql="e.inferred->>'interaction_structure'",
         conf_sql=str(ENUM_CONFIDENCE),
@@ -271,7 +278,7 @@ def _wanted(f: SearchFilters) -> dict:
         wanted["age"] = (f.age_min, f.age_max)
     for name in ("gender_split_min", "kid_friendly", "newcomer_friendly",
                  "outdoor", "solo_friendly", "interaction_structure",
-                 "energy", "language"):
+                 "energy", "language", "sex_service_context"):
         if (v := getattr(f, name)) is not None:
             wanted[name] = v
     return wanted

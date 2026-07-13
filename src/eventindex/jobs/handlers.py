@@ -242,7 +242,7 @@ def enrich(job: dict, tx) -> list[dict]:
 
     row = tx.execute(
         "SELECT e.id, e.title, e.description, e.category, e.price_min, "
-        "e.price_max, v.name AS venue_name "
+        "e.price_max, v.name AS venue_name, v.sex_service AS venue_sex_service "
         "FROM event e LEFT JOIN venue v ON v.id = e.venue_id WHERE e.id = %s",
         (job["payload"]["event_id"],),
     ).fetchone()

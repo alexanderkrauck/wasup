@@ -65,12 +65,18 @@ SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `newcomer_friendly` (open to strangers vs members-only), `solo_friendly`
 (normal to attend alone), `interaction_structure` (built_in = the format
 FORCES interaction: rotation/teams/pair work; optional; none = silent
-attendance ok), `outdoor`, `energy` (low|medium|high), `language` (de|en).
+attendance ok), `outdoor`, `energy` (low|medium|high), `language` (de|en),
+`sex_service_context` (true = the event happens at a commercial sex
+establishment - Bordell, strip club, swinger club - NOT mere 18+
+nightlife; send `false` BY DEFAULT so these rank out of innocent queries,
+leave unset only when the user explicitly asks for that milieu; keep it a
+soft preference - in `required_attributes` it would also drop every event
+where the attribute is still unknown).
 Optional `importance`: `{attribute: 0..1}` (default 1.0 each).
 Attribute names for `importance` and `required_attributes` are: `age` (note:
 one name for the age_min/age_max pair), `gender_split_min`, `kid_friendly`,
 `newcomer_friendly`, `outdoor`, `solo_friendly`, `interaction_structure`,
-`energy`, `language`.
+`energy`, `language`, `sex_service_context`.
 
 Ranking combines **your importance x the stored certainty**, anchored at the
 coin flip: an event scores `0.5 + certainty/2` when it satisfies a

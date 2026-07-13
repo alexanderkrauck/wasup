@@ -23,8 +23,10 @@ user's natural language into filters - the index runs no LLM for this.
   `is_free`, `required_attributes`.
 - Soft preferences (ranked by `importance` x stored certainty, unknowns stay
   visible): `age_min`+`age_max`, `gender_split_min`, `kid_friendly`,
-  `newcomer_friendly`, `outdoor`, `energy`, `language`; weights via
-  `importance: {attr: 0..1}`.
+  `newcomer_friendly`, `outdoor`, `energy`, `language`,
+  `sex_service_context` (event at a commercial sex establishment - send
+  `false` BY DEFAULT, leave unset only on explicit ask, never in
+  `required_attributes`); weights via `importance: {attr: 0..1}`.
 - `vibe_terms`: rank-only descriptive words.
 
 Read the response honestly: `match_score` (preference fit), `confidence`

@@ -240,7 +240,7 @@ def test_registry_covers_every_soft_filter_field():
 
     soft = {"gender_split_min", "kid_friendly", "newcomer_friendly",
             "outdoor", "energy", "language", "age", "solo_friendly",
-            "interaction_structure"}
+            "interaction_structure", "sex_service_context"}
     assert soft == set(ATTRIBUTES) == SOFT_ATTRIBUTES
 
 

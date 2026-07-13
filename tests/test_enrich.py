@@ -21,6 +21,7 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "solo_friendly": {"value": True, "confidence": 0.4, "evidence": None},
         "interaction_structure": "optional",
         "energy": "high",
+        "sex_service_context": {"value": None, "confidence": 0.0, "evidence": None},
         "vibe_tags": ["techno", "student", "loud"],
         "start_time": {"value": "23:00", "confidence": 0.3, "evidence": None},
     })
@@ -79,3 +80,33 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
 def test_content_key_changes_with_content(event_row):
     other = dict(event_row, title="Seniorencafé")
     assert content_key(event_row) != content_key(other)
+
+
+def test_flagged_venue_always_carries_sex_service_context(conn, event_row, monkeypatch):
+    """The LLM said unknown, the curated venue flag wins - and it wins on
+    the cache-hit path too (flagging a venue must not wait for re-enrichment)."""
+    monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment())
+    flagged = dict(event_row, venue_sex_service=True)
+
+    attrs = enrich_event(conn, flagged)
+    assert attrs["sex_service_context"] == {
+        "value": True, "confidence": 0.8,
+        "evidence": "venue is a curated commercial sex establishment",
+    }
+    # the cache row stays the pure LLM verdict: the override is live, not baked
+    cached = conn.execute("SELECT attributes FROM enrichment").fetchone()
+    assert cached["attributes"]["sex_service_context"]["value"] is None
+    # cache-hit path (same content, e.g. after a rebuild) is overridden too
+    assert enrich_event(conn, flagged)["sex_service_context"]["value"] is True
+    # an unflagged venue keeps the LLM verdict untouched
+    assert enrich_event(conn, event_row)["sex_service_context"]["value"] is None
+
+
+def test_sex_service_context_lands_in_inferred(conn, event_row, monkeypatch):
+    monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment())
+    attrs = enrich_event(conn, dict(event_row, venue_sex_service=True))
+    apply_to_event(conn, event_row["id"], attrs)
+    row = conn.execute(
+        "SELECT inferred FROM event WHERE id = %s", (event_row["id"],)
+    ).fetchone()
+    assert row["inferred"]["sex_service_context"]["value"] is True

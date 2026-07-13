@@ -43,7 +43,11 @@ mcp = FastMCP(
         "Europe/Vienna date+time (starts_at is UTC - always convert), "
         "venue and price; a compact table or day-grouped list beats "
         "prose. time_unknown=true means the midnight timestamp is a "
-        "placeholder, never a real time. Full semantics: "
+        "placeholder, never a real time. Some indexed venues are commercial "
+        "sex establishments; their events carry "
+        "sex_service_context=true - filter these by default (soft "
+        "preference false) unless the user explicitly asks for that "
+        "milieu. Full semantics: "
         f"{BASE_URL}/llms.txt"
     ),
     website_url=BASE_URL,
@@ -75,8 +79,14 @@ def search_events(filters: QueryBody | None = None, limit: int = 20,
     attributes (kid_friendly, newcomer_friendly, solo_friendly, ...) are
     soft preferences ranked by your `importance` weights x the stored
     certainty - see the match_score on each row. Omit every filter the
-    user did not imply. sort="starts_at" gives chronological order; ask
-    for a generous limit (default 20) rather than a tiny one.
+    user did not imply - EXCEPT sex_service_context: set it false by
+    default (some indexed venues are commercial sex establishments whose
+    events otherwise surface in innocent queries); leave it unset only
+    when the user explicitly asks for that milieu. Keep it a soft
+    preference, not in required_attributes - a hard filter would also
+    drop every event where the attribute is still unknown. sort="starts_at"
+    gives chronological order; ask for a generous limit (default 20)
+    rather than a tiny one.
 
     PRESENTING RESULTS: users want specifics, not a digest. Show EVERY
     returned event unless they asked for a shortlist - as a table or

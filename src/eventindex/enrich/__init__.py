@@ -60,6 +60,7 @@ class Enrichment(BaseModel):
     solo_friendly: _BoolEst
     interaction_structure: Literal["none", "optional", "built_in"] | None
     energy: Literal["low", "medium", "high"] | None
+    sex_service_context: _BoolEst
     vibe_tags: list[str] = Field(
         description="3-6 short lowercase vibe words - single words or "
         "two-word phrases, NEVER commentary or parentheses")
@@ -68,7 +69,7 @@ class Enrichment(BaseModel):
 
 # bump when the Enrichment schema gains fields: old cache rows lack them, so
 # a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def content_key(event: dict) -> str:
@@ -89,6 +90,21 @@ def _prior_for(tx, categories: list[str]) -> dict:
     return row["priors"] if row else {}
 
 
+def _venue_override(event: dict, attributes: dict) -> dict:
+    """Curated venue facts beat estimates (Alexander 2026-07-13): an event
+    at a flagged commercial sex establishment ALWAYS carries
+    sex_service_context, however innocuous its own text - "Football Lounge
+    Nights" says nothing, the venue (Villa Ostende) says everything, and
+    the mini model cannot be trusted to know every Etablissement. Applied
+    outside the cache so flagging a venue acts immediately."""
+    if event.get("venue_sex_service"):
+        attributes["sex_service_context"] = {
+            "value": True, "confidence": CONFIDENCE_CAP,
+            "evidence": "venue is a curated commercial sex establishment",
+        }
+    return attributes
+
+
 def enrich_event(tx, event: dict, job_id=None) -> dict:
     """Compute (or fetch cached) inferred attributes for one canonical event.
     Returns the attributes dict."""
@@ -97,7 +113,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "SELECT attributes FROM enrichment WHERE content_key = %s", (key,)
     ).fetchone()
     if cached:
-        return cached["attributes"]
+        return _venue_override(event, cached["attributes"])
 
     prior = _prior_for(tx, event.get("category") or [])
     result = llm.complete(
@@ -120,7 +136,14 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "start_time: the typical LOCAL start time (HH:MM) for this kind of "
         "event - used only when the source stated no time; estimate from "
         "the event type (Sunday mass ~09:30, club night ~23:00, "
-        "Vernissage ~19:00).\n\n"
+        "Vernissage ~19:00). "
+        "sex_service_context: the event happens at a commercial sex "
+        "establishment (Bordell, Laufhaus, strip club, swinger club, erotic "
+        "massage studio) or advertises sexual services - guests encounter "
+        "sex work as part of the venue's regular operation. NOT true merely "
+        "for 18+ parties, regular nightclubs, burlesque/drag shows in "
+        "theatres, or queer events: adult-only or risqué aesthetics alone "
+        "do not qualify.\n\n"
         f"CATEGORY PRIOR: {prior}\n"
         f"TITLE: {event.get('title')}\n"
         f"DESCRIPTION: {(event.get('description') or '')[:1200]}\n"
@@ -139,7 +162,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "ON CONFLICT (content_key) DO NOTHING",
         (key, Jsonb(attributes), config.MODEL_MINI),
     )
-    return attributes
+    return _venue_override(event, attributes)
 
 
 _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
@@ -204,7 +227,8 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
                 k: attributes[k] for k in
                 ("language", "kid_friendly", "newcomer_friendly", "outdoor",
                  "solo_friendly", "interaction_structure", "energy",
-                 "vibe_tags", "start_time") if k in attributes
+                 "sex_service_context", "vibe_tags", "start_time")
+                if k in attributes
             }),
         },
     )

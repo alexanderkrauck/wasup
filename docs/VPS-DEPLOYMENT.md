@@ -101,4 +101,12 @@ eventindex-api (127.0.0.1:8400), eventindex-worker, timers for
 schedule/digest/discover (Europe/Vienna OnCalendar). No public exposure
 until domain+Caddy: access via `ssh -L 8400:localhost:8400 netcup`.
 Deploy = `cd /opt/eventindex && git pull && systemctl restart
-eventindex-api eventindex-worker`.
+eventindex-api eventindex-worker eventindex-worker2 eventindex-worker3`.
+
+**THREE worker units exist** (worker2/worker3 were added undocumented at
+some point; discovered 2026-07-13 when a deploy restarted only
+`eventindex-worker` and the other two kept processing jobs with pre-deploy
+code, writing stale-schema enrichment rows). Restart ALL of them on every
+deploy, and run `python -m eventindex.db.migrate` before the restart when
+db/migrations gained a file. Whether 3 parallel workers should stay is an
+open product/ops question (CLAUDE.md says one process).

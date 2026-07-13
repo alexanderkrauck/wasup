@@ -132,3 +132,28 @@ def test_final_onboard_failure_degrades_recipeless_source(conn, monkeypatch):
     assert conn.execute(
         "SELECT status FROM source WHERE id = %s", (src,)
     ).fetchone()["status"] == "degraded"
+
+
+def test_every_handler_follows_the_worker_calling_convention():
+    """run_job calls HANDLERS[kind](job, tx) - timefix shipped as
+    (tx, job) and burned its whole job backlog before ever running."""
+    import inspect
+
+    for kind, handler in handlers.HANDLERS.items():
+        params = list(inspect.signature(handler).parameters)
+        assert params[:2] == ["job", "tx"], (
+            f"handler {kind!r} has signature {params}, expected (job, tx)"
+        )
+
+
+def test_ghost_target_handlers_noop_and_survive_their_imports(conn):
+    """Handlers with a missing-row no-op path must reach it: this executes
+    their function-local imports, which a signature check cannot (timefix
+    imported a `fetch` that never existed - found live 2026-07-13 after
+    700 failed jobs)."""
+    import uuid
+
+    ghost = str(uuid.uuid4())
+    for kind in ("enrich", "timefix"):
+        job = {"id": uuid.uuid4(), "kind": kind, "payload": {"event_id": ghost}}
+        assert handlers.HANDLERS[kind](job, conn) == []

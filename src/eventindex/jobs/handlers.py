@@ -456,14 +456,14 @@ def discover(job: dict, tx) -> list[dict]:
     return []
 
 
-def timefix(tx, job) -> list[dict]:
+def timefix(job: dict, tx) -> list[dict]:
     """Audit A4 (Alexander 2026-07-13: find the real time): re-fetch the
     detail page of an event whose future occurrences are date-only; the
     cascade's TIMED claims replace the midnight placeholders at the next
     rebuild (occurrence folding keys date-only claims by local day)."""
     import re as _re
 
-    from eventindex.fetch import FETCHED, fetch
+    from eventindex.fetch import FETCHED, fetch_source
 
     event_id = job["payload"]["event_id"]
     row = tx.execute(
@@ -485,16 +485,18 @@ def timefix(tx, job) -> list[dict]:
         "url": row["url"], "kind": "website", "last_content_hash": None,
         "http_etag": None, "http_last_modified": None,
     }
-    result = fetch(source)
+    result = fetch_source(source)
     if result.status != FETCHED:
         return []
     method, payloads = extract(source, result, tx, job_id=job["id"])
-    timed = [
-        p for p in payloads
-        if (v := str(p.get("starts_at", {}).get("value") or ""))
-        and "T" in v.replace(" ", "T") and v[-8:] not in ("00:00:00",)
-        and not v.endswith("00:00")
-    ]
+    # a claim is "timed" when it carries a time-of-day that is not the
+    # 00:00 placeholder - a plain endswith("00:00") check would also throw
+    # away real on-the-hour starts (19:00:00, the most common start time)
+    timed = []
+    for p in payloads:
+        v = str(p.get("starts_at", {}).get("value") or "").replace(" ", "T")
+        if "T" in v and not v.split("T", 1)[1].startswith("00:00"):
+            timed.append(p)
     if timed:
         _insert_claims(tx, source, None, timed)
     tx.execute(

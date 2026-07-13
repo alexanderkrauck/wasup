@@ -13,7 +13,9 @@ import httpx
 
 from eventindex import config
 from eventindex.budget import record_spend
-from eventindex.discovery.probe import domain_of, is_known, known_domains
+from eventindex.discovery.probe import (
+    domain_of, is_known, known_domains, recently_rejected_domains,
+)
 
 log = logging.getLogger("eventindex.sweep")
 
@@ -209,6 +211,7 @@ def discover(tx, channel: str, job_id=None) -> tuple[int, int]:
 
     urls = CHANNELS[channel](tx, job_id=job_id)
     known = known_domains(tx)
+    rejected = recently_rejected_domains(tx)
     queued_domains: set[str] = set()
     enqueued = 0
     already_queued = {
@@ -220,7 +223,7 @@ def discover(tx, channel: str, job_id=None) -> tuple[int, int]:
     for url in urls:
         domain = domain_of(url)
         if not domain or is_known(domain, known) or domain in queued_domains \
-                or domain in already_queued:
+                or domain in already_queued or domain in rejected:
             continue
         if enqueued >= MAX_PROBES_PER_SWEEP:
             break

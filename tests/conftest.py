@@ -33,6 +33,6 @@ def conn(test_db_url):
         c.execute(
             "TRUNCATE jobs, crawl_log, budget_spend, event_claim, occurrence, "
             "identity, event, source, venue, report, api_key, text_recurrence, "
-            "enrichment, adjudication CASCADE"
+            "enrichment, adjudication, probe_rejection CASCADE"
         )
         c.commit()

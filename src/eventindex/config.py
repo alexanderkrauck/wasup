@@ -88,6 +88,11 @@ WORKER_IDLE_POLL_S = 5
 USER_AGENT = "EventIndexBot/0.1 (+alexander.krauck@gmail.com)"
 CRAWL_DELAY_S = 2.0  # DECISIONS.md: per-domain rate limit >= 2s
 
+# Discovery: sweeps skip domains rejected by a probe within this window
+# (directly enqueued probe jobs still run, so a re-probe can be forced;
+# after a classifier fix the window expiring re-heals wrong rejections)
+PROBE_REJECT_TTL_DAYS = 90
+
 # QA loop (§12: nightly random re-verification feeding source trust)
 QA_NIGHTLY_SAMPLE = 20
 QA_TRUST_ALPHA = 0.1  # trust <- (1-a)*trust + a*accuracy per check

@@ -30,7 +30,7 @@ from eventindex.extract import parse_dt
 from eventindex.resolve import match, projection, recurrence
 from eventindex.resolve.fingerprint import VIENNA, geo_cell, normalize_title
 from eventindex.resolve.recurrence import Recurrence, series_fingerprint
-from eventindex.resolve.venues import VenueResolver
+from eventindex.resolve.venues import VenueResolver, is_generic_location
 
 log = logging.getLogger("eventindex.rebuild")
 
@@ -428,7 +428,8 @@ def _reconcile_venues(tx, a: Claim, b: Claim, notes: list[str]) -> None:
         "FROM venue a, venue b WHERE a.id = %s AND b.id = %s",
         (keep.venue_id, drop.venue_id),
     ).fetchone()
-    if alias and dist and dist["m"] is not None and dist["m"] < VENUE_ALIAS_MAX_M:
+    if (alias and not is_generic_location(alias)
+            and dist and dist["m"] is not None and dist["m"] < VENUE_ALIAS_MAX_M):
         tx.execute(
             "UPDATE venue SET aliases = array_append(aliases, %(n)s) "
             "WHERE id = %(id)s AND NOT (%(n)s = ANY(aliases)) "

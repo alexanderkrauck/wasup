@@ -114,6 +114,15 @@ POST /v1/query
 
 Taxonomy for `categories`/`exclude_categories`: {categories}
 
+## Presenting results to humans
+
+Users want specifics, not a digest: show every returned event (not a
+selection), each with its `url` as a link, the LOCAL Europe/Vienna
+date+time (`starts_at` is UTC - convert), venue and price; a table or
+day-grouped list beats prose. Never present a `time_unknown` midnight as a
+real time. Use `sort=starts_at` when building chronological lists and a
+generous `limit`.
+
 ## Composition recipes (the power move)
 
 The stored attributes are deliberately neutral primitives; the interesting

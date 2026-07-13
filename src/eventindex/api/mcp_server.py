@@ -37,8 +37,14 @@ mcp = FastMCP(
         "confidence-scored. Contracts: null means unknown (never 'no'); "
         "inferred audience attributes are estimates with certainties; "
         "`projected: true` = forward-projected repetition, unconfirmed; "
-        "`match_score` is ordinal, compare within one result set. Full "
-        f"semantics: {BASE_URL}/llms.txt"
+        "`match_score` is ordinal, compare within one result set. "
+        "When presenting results to a user: show ALL returned events (not "
+        "a selection), each with its url as a clickable link, the LOCAL "
+        "Europe/Vienna date+time (starts_at is UTC - always convert), "
+        "venue and price; a compact table or day-grouped list beats "
+        "prose. time_unknown=true means the midnight timestamp is a "
+        "placeholder, never a real time. Full semantics: "
+        f"{BASE_URL}/llms.txt"
     ),
     website_url=BASE_URL,
     stateless_http=True,
@@ -53,22 +59,32 @@ mcp = FastMCP(
 )
 
 
-def _query(filters: QueryBody | None, limit: int) -> dict[str, Any]:
+def _query(filters: QueryBody | None, limit: int,
+           sort: str = "relevance") -> dict[str, Any]:
     from eventindex.api import app as api
 
-    return api.query(filters or QueryBody(), limit=limit)
+    return api.query(filters or QueryBody(), limit=limit, sort=sort)
 
 
 @mcp.tool(title="Search Linz events", annotations=_READ_ONLY)
-def search_events(filters: QueryBody | None = None, limit: int = 20) -> dict[str, Any]:
+def search_events(filters: QueryBody | None = None, limit: int = 20,
+                  sort: str = "relevance") -> dict[str, Any]:
     """Search events in Linz, Austria by structured filters. Use for any
     'what's on in Linz' question. Window/categories/exclusions/price in
     `filters` are hard set logic (null = unknown never matches); audience
     attributes (kid_friendly, newcomer_friendly, solo_friendly, ...) are
     soft preferences ranked by your `importance` weights x the stored
     certainty - see the match_score on each row. Omit every filter the
-    user did not imply."""
-    return _query(filters, limit)
+    user did not imply. sort="starts_at" gives chronological order; ask
+    for a generous limit (default 20) rather than a tiny one.
+
+    PRESENTING RESULTS: users want specifics, not a digest. Show EVERY
+    returned event unless they asked for a shortlist - as a table or
+    day-grouped list with: linked title (`url`), LOCAL Europe/Vienna
+    date+time (starts_at is UTC!), venue, price. On time_unknown=true
+    rows the midnight is a placeholder - say the time is unknown or show
+    start_time_estimate as an estimate, never as fact."""
+    return _query(filters, limit, sort)
 
 
 @mcp.tool(title="Get event details", annotations=_READ_ONLY)

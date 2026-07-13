@@ -1031,12 +1031,16 @@ def rebuild(conn, now: datetime | None = None) -> dict:
 
 def _apply_enrichment(tx) -> list:
     """Re-apply cached inferred attributes to the fresh canon (free); return
-    event ids that still need an enrich LLM call."""
-    from eventindex.enrich import apply_to_event, content_key
+    event ids that still need an enrich LLM call. The cache holds the pure
+    LLM verdict - curated venue facts (venue.sex_service) must be re-applied
+    here too, or every rebuild would strip the flag from events whose own
+    text looked innocent."""
+    from eventindex.enrich import apply_to_event, content_key, venue_override
 
     rows = tx.execute(
         """
-        SELECT e.id, e.title, e.description, e.category, v.name AS venue_name
+        SELECT e.id, e.title, e.description, e.category, v.name AS venue_name,
+               v.sex_service AS venue_sex_service
         FROM event e LEFT JOIN venue v ON v.id = e.venue_id
         """
     ).fetchall()
@@ -1048,7 +1052,7 @@ def _apply_enrichment(tx) -> list:
     for row in rows:
         key = content_key(row)
         if key in cached:
-            apply_to_event(tx, row["id"], cached[key])
+            apply_to_event(tx, row["id"], venue_override(row, dict(cached[key])))
         else:
             pending.append(row["id"])
     return pending

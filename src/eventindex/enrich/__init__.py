@@ -90,7 +90,7 @@ def _prior_for(tx, categories: list[str]) -> dict:
     return row["priors"] if row else {}
 
 
-def _venue_override(event: dict, attributes: dict) -> dict:
+def venue_override(event: dict, attributes: dict) -> dict:
     """Curated venue facts beat estimates (Alexander 2026-07-13): an event
     at a flagged commercial sex establishment ALWAYS carries
     sex_service_context, however innocuous its own text - "Football Lounge
@@ -113,7 +113,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "SELECT attributes FROM enrichment WHERE content_key = %s", (key,)
     ).fetchone()
     if cached:
-        return _venue_override(event, cached["attributes"])
+        return venue_override(event, cached["attributes"])
 
     prior = _prior_for(tx, event.get("category") or [])
     result = llm.complete(
@@ -162,7 +162,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "ON CONFLICT (content_key) DO NOTHING",
         (key, Jsonb(attributes), config.MODEL_MINI),
     )
-    return _venue_override(event, attributes)
+    return venue_override(event, attributes)
 
 
 _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")

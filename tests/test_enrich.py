@@ -102,6 +102,32 @@ def test_flagged_venue_always_carries_sex_service_context(conn, event_row, monke
     assert enrich_event(conn, event_row)["sex_service_context"]["value"] is None
 
 
+def test_rebuild_reapply_keeps_venue_override(conn, event_row, monkeypatch):
+    """The enrichment cache holds the pure LLM verdict; a rebuild re-applying
+    it must not strip the curated venue flag (found live: Football Lounge
+    Nights lost the flag on the first rebuild after enrichment)."""
+    from eventindex.resolve.rebuild import _apply_enrichment
+
+    venue_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO venue (id, name, sex_service) VALUES (%s, 'Villa Ostende', true)",
+        (venue_id,),
+    )
+    conn.execute(
+        "UPDATE event SET venue_id = %s WHERE id = %s", (venue_id, event_row["id"]),
+    )
+    # seed the cache exactly as enrich_event stores it: LLM said unknown
+    monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment())
+    enrich_event(conn, dict(event_row, venue_name="Villa Ostende"))
+
+    pending = _apply_enrichment(conn)
+    assert event_row["id"] not in pending  # cache hit, no LLM call needed
+    row = conn.execute(
+        "SELECT inferred FROM event WHERE id = %s", (event_row["id"],)
+    ).fetchone()
+    assert row["inferred"]["sex_service_context"]["value"] is True
+
+
 def test_sex_service_context_lands_in_inferred(conn, event_row, monkeypatch):
     monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment())
     attrs = enrich_event(conn, dict(event_row, venue_sex_service=True))

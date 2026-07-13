@@ -9,12 +9,13 @@ Bootstrap rule: while the api_key table has no active row, the API is open.
 Run: uv run uvicorn eventindex.api.app:app
 """
 
+import base64
 import json
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -30,7 +31,7 @@ _PROVENANCE_SQL = """
     SELECT array_agg(DISTINCT s.name) FROM identity i
     JOIN event_claim c ON c.fingerprint = i.fingerprint
     JOIN source s ON s.id = c.source_id
-    WHERE i.event_id = e.id
+    WHERE i.event_id = e.id AND s.kind <> 'internal'
 """
 
 # §7 staleness decay, computed at query time: each missed re-confirmation
@@ -214,34 +215,78 @@ def _parse_radius(radius: str) -> float:
     return float(m.group(1)) * (1000 if (m.group(2) or "km") == "km" else 1)
 
 
+def _encode_cursor(ts: datetime, row_id) -> str:
+    # URL-safe: the old raw "ts|uuid" format contained '+' and broke when
+    # pasted into a query string unencoded (audit B')
+    raw = f"{ts.isoformat()}|{row_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
 def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
     try:
-        ts, row_id = cursor.split("|", 1)
+        padded = cursor + "=" * (-len(cursor) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (ValueError, UnicodeDecodeError):
+        decoded = cursor  # legacy raw cursors keep working
+    try:
+        ts, row_id = decoded.split("|", 1)
         return datetime.fromisoformat(ts), UUID(row_id)
     except ValueError:
         raise HTTPException(422, "invalid cursor")
 
 
 def _occurrence_filters(
-    from_, to, near, radius, bbox, category, min_confidence
+    from_, to, near, radius, bbox, category, min_confidence,
+    include_terms=None,
 ) -> tuple[list[str], dict]:
     """The shared filter set of /v1/occurrences and /v1/feed.ics."""
-    conditions = ["o.starts_at >= %(from)s", "o.status != 'cancelled'"]
+    from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER
+
+    # overlap semantics: something still running at `from` is in the window
+    # (audit A21: ongoing exhibitions were invisible from day 2)
+    conditions = [
+        "coalesce(o.ends_at, o.starts_at) >= %(from)s",
+        "o.status != 'cancelled'",
+    ]
     params: dict = {"from": from_ or datetime.now(timezone.utc)}
 
     if to is not None:
         conditions.append("o.starts_at <= %(to)s")
         params["to"] = to
+    radius_norm = radius.strip().lower()
+    explicit_radius = radius_norm not in ("", "any", "default")
     if near is not None:
         try:
             lat, lon = (float(x) for x in near.split(","))
         except ValueError:
             raise HTTPException(422, "near must be 'lat,lon'")
         conditions.append(
-            "ST_DWithin(e.geo::geography, "
+            "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
             "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, %(meters)s)"
         )
-        params.update(lat=lat, lon=lon, meters=_parse_radius(radius))
+        params.update(
+            lat=lat, lon=lon,
+            meters=_parse_radius(radius if explicit_radius else "5km"),
+        )
+    elif explicit_radius:  # radius without near = circle around Linz center
+        conditions.append(
+            "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
+            "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, "
+            "%(meters)s)"
+        )
+        params.update(lat=LINZ_CENTER[0], lon=LINZ_CENTER[1],
+                      meters=_parse_radius(radius))
+    elif bbox is None and radius_norm != "any":
+        # default gate: the index is Linz (15km circle) - but events with
+        # UNKNOWN location stay in (null = unknown, audit decision 2026-07-13)
+        conditions.append(
+            "(coalesce(e.geo, v.geo) IS NULL OR "
+            "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
+            "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, "
+            "%(meters)s))"
+        )
+        params.update(lat=LINZ_CENTER[0], lon=LINZ_CENTER[1],
+                      meters=DEFAULT_RADIUS_KM * 1000)
     if bbox is not None:
         try:
             x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
@@ -256,6 +301,23 @@ def _occurrence_filters(
     if min_confidence is not None:
         conditions.append(f"({_EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
         params["min_conf"] = min_confidence
+    if include_terms:
+        # same word-boundary + hyphen/compound semantics as /v1/query, so
+        # exhaustive text listings can page with the cursor (audit B5)
+        alts = []
+        for i, term in enumerate(
+            t.strip() for t in include_terms.split(",") if t.strip()
+        ):
+            key = f"inc_term_{i}"
+            pat = r"[-\s]?".join(re.escape(tok) for tok in term.split())
+            alts.append(
+                f"e.title ~* %({key})s "
+                f"OR coalesce(v.name ~* %({key})s, false) "
+                f"OR coalesce(e.organizer ~* %({key})s, false)"
+            )
+            params[key] = rf"\m{pat}|{pat}\M"
+        if alts:
+            conditions.append("(" + " OR ".join(alts) + ")")
     return conditions, params
 
 
@@ -264,10 +326,13 @@ def occurrences(
     from_: datetime | None = Query(None, alias="from"),
     to: datetime | None = None,
     near: str | None = Query(None, description="lat,lon"),
-    radius: str = "5km",
+    radius: str = Query("default", description="'5km'/'800m'; 'any' disables the default 15km-around-Linz gate"),
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
-    min_confidence: float | None = None,
+    min_confidence: float | None = Query(None, ge=0, le=1),
+    include_terms: str | None = Query(
+        None, description="comma-separated synonyms; at least one must "
+        "match title/venue/organizer (word-boundary aware)"),
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
@@ -275,7 +340,7 @@ def occurrences(
     matches), keyset-paginated. For importance x certainty ranking over
     audience attributes use POST /v1/query."""
     conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence
+        from_, to, near, radius, bbox, category, min_confidence, include_terms
     )
     params["limit"] = limit
     if cursor is not None:
@@ -285,8 +350,11 @@ def occurrences(
 
     sql = f"""
         SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status, o.projected,
-               o.availability, o.last_confirmed_at,
+               o.availability, o.last_confirmed_at, o.time_unknown,
+               (o.starts_at < %(from)s) AS ongoing,
                e.title, e.category, e.price_min, e.price_max, e.url,
+               e.kind, e.organizer, e.status AS event_status,
+               e.booking_url, e.registration_required,
                v.name AS venue_name, v.address AS venue_address,
                ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
@@ -304,7 +372,7 @@ def occurrences(
     next_cursor = None
     if len(rows) == limit:
         last = rows[-1]
-        next_cursor = f"{last['starts_at'].isoformat()}|{last['id']}"
+        next_cursor = _encode_cursor(last["starts_at"], last["id"])
 
     return {
         "data_freshness": freshness,
@@ -318,21 +386,22 @@ def feed_ics(
     from_: datetime | None = Query(None, alias="from"),
     to: datetime | None = None,
     near: str | None = Query(None, description="lat,lon"),
-    radius: str = "5km",
+    radius: str = Query("default", description="'5km'/'800m'; 'any' disables the default 15km-around-Linz gate"),
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
-    min_confidence: float | None = None,
+    min_confidence: float | None = Query(None, ge=0, le=1),
+    include_terms: str | None = Query(None, description="comma-separated"),
     limit: int = Query(500, le=1000, ge=1),
 ):
     """Any filter combo as a calendar subscription (§9)."""
     from icalendar import Calendar, Event as ICalEvent
 
     conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence
+        from_, to, near, radius, bbox, category, min_confidence, include_terms
     )
     params["limit"] = limit
     sql = f"""
-        SELECT o.id, o.starts_at, o.ends_at, o.projected,
+        SELECT o.id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
                e.title, e.url, v.name AS venue_name
         FROM occurrence o JOIN event e ON e.id = o.event_id
         LEFT JOIN venue v ON v.id = e.venue_id
@@ -350,7 +419,11 @@ def feed_ics(
         ev = ICalEvent()
         ev.add("uid", f"{r['id']}@eventindex")
         ev.add("summary", r["title"] + (" (unbestätigt)" if r["projected"] else ""))
-        ev.add("dtstart", r["starts_at"])
+        if r["time_unknown"]:
+            # date-only sources: an all-day entry beats a fake midnight
+            ev.add("dtstart", r["starts_at"].date())
+        else:
+            ev.add("dtstart", r["starts_at"])
         if r["ends_at"]:
             ev.add("dtend", r["ends_at"])
         if r["venue_name"]:
@@ -362,7 +435,9 @@ def feed_ics(
 
 
 def _run_filters(filters, limit: int,
-                 importance: dict[str, float] | None = None) -> dict:
+                 importance: dict[str, float] | None = None,
+                 sort: str = "relevance", distinct: bool = False,
+                 offset: int = 0) -> dict:
     """The deterministic search core shared by /v1/search and /v1/query:
     guarantees as set logic in SQL; soft attribute preferences scored as
     importance x certainty; vibe terms only rank."""
@@ -379,8 +454,11 @@ def _run_filters(filters, limit: int,
         rows = conn.execute(
             f"""
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
-                   o.projected,
+                   o.projected, o.time_unknown,
+                   (o.starts_at < %(from)s) AS ongoing,
                    e.title, e.category, e.price_min, e.price_max, e.url,
+                   e.kind, e.organizer, e.status AS event_status,
+                   e.booking_url, e.registration_required,
                    v.name AS venue_name, v.address AS venue_address,
                    e.inferred->'vibe_tags' AS vibe_tags,
                    e.expected_age_range AS age_range,
@@ -400,6 +478,16 @@ def _run_filters(filters, limit: int,
     rows = rows[:pool]
     for r in rows:
         r["age_range"] = str(r["age_range"]) if r["age_range"] else None
+    ranked = rank(rows, filters, importance)
+    if distinct:
+        # one row per EVENT (its best-ranked occurrence): a recurring event
+        # filled 6 of 10 slots of a discovery query (audit B1)
+        seen_events: set = set()
+        ranked = [r for r in ranked
+                  if not (r["event_id"] in seen_events
+                          or seen_events.add(r["event_id"]))]
+    if sort == "starts_at":
+        ranked = sorted(ranked, key=lambda r: r["starts_at"])
     return {
         "data_freshness": freshness,
         "parsed_filters": filters.model_dump(),
@@ -408,7 +496,7 @@ def _run_filters(filters, limit: int,
         # beyond the first `pool` by start time were not scored - narrow the
         # window or add hard filters
         "pool_truncated": truncated,
-        "occurrences": rank(rows, filters, importance)[:limit],
+        "occurrences": ranked[offset:offset + limit],
     }
 
 
@@ -425,7 +513,13 @@ def search(q: str, limit: int = Query(20, le=100, ge=1)):
 
 
 @app.get("/v1/query")
-def query_get(request: Request, limit: int = Query(20, le=100, ge=1)):
+def query_get(
+    request: Request,
+    limit: int = Query(20, le=100, ge=1),
+    offset: int = Query(0, ge=0, le=2000),
+    sort: Literal["relevance", "starts_at"] = "relevance",
+    distinct: Literal["event", "occurrence"] = "occurrence",
+):
     """GET variant of /v1/query for browse-only agents (ChatGPT's browsing
     tool cannot POST). Same filters as query params: lists comma-separated
     (include_terms=lauf,run), importance as importance=attr:0.9,attr2:0.4.
@@ -435,7 +529,7 @@ def query_get(request: Request, limit: int = Query(20, le=100, ge=1)):
     body: dict = {}
     importance: dict = {}
     for name, raw in request.query_params.items():
-        if name in ("limit", "api_key"):
+        if name in ("limit", "api_key", "offset", "sort", "distinct"):
             continue
         if name == "importance":
             try:
@@ -458,11 +552,25 @@ def query_get(request: Request, limit: int = Query(20, le=100, ge=1)):
         parsed = QueryBody(**body)
     except ValidationError as e:
         raise HTTPException(422, f"invalid filters: {e}")
-    return query(parsed, limit)
+    return query(parsed, limit, offset, sort, distinct)
 
 
 @app.post("/v1/query")
-def query(body: QueryBody, limit: int = Query(20, le=100, ge=1)):
+def query(
+    body: QueryBody,
+    limit: Annotated[int, Query(le=100, ge=1)] = 20,
+    offset: Annotated[int, Query(
+        ge=0, le=2000, description="skip N ranked rows (pool is 2000)",
+    )] = 0,
+    sort: Annotated[Literal["relevance", "starts_at"], Query(
+        description="relevance = match_score x confidence (the default, NOT "
+        "chronological); starts_at = chronological",
+    )] = "relevance",
+    distinct: Annotated[Literal["event", "occurrence"], Query(
+        description="event = one row per event (its best occurrence) for "
+        "discovery queries; occurrence = every date separately",
+    )] = "occurrence",
+):
     """Structured search for agents: send SearchFilters fields directly
     (all optional - see /llms.txt) and NO LLM runs on the index side.
 
@@ -486,7 +594,8 @@ def query(body: QueryBody, limit: int = Query(20, le=100, ge=1)):
         filters = SearchFilters(**data)
     except ValidationError as e:
         raise HTTPException(422, f"invalid filters: {e}")
-    return _run_filters(filters, limit, importance)
+    return _run_filters(filters, limit, importance,
+                        sort=sort, distinct=distinct == "event", offset=offset)
 
 
 @app.get("/v1/events/{event_id}")
@@ -582,5 +691,5 @@ def changes(since: str | None = None, limit: int = Query(100, le=500, ge=1)):
     next_cursor = None
     if len(rows) == limit:
         last = rows[-1]
-        next_cursor = f"{last['updated_at'].isoformat()}|{last['id']}"
+        next_cursor = _encode_cursor(last["updated_at"], last["id"])
     return {"data_freshness": freshness, "events": rows, "next_cursor": next_cursor}

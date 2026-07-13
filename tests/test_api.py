@@ -49,10 +49,17 @@ def _titles(resp):
     return [o["title"] for o in resp.json()["occurrences"]]
 
 
-def test_default_excludes_past(client):
+def test_default_excludes_past_and_gates_to_linz(client):
     titles = _titles(client.get("/v1/occurrences"))
     assert "Already Happened" not in titles
-    assert len(titles) == 4
+    # default 15km-around-Linz gate (2026-07-13): far events out, but
+    # UNKNOWN locations stay in - null = unknown must not hide the index
+    assert "Far Away Fest" not in titles
+    assert "Unknown Location Talk" in titles
+    assert len(titles) == 3
+    # radius=any disables the gate
+    all_titles = _titles(client.get("/v1/occurrences", params={"radius": "any"}))
+    assert "Far Away Fest" in all_titles and len(all_titles) == 4
 
 
 def test_near_filter_includes_only_known_close_geo(client):
@@ -81,7 +88,7 @@ def test_keyset_pagination_walks_everything_once(client):
         cursor = body["next_cursor"]
         if cursor is None:
             break
-    assert len(seen) == len(set(seen)) == 4
+    assert len(seen) == len(set(seen)) == 3
 
 
 def test_event_detail_404(client):
@@ -178,7 +185,8 @@ def test_query_endpoint_soft_preferences_keep_unknowns(client):
     })
     assert resp.status_code == 200
     # no event has kid_friendly data -> all stay visible, scored at the prior
-    assert len(resp.json()["occurrences"]) == 4
+    # (3: the default Linz gate excludes Far Away Fest)
+    assert len(resp.json()["occurrences"]) == 3
 
 
 def test_query_endpoint_rejects_garbage(client):
@@ -284,3 +292,83 @@ def test_query_get_variant_for_browse_only_agents(conn, client):
     assert client.get(
         "/v1/query", params={"importance": "kid_friendly"}
     ).status_code == 422
+
+
+# ------------------------------------------ audit 2026-07-12 fixes (Block 5)
+
+def test_ongoing_occurrence_is_visible_with_flag(client, conn):
+    """A21: 95 running exhibitions were invisible under starts_at-only
+    windows; overlap semantics is the default since 2026-07-13."""
+    eid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, category, confidence, status) "
+        "VALUES (%s, 'one_off', 'Laufende Ausstellung', '{art}', 0.9, 'confirmed')",
+        (eid,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, ends_at) VALUES (%s, %s, %s)",
+        (eid, NOW - timedelta(days=5), NOW + timedelta(days=5)),
+    )
+    conn.commit()
+    body = client.get("/v1/occurrences").json()
+    row = next(o for o in body["occurrences"] if o["title"] == "Laufende Ausstellung")
+    assert row["ongoing"] is True
+    body = client.post("/v1/query", json={}).json()
+    row = next(o for o in body["occurrences"] if o["title"] == "Laufende Ausstellung")
+    assert row["ongoing"] is True
+
+
+def test_unknown_category_is_422_not_empty(client):
+    """B3: a typo'd category silently returned nothing; in
+    exclude_categories it silently weakened a guarantee."""
+    assert client.post("/v1/query", json={"categories": ["konzert"]}).status_code == 422
+    assert client.get("/v1/query", params={"categories": "konzert"}).status_code == 422
+    assert client.post(
+        "/v1/query", json={"exclude_categories": ["nightlfe"]}
+    ).status_code == 422
+
+
+def test_impossible_ranges_are_422(client):
+    assert client.post("/v1/query", json={
+        "from_dt": "2026-08-01", "to_dt": "2026-07-01",
+    }).status_code == 422
+    assert client.post("/v1/query", json={
+        "age_min": 60, "age_max": 20,
+    }).status_code == 422
+
+
+def test_distinct_event_and_sort_starts_at(client, conn):
+    eid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, category, confidence, status) "
+        "VALUES (%s, 'series', 'Tagesführung', '{culture}', 0.9, 'confirmed')",
+        (eid,),
+    )
+    for d in (1, 2, 3):
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
+            (eid, NOW + timedelta(days=d)),
+        )
+    conn.commit()
+    rows = client.post("/v1/query?distinct=event", json={}).json()["occurrences"]
+    assert sum(1 for r in rows if r["title"] == "Tagesführung") == 1  # B1
+    rows = client.post("/v1/query?sort=starts_at", json={}).json()["occurrences"]
+    starts = [r["starts_at"] for r in rows]
+    assert starts == sorted(starts)  # B2
+
+
+def test_to_dt_bare_date_covers_the_whole_day(client, conn):
+    eid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, category, confidence, status) "
+        "VALUES (%s, 'one_off', 'Abendkonzert 18ter', '{music}', 0.9, 'confirmed')",
+        (eid,),
+    )
+    evening = (NOW + timedelta(days=3)).replace(hour=19)
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)", (eid, evening),
+    )
+    conn.commit()
+    day = evening.date().isoformat()
+    rows = client.post("/v1/query", json={"to_dt": day}).json()["occurrences"]
+    assert any(r["title"] == "Abendkonzert 18ter" for r in rows)  # B6

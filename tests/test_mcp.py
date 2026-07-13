@@ -32,7 +32,7 @@ def _lifespan_client():
 @pytest.fixture
 def client(conn, _lifespan_client):
     _add_event(conn, "Salsa Social", starts=NOW + timedelta(days=1),
-               lat=48.30, lon=14.29, category=["dance"])
+               lat=48.30, lon=14.29, category=["nightlife"])
     _add_event(conn, "Chamber Concert", starts=NOW + timedelta(days=2),
                category=["music"])
     conn.commit()
@@ -71,7 +71,7 @@ def test_tools_carry_directory_required_annotations(client):
 
 def test_search_events_runs_the_query_core(client):
     result = _call(client, "search_events",
-                   {"filters": {"categories": ["dance"]}, "limit": 5})
+                   {"filters": {"categories": ["nightlife"]}, "limit": 5})
     titles = [o["title"] for o in result["occurrences"]]
     assert titles == ["Salsa Social"]
     assert all("match_score" in o for o in result["occurrences"])

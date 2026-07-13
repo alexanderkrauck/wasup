@@ -263,3 +263,29 @@ def test_exclude_terms_match_venue_and_spare_venueless(conn):
     _add(conn, "Sommerkonzert")  # no venue: must NOT be null-poisoned out
     titles = _run(conn, _filters(exclude_terms=["factory300"]))
     assert titles == ["Sommerkonzert"]
+
+
+def test_multiword_terms_match_hyphen_and_compound(conn):
+    """B4: 'krone fest' found neither 'Krone-Fest' nor 'Kronefest'."""
+    _add(conn, "Linzer Krone-Fest 2026")
+    _add(conn, "SoulSanity LIVE @ Linzer Kronefest")
+    _add(conn, "Kronleuchter-Ausstellung")
+    titles = _run(conn, _filters(include_terms=["krone fest"]))
+    assert set(titles) == {"Linzer Krone-Fest 2026",
+                           "SoulSanity LIVE @ Linzer Kronefest"}
+
+
+def test_include_terms_match_organizer(conn):
+    _add(conn, "Sommerfest")  # no organizer
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, organizer, confidence, status) "
+        "VALUES (%s, 'one_off', 'Netzwerkabend', 'tech2b', 0.9, 'confirmed')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
+        (event_id, NOW + timedelta(days=1)),
+    )
+    titles = _run(conn, _filters(include_terms=["tech2b"]))
+    assert titles == ["Netzwerkabend"]

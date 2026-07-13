@@ -20,11 +20,29 @@ from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, create_model, field_validator,
+    model_validator,
+)
 
 from eventindex import config, llm
 
 VIENNA = ZoneInfo(config.TIMEZONE)
+
+# the index is Linz: queries default to this circle unless the caller sends
+# near=/radius= (radius="any" disables). Events with UNKNOWN location always
+# pass the default gate - null = unknown must not hide half the index.
+LINZ_CENTER = (48.3069, 14.2858)
+DEFAULT_RADIUS_KM = 15
+
+
+def _radius_m(radius: str) -> float:
+    import re as _re
+
+    m = _re.fullmatch(r"([\d.]+)\s*(km|m)?", radius.strip())
+    if not m:
+        raise ValueError("radius must look like '5km' or '500m' (or 'any')")
+    return float(m.group(1)) * (1000 if (m.group(2) or "km") == "km" else 1)
 
 # P(satisfied) is anchored at the coin flip: 0.5 + c/2 on a match,
 # 0.5 - c/2 on a contradiction. Unknown sits just under a weak match and
@@ -49,19 +67,36 @@ class SearchFilters(BaseModel):
 
     @field_validator("from_dt", "to_dt")
     @classmethod
-    def _valid_window(cls, v: str | None) -> str | None:
+    def _valid_window(cls, v: str | None, info) -> str | None:
         """LLM output must not reach SQL unvalidated: parse, and pin naive
         datetimes to Vienna (the model thinks in local time; the session
-        timezone must never decide what 'heute abend' means)."""
+        timezone must never decide what 'heute abend' means). A bare date in
+        to_dt means the WHOLE day - 'bis 18.7.' must not lose the 18th."""
         if v is None:
             return None
+        bare_date = len(v.strip()) == 10
         dt = datetime.fromisoformat(v)  # ValueError -> llm.complete retries
+        if bare_date and info.field_name == "to_dt":
+            dt = dt.replace(hour=23, minute=59, second=59)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=VIENNA)
         return dt.isoformat()
 
     categories: list[str] | None = Field(description="wanted categories from the taxonomy, null = any")
     exclude_categories: list[str] = Field(description="categories the user does NOT want - hard guarantee")
+
+    @field_validator("categories", "exclude_categories")
+    @classmethod
+    def _known_categories(cls, v: list[str] | None) -> list[str] | None:
+        """A typo'd category silently returned nothing (and in
+        exclude_categories silently WEAKENED a guarantee) - audit B3."""
+        unknown = set(v or []) - set(config.CATEGORIES)
+        if unknown:
+            raise ValueError(
+                f"unknown categories {sorted(unknown)}; "
+                f"valid: {sorted(config.CATEGORIES)}"
+            )
+        return v
     exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags/venue - hard guarantee")
     include_terms: list[str] = Field(
         description="synonym set of which at least ONE must appear in "
@@ -110,6 +145,33 @@ class SearchFilters(BaseModel):
         description="residual descriptive words for RANKING only (e.g. 'dance', "
         "'high energy' -> ['dance','energetic']); never constraints"
     )
+    near: str | None = Field(
+        description="'lat,lon' center overriding the default 15km-around-"
+        "Linz gate; use for 'near X' queries with known coordinates"
+    )
+    radius: str | None = Field(
+        description="radius for near ('5km', '800m'); 'any' disables the "
+        "geo gate entirely"
+    )
+
+    @model_validator(mode="after")
+    def _sane_ranges(self):
+        """Impossible ranges returned silently-empty results (audit B11)."""
+        if (self.from_dt and self.to_dt
+                and datetime.fromisoformat(self.from_dt)
+                > datetime.fromisoformat(self.to_dt)):
+            raise ValueError("from_dt is after to_dt")
+        if (self.age_min is not None and self.age_max is not None
+                and self.age_min > self.age_max):
+            raise ValueError("age_min is greater than age_max")
+        if self.near is not None:
+            try:
+                lat, lon = (float(x) for x in self.near.split(","))
+            except ValueError:
+                raise ValueError("near must be 'lat,lon'")
+        if self.radius is not None:
+            _radius_m(self.radius)  # raises ValueError on junk
+        return self
 
 
 # SearchFilters keeps every field required-but-nullable (strict structured
@@ -124,6 +186,7 @@ FILTER_DEFAULTS: dict = {
     "outdoor": None, "solo_friendly": None, "interaction_structure": None,
     "energy": None, "language": None,
     "required_attributes": [], "vibe_terms": [],
+    "near": None, "radius": None,
 }
 
 # The public body of POST /v1/query: SearchFilters with every field optional
@@ -261,13 +324,42 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
     null attribute = unknown = never matches a hard constraint (§7)."""
     conditions = ["o.status = 'scheduled'"]
     params: dict = {}
-    conditions.append("o.starts_at >= %(from)s")
+    # overlap semantics (Alexander 2026-07-13): something still RUNNING at
+    # `from` is in the window - 95 ongoing exhibitions were invisible under
+    # starts_at-only filtering (audit A21). Rows expose `ongoing`.
+    conditions.append("coalesce(o.ends_at, o.starts_at) >= %(from)s")
     params["from"] = (
         datetime.fromisoformat(f.from_dt) if f.from_dt else datetime.now(VIENNA)
     )
     if f.to_dt:
         conditions.append("o.starts_at <= %(to)s")
         params["to"] = datetime.fromisoformat(f.to_dt)
+
+    radius_any = (f.radius or "").strip().lower() == "any"
+    if f.near is not None or (f.radius is not None and not radius_any):
+        # explicit geo ask = hard filter: unknown location never matches
+        lat, lon = (
+            tuple(float(x) for x in f.near.split(",")) if f.near
+            else LINZ_CENTER
+        )
+        conditions.append(
+            "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
+            "ST_SetSRID(ST_MakePoint(%(g_lon)s, %(g_lat)s), 4326)::geography, "
+            "%(g_m)s)"
+        )
+        params.update(g_lat=lat, g_lon=lon, g_m=_radius_m(f.radius or "5km"))
+    elif not radius_any:
+        # default gate: the index is Linz - but unknown location stays IN
+        conditions.append(
+            "(coalesce(e.geo, v.geo) IS NULL OR "
+            "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
+            "ST_SetSRID(ST_MakePoint(%(g_lon)s, %(g_lat)s), 4326)::geography, "
+            "%(g_m)s))"
+        )
+        params.update(
+            g_lat=LINZ_CENTER[0], g_lon=LINZ_CENTER[1],
+            g_m=DEFAULT_RADIUS_KM * 1000,
+        )
     if f.categories:
         conditions.append("e.category && %(cats)s")
         params["cats"] = f.categories
@@ -282,6 +374,7 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
         conditions.append(
             f"NOT (e.title ILIKE %({key})s "
             f"OR coalesce(v.name ILIKE %({key})s, false) "
+            f"OR coalesce(e.organizer ILIKE %({key})s, false) "
             f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false))"
         )
         params[key] = f"%{term}%"
@@ -302,9 +395,13 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
             alts.append(
                 f"e.title ~* %({key})s "
                 f"OR coalesce(v.name ~* %({key})s, false) "
+                f"OR coalesce(e.organizer ~* %({key})s, false) "
                 f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false)"
             )
-            params[key] = rf"\m{_re.escape(term)}|{_re.escape(term)}\M"
+            # multi-word terms tolerate hyphen/compound spelling: 'krone
+            # fest' must find 'Krone-Fest' AND 'Kronefest' (audit B4)
+            pat = r"[-\s]?".join(_re.escape(t) for t in term.split())
+            params[key] = rf"\m{pat}|{pat}\M"
             params[key + "raw"] = term
         conditions.append("(" + " OR ".join(alts) + ")")
     if f.is_free:

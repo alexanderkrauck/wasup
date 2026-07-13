@@ -20,6 +20,14 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 - **`projected: true`** on an occurrence = a forward-projected repetition of
   an observed weekly/biweekly series (beyond what its source feed shows).
   Treat as "expected, unconfirmed".
+- **`time_unknown: true`** = the source stated only a DATE; `starts_at` shows
+  midnight as a placeholder, not a real time. `ongoing: true` = the
+  occurrence started before your window but is still running (exhibitions,
+  festivals) - windows use OVERLAP semantics, not starts-only.
+- **Geography default**: results are gated to ~15 km around Linz; events
+  with UNKNOWN location always pass the gate. Override with `near=lat,lon`
+  + `radius=` (then unknown-location events are excluded - it's a hard
+  filter); `radius=any` disables the gate.
 - **`confidence`** on results decays with staleness (missed re-confirmation
   cycles); `last_confirmed_at` says when a source last showed the event.
 - **`provenance_summary`** lists the reporting sources; `GET /v1/events/{id}`
@@ -30,13 +38,19 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 `POST /v1/query?limit=20` - body: any subset of the filter fields (JSON).
 Browse-only agent (can only GET)? Same filters as query params:
 `GET /v1/query?include_terms=lauf,run&newcomer_friendly=true&importance=newcomer_friendly:1.0&limit=10`
+Result-shape params (query string on GET and POST): `sort=starts_at` for
+chronological (default `relevance` = match_score x confidence, NOT
+chronological!), `distinct=event` for discovery questions ("what guided
+tours exist?" - one row per event instead of one per date), `offset=` to
+page through the ranked pool (<=2000).
 **No API key needed for reads** (query, occurrences, events/{id}, feed.ics,
 changes) - anonymous access is rate-limited to 60 req/min per IP; a key
 (header `X-API-Key` or `?api_key=`) lifts the limit. Keys are required only
 for `/v1/search` (it spends the index's own LLM budget) and `POST
 /v1/reports`.
 
-HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna),
+HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna;
+a bare date in to_dt means the WHOLE day), `near`+`radius` (geo circle),
 `categories`, `exclude_categories`, `exclude_terms`, `include_terms`
 (synonym set, at least ONE must appear in title/tags/venue name - use for
 "specifically X" queries, e.g. `["lauf","run"]` for running or
@@ -68,15 +82,21 @@ excluded - use sparingly, most events have estimated attributes only).
 filter.
 
 Fine print an agent should know:
-- Window filters compare `starts_at` only; a null `ends_at` is unknown and
-  plays no role in filtering.
+- Windows use overlap semantics: anything still running at `from` matches
+  (flagged `ongoing`); a null `ends_at` is treated as ending at `starts_at`.
 - `price_min = 0` means stated-free; `price_min = null` means unknown (the
   `is_free` filter matches only stated-free).
 - `match_score` orders results; it is NOT a percentage. Certainties are
   capped (0.8) and unknowns score a 0.45 prior, so an excellent real-world
   fit typically lands around 0.4-0.7. Compare within a result set.
-- Rows carry `venue_name`/`venue_address` when known; `lat`/`lon` are only
-  set from real venue/claim locations, never guessed.
+- Rows carry `venue_name`/`venue_address`/`organizer` when known;
+  `lat`/`lon` are only set from real venue/claim locations, never guessed.
+  `event_status: "tentative"` marks unverified series; `kind: "series"`
+  distinguishes recurring events from one-offs. `booking_url` and
+  `registration_required` appear when a source stated them.
+- Cursors (`next_cursor`) are opaque base64url strings - pass them back
+  verbatim. `/v1/occurrences` also takes `include_terms=` for exhaustive
+  text listings with cursor paging.
 
 Example - "tonight, no techno, mostly-female crowd matters a lot, kids ok":
 

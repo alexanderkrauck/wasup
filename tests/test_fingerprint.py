@@ -43,3 +43,11 @@ def test_geo_cell_distinguishes_across_town_not_next_door():
 def test_venue_id_beats_geo_cell():
     fp = fingerprint("Jazz Abend", DT, lat=48.31, lon=14.29, venue_id="abc-123")
     assert fp.endswith("|abc-123")
+
+
+def test_cinema_version_markers_do_not_split_identity():
+    # "(OmdtU)" kept in one crawl, dropped in the next -> duplicate events
+    # (audit A2b)
+    assert normalize_title("Backrooms (OmdtU)") == normalize_title("Backrooms")
+    assert normalize_title("Hola Frida (DF)") == normalize_title("Hola Frida")
+    assert normalize_title("Deep Space (OV)") == normalize_title("Deep Space")

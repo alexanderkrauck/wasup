@@ -18,6 +18,10 @@ _STOPWORDS = {
     "der", "die", "das", "den", "dem", "des", "ein", "eine", "und", "mit",
     "im", "in", "am", "an", "um", "auf", "bei", "fuer", "von", "vom", "zum",
     "zur", "the", "a", "an", "and", "of", "at", "with",
+    # cinema version markers: the LLM extractor keeps "(OmdtU)"/"(DF)" in
+    # one crawl and drops it in the next - same screening, drifting
+    # fingerprint, duplicate events (audit A2b)
+    "omu", "omdtu", "omeu", "omenglu", "ov", "odf", "df", "oful",
 }
 
 

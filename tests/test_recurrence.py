@@ -99,15 +99,14 @@ def test_weekly_without_weekday_is_not_expandable():
     assert compile_rrule(rec, datetime(2026, 9, 1, tzinfo=VIENNA)) is None
 
 
-def test_series_fingerprint_tolerates_30min_and_matches_weekday():
-    d1 = datetime(2026, 9, 15, 18, 30, tzinfo=VIENNA)
-    d2 = datetime(2026, 9, 22, 18, 45, tzinfo=VIENNA)  # next week, 15min later
-    d3 = datetime(2026, 9, 16, 18, 30, tzinfo=VIENNA)  # Wednesday
-    assert series_fingerprint("Spinning", "v1", d1) == series_fingerprint(
-        "SPINNING!", "v1", d2
+def test_series_fingerprint_is_title_and_venue_only():
+    # weekday/time buckets fragmented daily series into one event per
+    # weekday in production (audit A2a) - deliberately removed 2026-07-13
+    assert series_fingerprint("Spinning", "v1") == series_fingerprint(
+        "SPINNING!", "v1"
     )
-    assert series_fingerprint("Spinning", "v1", d1) != series_fingerprint(
-        "Spinning", "v1", d3
+    assert series_fingerprint("Spinning", "v1") != series_fingerprint(
+        "Spinning", "v2"
     )
 
 

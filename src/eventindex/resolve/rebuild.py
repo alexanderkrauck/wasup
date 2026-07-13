@@ -200,6 +200,19 @@ def _recurrence_of(c: Claim) -> Recurrence | None:
     return _recurrence_of_raw(c.value("recurrence"))
 
 
+_WD_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+
+
+def _rule_fits_claim(rec: Recurrence, starts_at: datetime) -> bool:
+    """A rule that cannot generate the claim's own weekday must not absorb
+    the claim: in production a Thursdays-rule (shared series description)
+    was stamped onto the Fri/Sat/Sun/Wed claims of a daily concert series
+    and their real dates were discarded (audit A2a)."""
+    if rec.freq not in ("weekly", "monthly_by_weekday") or rec.weekday is None:
+        return True
+    return _WD_CODES[starts_at.astimezone(VIENNA).weekday()] == rec.weekday
+
+
 # German recurrence wording in free-text descriptions (aggregators often bury
 # "jeden Mittwoch 3.6.-26.8." in prose the extractor stored as a one-off).
 _TEXT_REC_RE = re.compile(
@@ -286,10 +299,12 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         rrule_raw = c.value("rrule_raw")
         if rec is None and rrule_raw is None:
             rec = _text_recurrence(tx, c)
+        if rec is not None and not _rule_fits_claim(rec, c.starts_at):
+            rec = None  # the claim's own date contradicts the rule
         if rec is None and rrule_raw is None:
             oneoffs.append(c)
             continue
-        key = series_fingerprint(c.title, _venue_key(c), c.starts_at)
+        key = series_fingerprint(c.title, _venue_key(c))
         g = groups.setdefault(
             key, {"key": key, "claims": [], "recurrence": None, "rrule_raw": None}
         )
@@ -297,15 +312,20 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         g["recurrence"] = g["recurrence"] or rec
         g["rrule_raw"] = g["rrule_raw"] or rrule_raw
 
-    # pass 2: explicit multi-date series (same title+venue, >=3 dates)
+    # pass 2: explicit multi-date series (same title+venue, >=3 dates).
+    # One-offs whose (title, venue) names an existing series join it -
+    # THE anti-fragmentation rule: next week's cinema program and a
+    # portal's per-date rows are the same series, not new events (A2).
     by_title_venue: dict[tuple, list[Claim]] = defaultdict(list)
     for c in oneoffs:
         by_title_venue[(normalize_title(c.title), _venue_key(c))].append(c)
     remaining: list[Claim] = []
     for (ntitle, vkey), cs in by_title_venue.items():
         days = {c.starts_at.astimezone(VIENNA).date() for c in cs}
-        if len(days) >= EXPLICIT_SERIES_MIN_DATES:
-            key = f"series|{ntitle}|{vkey}"
+        key = f"series|{ntitle}|{vkey}"
+        if key in groups:
+            groups[key]["claims"].extend(cs)
+        elif len(days) >= EXPLICIT_SERIES_MIN_DATES:
             groups[key] = {
                 "key": key, "claims": cs, "recurrence": None, "rrule_raw": None,
             }
@@ -658,6 +678,50 @@ def _project_series(g: dict, pairs: list) -> list:
     ]
 
 
+_MAX_SPAN = timedelta(days=370)
+
+
+def _sane_end(starts: datetime, ends: datetime | None) -> datetime | None:
+    """ends_at is claim data and claims lie: inverted spans and multi-year
+    'validity periods' (a weekly offering stored as one two-year occurrence,
+    audit A21) become NULL = unknown."""
+    if ends is None or ends < starts or ends - starts > _MAX_SPAN:
+        return None
+    return ends
+
+
+def _fold_pairs(cands: list[tuple[datetime, datetime | None, bool]]) -> list:
+    """One occurrence per local day for date-only candidates; timed starts
+    keep their exact timestamps (double screenings are real). A date-only
+    candidate never duplicates a timed one on the same local day - that
+    exact pattern put a midnight phantom next to the real 19:30 occurrence
+    on 404 event-days (audit A9)."""
+    seen_ts, seen_day, out = set(), set(), []
+    for starts, ends, _ in sorted((c for c in cands if c[2]),
+                                  key=lambda t: t[0]):
+        if starts in seen_ts:
+            continue
+        seen_ts.add(starts)
+        seen_day.add(starts.astimezone(VIENNA).date())
+        out.append((starts, ends))
+    for starts, ends, _ in sorted((c for c in cands if not c[2]),
+                                  key=lambda t: t[0]):
+        day = starts.astimezone(VIENNA).date()
+        if day in seen_day:
+            continue
+        seen_day.add(day)
+        out.append((starts, ends))
+    out.sort(key=lambda p: p[0])
+    return out
+
+
+def _claim_cands(claims: list) -> list[tuple[datetime, datetime | None, bool]]:
+    return [
+        (c.starts_at, _sane_end(c.starts_at, c.ends_at), c.has_time)
+        for c in claims
+    ]
+
+
 def _occurrences_for(
     tx, g: dict, holidays, now: datetime
 ) -> tuple[list, bool, str | None, set]:
@@ -665,9 +729,17 @@ def _occurrences_for(
     rec = g["recurrence"]
     if rec is not None:
         anchor = min(c.starts_at for c in g["claims"])
-        pairs = recurrence.expand(rec, holidays, now=now, anchor=anchor)
+        expanded = recurrence.expand(rec, holidays, now=now, anchor=anchor)
+        # observed claim dates are ground truth - the rule only EXTENDS
+        # them; discarding them lost the Fri-Sun concerts (audit A2a)
+        cands = [
+            (s, _sane_end(s, e),
+             s.astimezone(VIENNA).timetz() != recurrence.time_t(0, 0, tzinfo=VIENNA))
+            for s, e in expanded
+        ] + _claim_cands(g["claims"])
+        pairs = _fold_pairs(cands)
         rule = recurrence.compile_rrule(
-            rec, pairs[0][0] if pairs else now
+            rec, pairs[0][0] if pairs else anchor
         )
         tentative = not _verified(tx, g["key"], rec, [p[0] for p in pairs])
         return pairs, tentative, str(rule) if rule else None, set()
@@ -680,7 +752,7 @@ def _occurrences_for(
             horizon = now + recurrence.timedelta(weeks=recurrence.EXPANSION_WEEKS)
             duration = None
             first = g["claims"][0]
-            if first.ends_at:
+            if first.ends_at and _sane_end(first.starts_at, first.ends_at):
                 duration = first.ends_at - first.starts_at
             pairs = [
                 (o, o + duration if duration else None)
@@ -689,12 +761,8 @@ def _occurrences_for(
             return pairs, False, g["rrule_raw"], set()
         except (ValueError, TypeError):
             pass
-    # explicit dates: union over claims
-    seen, pairs = set(), []
-    for c in sorted(g["claims"], key=lambda c: c.starts_at):
-        if c.starts_at not in seen:
-            seen.add(c.starts_at)
-            pairs.append((c.starts_at, c.ends_at))
+    # explicit dates: union over claims, folded per local day
+    pairs = _fold_pairs(_claim_cands(g["claims"]))
     projected: set = set()
     if g["key"].startswith("series|"):
         extra = _project_series(g, pairs)
@@ -731,7 +799,10 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             pairs, tentative, rrule_text, projected = _occurrences_for(
                 conn, g, holidays, now
             )
-            if not pairs and g["recurrence"] is None and g["rrule_raw"] is None:
+            # a zero-occurrence event is invisible to every API read path;
+            # 115 rule-bearing events with DTSTART=rebuild-time proved the
+            # old recurrence exemption wrong (audit A3)
+            if not pairs:
                 continue
             values, provenance = _merge_fields(g)
             status_by_day = _merge_status(g["claims"])

@@ -429,3 +429,107 @@ def test_global_aggregator_junk_is_not_published(conn):
     assert "Boston Career Fair" not in titles
     assert "Linzer Sommerkurs" in titles
     assert "Kulturfest" in titles
+
+
+# ---------------------------------------------- audit 2026-07-12 regressions
+
+_SOMMER_REC = {
+    "freq": "weekly", "weekday": "TH", "interval": 1, "time": "18:00",
+    "duration_minutes": None, "except_holidays": [], "valid_from": None,
+    "valid_until": None, "as_stated": "jeden Donnerstag 18:00",
+}
+
+
+def test_wrong_weekday_rule_cannot_eat_the_series(conn):
+    """A2a: a Thursdays-rule (shared description) was stamped onto the
+    Fri/Sat claims of a daily series - 6 duplicate events, real dates lost."""
+    sid = _source(conn, "s1", 0.8)
+    for day, tag in (("2026-07-09", "a"), ("2026-07-10", "b"), ("2026-07-11", "c")):
+        _claim(
+            conn, sid,
+            _concert("Sommerkonzerte im Musikpavillon",
+                     starts=f"{day}T18:00:00+02:00", venue="Musikpavillon",
+                     recurrence=(_SOMMER_REC, 0.9)),
+            f"sommerkonzerte musikpavillon|{day}|{tag}",
+        )
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1  # one series, not one per weekday
+    days = {o["starts_at"].date().isoformat() for o in occs}
+    # observed Fri/Sat survive; the rule extends Thursdays
+    assert {"2026-07-09", "2026-07-10", "2026-07-11"} <= days
+    assert "2026-07-16" in days
+
+
+def test_next_program_week_and_version_suffix_join_the_series(conn):
+    """A2b: cinema listings spawned a new event per program week and per
+    '(OmdtU)' title variant."""
+    sid = _source(conn, "s1", 0.8)
+    week1 = ("2026-07-06", "2026-07-07", "2026-07-08")
+    week2 = ("2026-07-13", "2026-07-14")
+    for d in week1 + week2:
+        _claim(conn, sid,
+               _concert("Backrooms", starts=f"{d}T20:45:00+02:00",
+                        venue="Moviemento"),
+               f"backrooms|{d}|9661:1901")
+    _claim(conn, sid,
+           _concert("Backrooms (OmdtU)", starts="2026-07-15T20:45:00+02:00",
+                    venue="Moviemento"),
+           "backrooms omdtu|2026-07-15|9661:1901")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert len(occs) == 6
+
+
+def test_dateonly_claim_confirms_timed_occurrence(conn):
+    """A9: a date-only claim put a midnight phantom next to the real 19:30
+    occurrence on 404 event-days."""
+    a = _source(conn, "s1", 0.8)
+    b = _source(conn, "s2", 0.7)
+    fp = "chet faker|2026-07-22|"
+    _claim(conn, a, _concert("Chet Faker", starts="2026-07-22T19:30:00+02:00"), fp)
+    _claim(conn, b, _concert("Chet Faker", starts="2026-07-22T00:00:00+02:00"), fp)
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert len(occs) == 1
+    assert occs[0]["starts_at"].astimezone(rb.VIENNA).hour == 19
+
+
+def test_inverted_and_multiyear_spans_become_unknown(conn):
+    """A21: offerings arrived as one two-year occurrence; 4 spans ended
+    before they started."""
+    sid = _source(conn, "s1", 0.8)
+    _claim(conn, sid,
+           _concert("Friday Night Magic", starts="2026-07-10T18:00:00+02:00",
+                    ends_at=("2028-07-13T22:00:00+02:00", 0.9)),
+           "friday night magic|2026-07-10|v")
+    _claim(conn, sid,
+           _concert("HA", starts="2026-10-05T20:00:00+02:00",
+                    ends_at=("2026-06-05T20:00:00+02:00", 0.9)),
+           "ha|2026-10-05|v")
+    rb.rebuild(conn, now=NOW)
+    ends = [r["ends_at"] for r in conn.execute("SELECT ends_at FROM occurrence")]
+    assert ends == [None, None]
+
+
+def test_no_event_row_ever_lacks_occurrences(conn):
+    """A3: 115 rule-bearing events had DTSTART=rebuild-time and zero
+    occurrences - invisible to every API read path. Observed claim dates
+    are the floor now."""
+    sid = _source(conn, "s1", 0.8)
+    dead_rec = dict(_SOMMER_REC, weekday="MO", valid_until="2026-01-01",
+                    as_stated="jeden Montag bis Jänner")
+    _claim(conn, sid,
+           _concert("Turnen", starts="2025-11-03T08:00:00+01:00",
+                    venue="Turnhalle", recurrence=(dead_rec, 0.9)),
+           "turnen|2025-11-03|v")
+    rb.rebuild(conn, now=NOW)
+    orphans = conn.execute(
+        "SELECT count(*) AS n FROM event e WHERE NOT EXISTS "
+        "(SELECT 1 FROM occurrence o WHERE o.event_id = e.id)"
+    ).fetchone()["n"]
+    assert orphans == 0
+    # and the observed date itself survived as the occurrence
+    assert conn.execute("SELECT count(*) AS n FROM occurrence").fetchone()["n"] == 1

@@ -154,14 +154,17 @@ def _ends(starts: datetime, rec: Recurrence) -> datetime | None:
     return None
 
 
-def series_fingerprint(title: str, venue_key: str, starts_at: datetime) -> str:
-    """H1.3: series identity deliberately excludes dates -
-    (venue, weekday, time bucket ±30min, normalized title)."""
+def series_fingerprint(title: str, venue_key: str) -> str:
+    """H1.3: series identity = (normalized title, venue) - dates, weekdays
+    and times deliberately EXCLUDED. Per-weekday keys fragmented daily
+    series into one event per weekday in production, each fragment carrying
+    the same text-recurrence rule while the real dates were lost (audit
+    A2a). Two genuinely distinct same-title series at one venue collapsing
+    into one event with both weekdays' occurrences is the accepted
+    trade-off (DECISIONS 2026-07-13)."""
     from eventindex.resolve.fingerprint import normalize_title
 
-    local = starts_at.astimezone(VIENNA)
-    bucket = (local.hour * 60 + local.minute) // 30
-    return f"series|{normalize_title(title)}|{venue_key}|{local.strftime('%a')}|{bucket}"
+    return f"series|{normalize_title(title)}|{venue_key}"
 
 
 class ConsistencyCheck(BaseModel):

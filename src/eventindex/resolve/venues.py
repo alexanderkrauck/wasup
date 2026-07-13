@@ -59,7 +59,8 @@ class VenueResolver:
     _cache: dict[str, uuid.UUID | None] = field(default_factory=dict)
 
     def resolve(self, name: str, lat=None, lon=None) -> uuid.UUID | None:
-        key = name.strip().lower()
+        name = name.strip()
+        key = name.lower()
         if key in self._cache:
             return self._cache[key]
         if is_generic_location(name):
@@ -120,15 +121,23 @@ class VenueResolver:
         )
 
     def _create(self, name: str, lat, lon) -> uuid.UUID:
-        venue_id = uuid.uuid4()
-        self.tx.execute(
+        # ON CONFLICT: a concurrent rebuild may have created the row between
+        # our lookup and this insert (UniqueViolation on prod, 2026-07-13)
+        row = self.tx.execute(
             """
             INSERT INTO venue (id, name, geo)
             VALUES (%(id)s, %(name)s,
                     CASE WHEN %(lat)s::float IS NULL THEN NULL
                          ELSE ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326) END)
+            ON CONFLICT (name) DO NOTHING
+            RETURNING id
             """,
-            {"id": venue_id, "name": name.strip(), "lat": lat, "lon": lon},
-        )
+            {"id": uuid.uuid4(), "name": name.strip(), "lat": lat, "lon": lon},
+        ).fetchone()
+        if row is None:
+            return self.tx.execute(
+                "SELECT id FROM venue WHERE lower(name) = lower(%s)",
+                (name.strip(),),
+            ).fetchone()["id"]
         self.created.append(name.strip())
-        return venue_id
+        return row["id"]

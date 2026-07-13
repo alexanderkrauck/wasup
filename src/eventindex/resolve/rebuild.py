@@ -844,6 +844,15 @@ def rebuild(conn, now: datetime | None = None) -> dict:
     stats = {"claims": 0, "events": 0, "occurrences": 0, "venues_created": 0,
              "projected": 0}
     with conn.transaction():
+        # two rebuilds racing duplicate every LLM call and collide on venue
+        # creation (UniqueViolation on prod, 2026-07-13); the xact lock
+        # releases with this transaction
+        locked = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtext('eventindex.rebuild')) AS ok"
+        ).fetchone()["ok"]
+        if not locked:
+            stats["skipped"] = "another rebuild is running"
+            return stats
         previous_status = {
             r["id"]: r["status"]
             for r in conn.execute("SELECT id, status FROM occurrence")

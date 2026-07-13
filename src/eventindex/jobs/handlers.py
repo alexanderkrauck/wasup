@@ -214,6 +214,13 @@ ENRICH_BATCH_PER_REBUILD = 200
 def resolve(job: dict, tx) -> list[dict]:
     """Full canon rebuild (H0): resolve(all_claims) -> canon, atomically."""
     stats = rebuild(tx)
+    if stats.get("skipped"):
+        # the concurrent rebuild covers older claims but not ours: retry
+        # once it released the lock
+        from datetime import datetime, timedelta, timezone
+
+        return [{"kind": "resolve", "payload": {},
+                 "run_after": datetime.now(timezone.utc) + timedelta(minutes=15)}]
     pending = stats.pop("enrich_pending", [])
     tx.execute(
         "INSERT INTO crawl_log (job_id, finished_at, status, events_found, detail) "

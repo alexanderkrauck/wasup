@@ -319,13 +319,15 @@ def run_recipe(
             close()
     truncated = truncated or getattr(fetch_page, "truncated", None)
 
-    # dedupe identical payloads (listing + detail double-extraction)
-    unique, keys = [], set()
+    # dedupe identical payloads (listing + detail double-extraction);
+    # url-bearing payloads win so detail links survive the dedupe (A7)
+    by_key: dict = {}
     for p in payloads:
         key = (p.get("title", {}).get("value"), p.get("starts_at", {}).get("value"))
-        if key not in keys:
-            keys.add(key)
-            unique.append(p)
+        held = by_key.get(key)
+        if held is None or (not held.get("url") and p.get("url")):
+            by_key[key] = p
+    unique = list(by_key.values())
     result = validate(recipe, unique)
     result.truncated = truncated
     result.pages = pages
@@ -378,6 +380,10 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                     _, detail_payloads = cascade_extract(
                         source, _FakeResult(dhtml, durl), tx, job_id=job_id
                     )
+                    for p in detail_payloads:
+                        # the fetched detail page IS the event's url; the
+                        # extractors can't see it (audit A7)
+                        p.setdefault("url", {"value": durl, "confidence": 0.6})
                     page_payloads += detail_payloads
 
             payloads += page_payloads

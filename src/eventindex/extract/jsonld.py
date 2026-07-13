@@ -83,6 +83,8 @@ def _prices(node: dict) -> dict:
             out["price_max"] = float(high)
     except (TypeError, ValueError):
         pass
+    if isinstance(offers.get("url"), str) and offers["url"].strip():
+        out["booking_url"] = offers["url"].strip()
     return out
 
 

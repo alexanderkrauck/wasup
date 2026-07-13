@@ -24,8 +24,14 @@ include the act: "Klassik am Dom: Tom Jones". If a listing gives no \
 identifiable title at all, skip it.
 - ONE event per happening: if a listing shows Einlass/doors AND Beginn/start, \
 emit a single event with starts_at = Beginn (never two events for one show).
+- Copy titles VERBATIM (film titles: never add or drop version markers like \
+OmdtU/DF yourself - keep exactly what the page shows).
 - starts_at/ends_at: ISO 8601. If no time given, use the date alone (YYYY-MM-DD). \
 Do not invent times, prices, or venues - omit unknown fields (null).
+- organizer: the organizing club/company/person if the text names one.
+- booking_url: a ticket/registration link if one appears as literal text.
+- registration_required: true for "Anmeldung erforderlich/erbeten", false for \
+"keine Anmeldung nötig"/"einfach vorbeikommen", else null.
 - category: one of {categories}, or null.
 - confidence: your certainty (0-1) that this is a real upcoming event with correct date.
 - recurrence: ONLY if the text describes a repeating pattern ("jeden Dienstag", \
@@ -51,6 +57,9 @@ class LLMEvent(BaseModel):
     price_min: float | None
     price_max: float | None
     category: str | None
+    organizer: str | None
+    booking_url: str | None
+    registration_required: bool | None
     recurrence: Recurrence | None
     status: Literal["cancelled", "moved", "postponed"] | None
     confidence: float
@@ -89,6 +98,8 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
 
     payloads = []
     for ev in result.events:
+        if ev.confidence < 0.3:
+            continue  # the model's own "probably not an event" (audit A23)
         conf = min(max(ev.confidence, 0.0), CONFIDENCE_CAP)
         fields = ev.model_dump(
             exclude_none=True, exclude={"confidence", "category", "recurrence"}

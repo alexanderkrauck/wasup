@@ -28,3 +28,7 @@ DELETE FROM venue WHERE lower(name) IN (
 );
 
 COMMIT;
+
+-- aggregator behind first-party sources (audit A18: clickbait titles,
+-- venue-suffix twins, CZ events) - trust down so first parties win merges
+UPDATE source SET trust = LEAST(trust, 0.35) WHERE name LIKE 'happeningnext%';

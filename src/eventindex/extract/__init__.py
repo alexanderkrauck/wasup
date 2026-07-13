@@ -8,6 +8,8 @@ Every tier emits claim payloads: {field: {"value": ..., "confidence": float}}.
 Vision/PDF (tier d) is out of v1 scope.
 """
 
+import html as _html
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -21,6 +23,91 @@ VIENNA = ZoneInfo(config.TIMEZONE)
 
 def field(value, confidence: float) -> dict:
     return {"value": value, "confidence": confidence}
+
+
+# ---- string hygiene: ONE choke point (audit A6/A18/A22). Applied both at
+# extraction (sanity_filter) and at rebuild (_load_claims), so the immutable
+# claim history is repaired for free on the next resolve.
+
+_DECOR_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿❤️]")
+_CLICKBAIT_RE = re.compile(
+    r"\s*[-–—|/]*\s*(fast ausverkauft|ausverkauft|tickets? (jetzt )?sichern"
+    r"|jetzt tickets?( kaufen)?)\s*$",
+    re.IGNORECASE,
+)
+_STRING_FIELDS = ("title", "description", "venue_name", "address",
+                  "organizer", "url", "booking_url")
+
+
+def clean_text(value: str) -> str:
+    """Sources ship double-escaped entities (&amp;amp;) - 75 titles reached
+    prod with &quot; in them. Unescape twice, collapse whitespace."""
+    return " ".join(_html.unescape(_html.unescape(value)).split())
+
+
+def _clean_title(title: str, venue_name: str | None) -> str:
+    t = _CLICKBAIT_RE.sub("", _DECOR_RE.sub(" ", title))
+    t = " ".join(t.split())
+    # extractors concatenate the venue onto the title ("KinderUni Linz Linz
+    # Innenstadt", "... - Posthof Linz"): strip a trailing venue mention
+    if venue_name:
+        low, vlow = t.lower(), venue_name.lower().strip()
+        for suffix in (vlow, f"{vlow} linz", f"- {vlow}", f"- {vlow} linz"):
+            if low.endswith(suffix) and len(t) - len(suffix) >= 4:
+                t = t[: len(t) - len(suffix)].rstrip(" -–—|,/")
+                break
+    return t
+
+
+_YEAR_LIKE = range(1900, 2101)
+
+
+def normalize_claim(payload: dict) -> dict:
+    """In-place hygiene for one claim payload: entity-unescape all strings,
+    de-decorate the title, drop implausible prices (a charity sale reached
+    prod at EUR 1840 - the year as a price, audit A5)."""
+    for key in _STRING_FIELDS:
+        entry = payload.get(key)
+        if entry and isinstance(entry.get("value"), str):
+            entry["value"] = clean_text(entry["value"])
+    title = payload.get("title", {}).get("value")
+    if title:
+        venue = (payload.get("venue_name") or {}).get("value")
+        payload["title"]["value"] = _clean_title(title, venue)
+
+    prices = {}
+    for key in ("price_min", "price_max"):
+        entry = payload.get(key)
+        if entry is None or entry.get("value") is None:
+            continue
+        try:
+            prices[key] = float(entry["value"])
+        except (TypeError, ValueError):
+            payload.pop(key)
+    haystack = f"{title or ''} {(payload.get('description') or {}).get('value') or ''}"
+    for key, p in prices.items():
+        year_like = p == int(p) and int(p) in _YEAR_LIKE and str(int(p)) in haystack
+        if p < 0 or p > 500 or year_like:
+            payload.pop(key, None)
+    pmin = (payload.get("price_min") or {}).get("value")
+    pmax = (payload.get("price_max") or {}).get("value")
+    if pmin is not None and pmax is not None and float(pmin) > float(pmax):
+        payload.pop("price_min", None)
+        payload.pop("price_max", None)
+    return payload
+
+
+# closures/holiday notices/program pointers are not events (audit A23)
+_NON_EVENT_RE = re.compile(
+    r"(sommerferien|weihnachtsferien|semesterferien|ferienbeginn|schulfrei"
+    r"|hinweis auf|öffnungszeiten|betriebsurlaub|geschlossen|entfällt"
+    r"|kein training|kein kurs|keine probe)",
+    re.IGNORECASE,
+)
+
+
+def is_non_event(title: str) -> bool:
+    return bool(_NON_EVENT_RE.search(title))
 
 
 def parse_dt(value) -> datetime | None:
@@ -75,10 +162,13 @@ def sanity_filter(claims: list[dict], source: dict) -> list[dict]:
     placeholder title."""
     kept = []
     for c in claims:
+        c = normalize_claim(c)
         if not is_upcoming(c):
             continue
         title = c.get("title", {}).get("value") or ""
         if is_placeholder_title(title, source.get("name") or ""):
+            continue
+        if is_non_event(title):
             continue
         kept.append(c)
     return kept

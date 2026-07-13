@@ -41,8 +41,10 @@ EXPLICIT_SERIES_MIN_DATES = 3
 
 FIELD_KEYS = [
     "title", "description", "venue_name", "address", "url", "image_url",
-    "price_min", "price_max", "category", "organizer",
+    "price_min", "price_max", "category", "organizer", "tags",
+    "booking_url", "registration_required",
 ]
+PAST_RETENTION_DAYS = 90  # archives are not events (STWST shipped 2001-2019)
 
 
 @dataclass
@@ -131,11 +133,17 @@ def _load_claims(tx) -> list[Claim]:
         ORDER BY c.source_id, c.fingerprint, c.extracted_at DESC
         """
     ).fetchall()
-    from eventindex.extract import is_placeholder_title
+    from eventindex.extract import (
+        is_non_event, is_placeholder_title, normalize_claim,
+    )
 
     claims = []
     for r in rows:
         c = Claim(**r)
+        # claims are immutable; hygiene added later (entity unescape, price
+        # plausibility, non-event patterns) must therefore re-run at rebuild
+        # time - this is what repairs the historical corpus for free
+        c.payload = normalize_claim(dict(c.payload))
         c.title = c.value("title") or ""
         c.starts_at = parse_dt(c.value("starts_at"))
         c.ends_at = parse_dt(c.value("ends_at"))
@@ -143,12 +151,14 @@ def _load_claims(tx) -> list[Claim]:
         c.lon = c.value("lon")
         if not c.title or c.starts_at is None:
             continue
-        # claims are immutable, so legacy placeholder rows ("Sandburg
-        # Events") must also be skipped at rebuild time - checked against
-        # both the source name AND the claim's own venue (aggregator feeds
-        # carry venue programs as placeholder items too)
+        # legacy placeholder rows ("Sandburg Events") must also be skipped
+        # at rebuild time - checked against both the source name AND the
+        # claim's own venue (aggregator feeds carry venue programs as
+        # placeholder items too)
         against = f'{c.source_name} {c.value("venue_name") or ""}'
         if is_placeholder_title(c.title, against):
+            continue
+        if is_non_event(c.title):
             continue
         claims.append(c)
     return claims
@@ -678,6 +688,13 @@ def _project_series(g: dict, pairs: list) -> list:
     ]
 
 
+_BARE_DOMAIN_RE = re.compile(r"^https?://[^/]+/?$")
+
+
+def _deep_url(url: str | None) -> bool:
+    return bool(url) and not _BARE_DOMAIN_RE.match(url)
+
+
 _MAX_SPAN = timedelta(days=370)
 
 
@@ -799,6 +816,12 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             pairs, tentative, rrule_text, projected = _occurrences_for(
                 conn, g, holidays, now
             )
+            # canon is forward-looking: a recipe gap once ingested a 2001-
+            # 2019 archive feed as events (audit A5); claims keep history
+            pairs = [
+                p for p in pairs
+                if p[0] >= now - timedelta(days=PAST_RETENTION_DAYS)
+            ]
             # a zero-occurrence event is invisible to every API read path;
             # 115 rule-bearing events with DTSTART=rebuild-time proved the
             # old recurrence exemption wrong (audit A3)
@@ -836,11 +859,23 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                 )
                 continue
 
+            # a bare-domain url asserts a detail link that isn't one (49% of
+            # events shipped the source homepage, audit A7): any claim's
+            # deep link beats the merged/fallback homepage
+            url = values.get("url") or rep.source_url
+            if url and not _deep_url(url):
+                url = next(
+                    (u for c in g["claims"]
+                     if (u := c.value("url")) and _deep_url(u)),
+                    url,
+                )
             conn.execute(
                 """
                 INSERT INTO event (id, kind, title, description, rights, category,
                                    venue_id, geo, is_recurring, rrule,
                                    price_min, price_max, url, image_url,
+                                   organizer, tags, booking_url,
+                                   registration_required,
                                    field_provenance, confidence, status,
                                    expected_cadence,
                                    first_seen, last_seen, updated_at)
@@ -850,6 +885,8 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                              ELSE ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326) END,
                         %(is_recurring)s, %(rrule)s,
                         %(price_min)s, %(price_max)s, %(url)s, %(image_url)s,
+                        %(organizer)s, %(tags)s, %(booking_url)s,
+                        %(registration_required)s,
                         %(provenance)s, %(confidence)s, %(status)s,
                         %(cadence)s,
                         %(first_seen)s, %(last_seen)s, %(last_seen)s)
@@ -872,8 +909,12 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     "rrule": rrule_text,
                     "price_min": values.get("price_min"),
                     "price_max": values.get("price_max"),
-                    "url": values.get("url") or rep.source_url,
+                    "url": url,
                     "image_url": values.get("image_url"),
+                    "organizer": values.get("organizer"),
+                    "tags": values.get("tags") or [],
+                    "booking_url": values.get("booking_url"),
+                    "registration_required": values.get("registration_required"),
                     "provenance": Jsonb(provenance),
                     "confidence": _event_confidence(g["claims"]),
                     "status": event_status,
@@ -892,11 +933,12 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                 occ_id = uuid.uuid5(OCC_NS, f"{g['event_id']}|{starts.isoformat()}")
                 conn.execute(
                     "INSERT INTO occurrence (id, event_id, starts_at, ends_at, "
-                    "status, last_confirmed_at, projected) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "status, last_confirmed_at, projected, time_unknown) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (id) DO NOTHING",
                     (occ_id, g["event_id"], starts, ends, occ_status, last_seen,
-                     starts in projected),
+                     starts in projected,
+                     starts.astimezone(VIENNA).timetz() == time_t(0, 0, tzinfo=VIENNA)),
                 )
                 stats["occurrences"] += 1
                 stats["projected"] += starts in projected

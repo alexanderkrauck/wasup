@@ -519,17 +519,22 @@ def test_no_event_row_ever_lacks_occurrences(conn):
     occurrences - invisible to every API read path. Observed claim dates
     are the floor now."""
     sid = _source(conn, "s1", 0.8)
-    dead_rec = dict(_SOMMER_REC, weekday="MO", valid_until="2026-01-01",
-                    as_stated="jeden Montag bis Jänner")
+    dead_rec = dict(_SOMMER_REC, weekday="MO", valid_until="2026-06-30",
+                    as_stated="jeden Montag bis Ende Juni")
     _claim(conn, sid,
-           _concert("Turnen", starts="2025-11-03T08:00:00+01:00",
+           _concert("Turnen", starts="2026-06-29T08:00:00+02:00",
                     venue="Turnhalle", recurrence=(dead_rec, 0.9)),
-           "turnen|2025-11-03|v")
+           "turnen|2026-06-29|v")
+    # and a pure archive claim (audit A5: STWST shipped 2001-2019)
+    _claim(conn, sid, _concert("Archivstück", starts="2004-09-09T22:00:00+02:00"),
+           "archiv|2004-09-09|v")
     rb.rebuild(conn, now=NOW)
     orphans = conn.execute(
         "SELECT count(*) AS n FROM event e WHERE NOT EXISTS "
         "(SELECT 1 FROM occurrence o WHERE o.event_id = e.id)"
     ).fetchone()["n"]
     assert orphans == 0
-    # and the observed date itself survived as the occurrence
+    # the expired rule kept its observed date; the archive claim kept nothing
+    titles = [r["title"] for r in conn.execute("SELECT title FROM event")]
+    assert titles == ["Turnen"]
     assert conn.execute("SELECT count(*) AS n FROM occurrence").fetchone()["n"] == 1

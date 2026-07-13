@@ -85,6 +85,8 @@ def parse(content: bytes, now: datetime | None = None) -> list[dict]:
         tags = [t.text or "" for t in event.iter("tag")]
         if category := _category(tags):
             fields["category"] = category
+        if cleaned_tags := [t.strip() for t in tags if t.strip()]:
+            fields["tags"] = cleaned_tags
 
         for date in event.iter("date"):
             try:

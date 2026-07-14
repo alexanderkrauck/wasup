@@ -679,12 +679,17 @@ def _assign_identity(tx, groups: list[dict]) -> None:
 
 def _merge_fields(g: dict) -> tuple[dict, dict]:
     """§6 cross-source merge: per field the claim with highest
-    trust × field_confidence wins. Deterministic tie-break by claim id."""
+    trust × field_confidence wins. At an exact title-weight tie the more
+    specific cleaned title wins; claim id remains the final tie-break."""
     values, provenance = {}, {}
     for key in FIELD_KEYS:
         best = max(
             (c for c in g["claims"] if c.value(key) is not None),
-            key=lambda c: (c.trust * c.confidence(key), str(c.id)),
+            key=lambda c: (
+                c.trust * c.confidence(key),
+                len(c.value(key)) if key == "title" else 0,
+                str(c.id),
+            ),
             default=None,
         )
         if best is not None:

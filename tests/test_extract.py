@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from eventindex.extract import ics, jsonld, linztermine, parse_dt
+from eventindex.extract import ics, jsonld, linztermine, normalize_claim, parse_dt
 
 FIXTURES = Path(__file__).parent / "fixtures"
 VIENNA = ZoneInfo("Europe/Vienna")
@@ -52,3 +52,25 @@ def test_linztermine_fixture():
         dt = parse_dt(p["starts_at"]["value"])
         assert (fake_now - dt).days <= 1
         assert (dt - fake_now).days <= 60
+
+
+def test_explicit_concert_start_beats_box_office_time():
+    payload = {
+        "title": {"value": "Abendmusik in der", "confidence": 0.95},
+        "starts_at": {
+            "value": "2026-07-20T19:00:00+02:00", "confidence": 0.95,
+        },
+        "description": {
+            "value": (
+                "Karten an der Abendkasse ab 19:00 Uhr. Einlass: 19:30 Uhr. "
+                "Konzertbeginn: 20:00 Uhr."
+            ),
+            "confidence": 0.95,
+        },
+    }
+
+    normalize_claim(payload)
+
+    assert parse_dt(payload["starts_at"]["value"]) == datetime(
+        2026, 7, 20, 20, 0, tzinfo=VIENNA,
+    )

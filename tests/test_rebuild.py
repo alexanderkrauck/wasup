@@ -63,6 +63,32 @@ def _canon(conn):
     return events, occs
 
 
+def test_more_specific_title_wins_an_equal_weight_merge():
+    common = {
+        "source_id": uuid.uuid4(), "fingerprint": "same-event",
+        "extracted_at": NOW, "trust": 0.8, "source_url": "https://source.at",
+        "source_lat": None, "source_lon": None,
+    }
+    wrapper = rb.Claim(
+        id=uuid.uuid4(), payload={
+            "title": {"value": "Abendmusik in der", "confidence": 0.95},
+        }, **common,
+    )
+    specific = rb.Claim(
+        id=uuid.uuid4(), payload={
+            "title": {
+                "value": "Abendmusik in der Ursulinenkirche: SAXESSOIRES",
+                "confidence": 0.95,
+            },
+        }, **common,
+    )
+
+    values, _ = rb._merge_fields({"claims": [wrapper, specific]})
+
+    assert values["title"] == \
+        "Abendmusik in der Ursulinenkirche: SAXESSOIRES"
+
+
 def test_three_sources_one_event_with_compound_confidence(conn):
     ids = [_source(conn, f"s{i}", 0.8) for i in range(3)]
     for i, sid in enumerate(ids):

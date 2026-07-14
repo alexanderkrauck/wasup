@@ -37,6 +37,11 @@ _CLICKBAIT_RE = re.compile(
 )
 _STRING_FIELDS = ("title", "description", "venue_name", "address",
                   "organizer", "url", "booking_url")
+_EXPLICIT_EVENT_START_RE = re.compile(
+    r"\b(?:konzert|veranstaltungs|vorstellungs)beginn\s*:?\s*"
+    r"(?P<hour>\d{1,2})[:.](?P<minute>\d{2})(?:\s*uhr)?\b",
+    re.IGNORECASE,
+)
 
 
 def clean_text(value: str) -> str:
@@ -74,6 +79,32 @@ def normalize_claim(payload: dict) -> dict:
     if title:
         venue = (payload.get("venue_name") or {}).get("value")
         payload["title"]["value"] = _clean_title(title, venue)
+
+    # Some listings put box-office/doors time in their structured start
+    # while stating the actual performance time unambiguously in prose
+    # (live: 19:00 Abendkasse, 19:30 Einlass, Konzertbeginn 20:00). The
+    # explicit event-start label wins; this also repairs immutable history
+    # when normalize_claim runs during a canon rebuild.
+    start_entry = payload.get("starts_at")
+    description = (payload.get("description") or {}).get("value") or ""
+    match = _EXPLICIT_EVENT_START_RE.search(description)
+    if start_entry and match:
+        raw_start = str(start_entry.get("value") or "")
+        try:
+            starts = dateparser.parse(raw_start)
+            if starts.tzinfo is None:
+                starts = starts.replace(tzinfo=VIENNA)
+            local = starts.astimezone(VIENNA)
+            explicit = local.replace(
+                hour=int(match.group("hour")),
+                minute=int(match.group("minute")), second=0, microsecond=0,
+            )
+            date_only = "T" not in raw_start and " " not in raw_start
+            if (date_only or abs(explicit - local) <= timedelta(hours=6)) \
+                    and explicit != local:
+                start_entry["value"] = explicit.isoformat()
+        except (ValueError, OverflowError):
+            pass
 
     prices = {}
     for key in ("price_min", "price_max"):

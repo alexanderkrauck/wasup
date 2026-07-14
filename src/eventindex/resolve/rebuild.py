@@ -679,15 +679,16 @@ def _assign_identity(tx, groups: list[dict]) -> None:
 
 def _merge_fields(g: dict) -> tuple[dict, dict]:
     """§6 cross-source merge: per field the claim with highest
-    trust × field_confidence wins. At an exact title-weight tie the more
-    specific cleaned title wins; claim id remains the final tie-break."""
+    trust × field_confidence wins. At an exact title or URL weight tie,
+    the claim with the more specific cleaned title wins; claim id remains
+    the final tie-break."""
     values, provenance = {}, {}
     for key in FIELD_KEYS:
         best = max(
             (c for c in g["claims"] if c.value(key) is not None),
             key=lambda c: (
                 c.trust * c.confidence(key),
-                len(c.value(key)) if key == "title" else 0,
+                len(c.value("title") or "") if key in {"title", "url"} else 0,
                 str(c.id),
             ),
             default=None,
@@ -828,8 +829,16 @@ def _fold_pairs(cands: list[tuple[datetime, datetime | None, bool]]) -> list:
     exact pattern put a midnight phantom next to the real 19:30 occurrence
     on 404 event-days (audit A9)."""
     seen_ts, seen_day, out = set(), set(), []
-    for starts, ends, _ in sorted((c for c in cands if c[2]),
-                                  key=lambda t: t[0]):
+    # Equal starts from a wrapper and a specific performance page are one
+    # occurrence. Prefer a known, shorter end: wrapper listing windows often
+    # run to 23:59 while the specific page carries the actual concert end.
+    for starts, ends, _ in sorted(
+        (c for c in cands if c[2]),
+        key=lambda t: (
+            t[0], t[1] is None,
+            t[1] - t[0] if t[1] is not None else timedelta.max,
+        ),
+    ):
         if starts in seen_ts:
             continue
         seen_ts.add(starts)

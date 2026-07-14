@@ -63,7 +63,7 @@ def _canon(conn):
     return events, occs
 
 
-def test_more_specific_title_wins_an_equal_weight_merge():
+def test_more_specific_title_and_its_url_win_an_equal_weight_merge():
     common = {
         "source_id": uuid.uuid4(), "fingerprint": "same-event",
         "extracted_at": NOW, "trust": 0.8, "source_url": "https://source.at",
@@ -72,6 +72,7 @@ def test_more_specific_title_wins_an_equal_weight_merge():
     wrapper = rb.Claim(
         id=uuid.uuid4(), payload={
             "title": {"value": "Abendmusik in der", "confidence": 0.95},
+            "url": {"value": "https://source.at/event/wrapper", "confidence": 0.95},
         }, **common,
     )
     specific = rb.Claim(
@@ -80,6 +81,7 @@ def test_more_specific_title_wins_an_equal_weight_merge():
                 "value": "Abendmusik in der Ursulinenkirche: SAXESSOIRES",
                 "confidence": 0.95,
             },
+            "url": {"value": "https://source.at/event/saxessoires", "confidence": 0.95},
         }, **common,
     )
 
@@ -87,6 +89,21 @@ def test_more_specific_title_wins_an_equal_weight_merge():
 
     assert values["title"] == \
         "Abendmusik in der Ursulinenkirche: SAXESSOIRES"
+    assert values["url"] == "https://source.at/event/saxessoires"
+
+
+def test_equal_timed_occurrences_prefer_the_specific_shorter_end():
+    starts = datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc)
+    wrapper_end = starts + timedelta(hours=3, minutes=59)
+    performance_end = starts + timedelta(hours=1, minutes=30)
+
+    folded = rb._fold_pairs([
+        (starts, wrapper_end, True),
+        (starts, performance_end, True),
+        (starts, None, True),
+    ])
+
+    assert folded == [(starts, performance_end)]
 
 
 def test_three_sources_one_event_with_compound_confidence(conn):

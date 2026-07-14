@@ -207,7 +207,22 @@ def _recurrence_of_raw(raw) -> Recurrence | None:
 
 
 def _recurrence_of(c: Claim) -> Recurrence | None:
-    return _recurrence_of_raw(c.value("recurrence"))
+    rec = _recurrence_of_raw(c.value("recurrence"))
+    if rec is not None and rec.freq == "daily" and not _DAILY_CADENCE_RE.search(
+        rec.as_stated or ""
+    ):
+        # A bare validity range (live example: "bis 16.08.2026") is not
+        # evidence that an event happens every day.  The constrained schema
+        # promises `as_stated` is the source wording; reject an invented
+        # daily cadence deterministically and keep the observed dates only.
+        return None
+    return rec
+
+
+_DAILY_CADENCE_RE = re.compile(
+    r"\b(täglich|taeglich|jeden\s+tag|alle\s+tage|daily|every\s+day)\b",
+    re.IGNORECASE,
+)
 
 
 _WD_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]

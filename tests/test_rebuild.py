@@ -336,6 +336,50 @@ def test_recurrence_claim_expands_and_skips_summer_holidays(conn):
     assert any(d == "2026-09-15" for d in days)
 
 
+def test_bare_validity_range_cannot_invent_daily_occurrences(conn):
+    """A source's "bis <date>" validity range is not a daily cadence.
+
+    This exact extractor error made Jazz im Musikpavillon appear on every day
+    between its two real performances in production.
+    """
+    sid = _source(conn, "portal", 0.8)
+    bad_daily = {
+        "freq": "daily", "weekday": None, "week_of_month": None,
+        "interval": 1, "time": None, "duration_minutes": None,
+        "except_holidays": [], "valid_from": "2026-07-12",
+        "valid_until": "2026-08-16", "as_stated": "bis 16.08.2026",
+    }
+    _claim(
+        conn, sid,
+        _concert(
+            "Jazz im Musikpavillon 2026", starts="2026-07-12",
+            venue="Musikpavillon", ends_at=("2026-08-16", 0.9),
+            category=(["music"], 0.9), recurrence=(bad_daily, 0.9),
+        ),
+        "jazz musikpavillon|2026-07-12|deep",
+    )
+    for day in ("2026-07-17", "2026-07-19"):
+        _claim(
+            conn, sid,
+            _concert(
+                "Jazz im Musikpavillon 2026",
+                starts=f"{day}T20:00:00+02:00", venue="Musikpavillon",
+                ends_at=(f"{day}T23:59:00+02:00", 0.9),
+                category=(["music"], 0.9),
+            ),
+            f"jazz musikpavillon|{day}|feed",
+        )
+
+    rb.rebuild(conn, now=NOW)
+
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert events[0]["kind"] == "series"
+    assert {
+        o["starts_at"].astimezone(rb.VIENNA).date().isoformat() for o in occs
+    } == {"2026-07-12", "2026-07-17", "2026-07-19"}
+
+
 def test_text_recurrence_verified_at_birth(conn, monkeypatch):
     """A text-extracted rule the verifier rejects (wrong weekday) must never
     become a series - the claim stays a one-off and the rejection is cached."""

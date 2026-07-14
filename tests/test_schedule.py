@@ -149,3 +149,67 @@ def test_yieldless_sources_park_dormant_with_monthly_pulse(conn):
     }
     assert "https://junk.at" in scheduled
     assert n == 2  # junk (pulse) + young (due)
+
+
+def test_locationless_source_gets_venue_escalation_once(conn):
+    """Venue contract (2026-07-14): a source whose future events carry
+    neither venue nor detail URL is re-onboarded once with venue orders."""
+    import uuid
+
+    from eventindex.jobs.schedule import venue_escalation
+
+    src = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust) VALUES "
+        "('WKO-like', 'https://wko-like.at/veranstaltungen', 'website', 3, 0.65) "
+        "RETURNING id"
+    ).fetchone()["id"]
+    for i in range(6):
+        eid, fp = uuid.uuid4(), f"fp-{i}"
+        conn.execute(
+            "INSERT INTO event (id, kind, title, confidence, status, url) "
+            "VALUES (%s, 'one_off', %s, 0.8, 'confirmed', "
+            "'https://wko-like.at/veranstaltungen')",  # bare listing url only
+            (eid, f"Workshop {i}"),
+        )
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at, status) "
+            "VALUES (%s, now() + interval '7 days', 'scheduled')", (eid,),
+        )
+        conn.execute("INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+                     (fp, eid))
+        conn.execute(
+            "INSERT INTO event_claim (source_id, fingerprint, payload) "
+            "VALUES (%s, %s, '{}')", (src, fp),
+        )
+    conn.commit()
+
+    assert venue_escalation(conn) == 1
+    job = conn.execute("SELECT payload FROM jobs WHERE kind='onboard'").fetchone()
+    assert job["payload"]["source_id"] == str(src)
+    assert "venue" in job["payload"]["reason"]
+    assert venue_escalation(conn) == 0  # one-shot
+
+
+def test_timefix_covers_locationless_events_with_deep_urls(conn):
+    import uuid
+
+    from eventindex.jobs.schedule import enqueue_timefix
+
+    eid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, confidence, status, url) VALUES "
+        "(%s, 'one_off', 'Ortlos', 0.8, 'confirmed', 'https://x.at/events/42')",
+        (eid,),
+    )
+    # timed occurrence (time_unknown=false), but the event has no location
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status, time_unknown) "
+        "VALUES (%s, now() + interval '3 days', 'scheduled', false)", (eid,),
+    )
+    conn.commit()
+
+    assert enqueue_timefix(conn) == 1
+    assert conn.execute(
+        "SELECT payload->>'event_id' AS e FROM jobs WHERE kind='timefix'"
+    ).fetchone()["e"] == str(eid)
+    assert enqueue_timefix(conn) == 0  # 30d re-fetch budget respected

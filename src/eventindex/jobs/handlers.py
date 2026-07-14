@@ -456,10 +456,27 @@ def discover(job: dict, tx) -> list[dict]:
     return []
 
 
+def _detail_claims_worth_keeping(payloads: list[dict], needs_venue: bool) -> list[dict]:
+    """A detail-page claim earns insertion when it carries information the
+    canon lacks: a real time-of-day (not the 00:00 placeholder - and not
+    via endswith('00:00'), which also matched real on-the-hour starts), or,
+    for events with no location at all, a venue string (venue contract,
+    Alexander 2026-07-14)."""
+    kept = []
+    for p in payloads:
+        v = str(p.get("starts_at", {}).get("value") or "").replace(" ", "T")
+        timed = "T" in v and not v.split("T", 1)[1].startswith("00:00")
+        has_venue = bool((p.get("venue") or {}).get("value"))
+        if timed or (needs_venue and has_venue):
+            kept.append(p)
+    return kept
+
+
 def timefix(job: dict, tx) -> list[dict]:
-    """Audit A4 (Alexander 2026-07-13: find the real time): re-fetch the
-    detail page of an event whose future occurrences are date-only; the
-    cascade's TIMED claims replace the midnight placeholders at the next
+    """Audit A4 (Alexander 2026-07-13: find the real time) + venue contract
+    (2026-07-14): re-fetch the detail page of an event whose future
+    occurrences are date-only or whose location is unknown; the cascade's
+    claims replace midnight placeholders / attach the venue at the next
     rebuild (occurrence folding keys date-only claims by local day)."""
     import re as _re
 
@@ -468,6 +485,7 @@ def timefix(job: dict, tx) -> list[dict]:
     event_id = job["payload"]["event_id"]
     row = tx.execute(
         "SELECT e.url, s.id, s.name, "
+        "       (e.venue_id IS NULL AND e.geo IS NULL) AS needs_venue, "
         "       ST_Y(s.geo) AS lat, ST_X(s.geo) AS lon "
         "FROM event e "
         "JOIN identity i ON i.event_id = e.id "
@@ -489,21 +507,14 @@ def timefix(job: dict, tx) -> list[dict]:
     if result.status != FETCHED:
         return []
     method, payloads = extract(source, result, tx, job_id=job["id"])
-    # a claim is "timed" when it carries a time-of-day that is not the
-    # 00:00 placeholder - a plain endswith("00:00") check would also throw
-    # away real on-the-hour starts (19:00:00, the most common start time)
-    timed = []
-    for p in payloads:
-        v = str(p.get("starts_at", {}).get("value") or "").replace(" ", "T")
-        if "T" in v and not v.split("T", 1)[1].startswith("00:00"):
-            timed.append(p)
-    if timed:
-        _insert_claims(tx, source, None, timed)
+    kept = _detail_claims_worth_keeping(payloads, row["needs_venue"])
+    if kept:
+        _insert_claims(tx, source, None, kept)
     tx.execute(
         "INSERT INTO crawl_log (job_id, source_id, finished_at, status, detail) "
         "VALUES (%s, %s, now(), 'ok', %s)",
         (job["id"], source["id"],
-         f"timefix[{method}]: {len(timed)} timed claims"),
+         f"timefix[{method}]: {len(kept)} claims kept"),
     )
     return []
 

@@ -157,3 +157,21 @@ def test_ghost_target_handlers_noop_and_survive_their_imports(conn):
     for kind in ("enrich", "timefix"):
         job = {"id": uuid.uuid4(), "kind": kind, "payload": {"event_id": ghost}}
         assert handlers.HANDLERS[kind](job, conn) == []
+
+
+def test_detail_claims_kept_for_time_or_missing_venue():
+    payloads = [
+        {"title": {"value": "A"}, "starts_at": {"value": "2030-01-01 19:00:00"}},
+        {"title": {"value": "B"}, "starts_at": {"value": "2030-01-01 00:00:00"},
+         "venue": {"value": "Palais Kaufmännischer Verein"}},
+        {"title": {"value": "C"}, "starts_at": {"value": "2030-01-01"}},
+    ]
+    # event already has a location: only the truly timed claim is news
+    kept = handlers._detail_claims_worth_keeping(payloads, needs_venue=False)
+    assert [p["title"]["value"] for p in kept] == ["A"]
+    # event has no location: the venue-bearing date-only claim is news too
+    kept = handlers._detail_claims_worth_keeping(payloads, needs_venue=True)
+    assert [p["title"]["value"] for p in kept] == ["A", "B"]
+    # on-the-hour starts are real times, not midnight placeholders
+    assert handlers._detail_claims_worth_keeping(
+        [{"starts_at": {"value": "2030-01-01T20:00"}}], needs_venue=False)

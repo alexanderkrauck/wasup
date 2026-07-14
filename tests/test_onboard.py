@@ -236,3 +236,41 @@ def test_validation_clamps_expanded_urls(conn, monkeypatch):
                                      chunk_days=2))
     ob._self_validate(r, ["E"], {"id": None}, conn, None)
     assert seen["urls"] == 3
+
+
+def test_venue_gate_bounces_locationless_recipes(conn, monkeypatch):
+    """Venue contract (2026-07-14): an escalated onboard must not accept a
+    recipe that yields neither venues nor per-item detail URLs (the WKO
+    recipe shipped exactly that: title+date off the listing, everything
+    else on detail pages it never followed)."""
+    from eventindex.discovery import onboard as ob
+    from eventindex.fetch.recipe import Pagination, Recipe, ValidationResult
+
+    r = Recipe(entry_urls=["https://x.at/events"], pagination=Pagination(type="none"))
+    bare = [{"title": {"value": f"E{i}"},
+             "starts_at": {"value": "2030-01-01 10:00"}} for i in range(6)]
+    monkeypatch.setattr(ob, "run_recipe", lambda *a, **k: (
+        bare, ValidationResult(ok=True, items=6, reasons=[])))
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 require_venues=True)
+    assert error is not None and "DETAIL URLS MISSING" in error
+
+    with_urls = [dict(p, url={"value": f"https://x.at/e/{i}"})
+                 for i, p in enumerate(bare)]
+    monkeypatch.setattr(ob, "run_recipe", lambda *a, **k: (
+        with_urls, ValidationResult(ok=True, items=6, reasons=[])))
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 require_venues=True)
+    assert error is not None and "VENUES MISSING" in error
+
+    # follow_detail=true is the accepted answer when the listing lacks venues
+    r_deep = Recipe(entry_urls=["https://x.at/events"],
+                    pagination=Pagination(type="none"), follow_detail=True)
+    _, error = ob._self_validate(r_deep, ["E1"], {"id": None}, conn, None,
+                                 require_venues=True)
+    assert error is None
+    # without the escalation flag the same bare recipe still passes (soft path)
+    monkeypatch.setattr(ob, "run_recipe", lambda *a, **k: (
+        bare, ValidationResult(ok=True, items=6, reasons=[])))
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None)
+    assert error is None

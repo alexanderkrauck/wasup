@@ -149,15 +149,22 @@ TIMEFIX_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
 
 
 def enqueue_timefix(conn) -> int:
-    """Every future date-only occurrence earns one detail-page re-fetch per
-    30 days to find the real start time (Alexander 2026-07-13, audit A4)."""
+    """Every future occurrence missing a start time (Alexander 2026-07-13,
+    audit A4) OR whose event has no location at all (venue contract,
+    Alexander 2026-07-14: anything findable without a login is ALWAYS
+    extracted) earns one detail-page re-fetch per 30 days."""
     rows = conn.execute(
         """
         SELECT DISTINCT e.id FROM event e
         JOIN occurrence o ON o.event_id = e.id
-        WHERE o.time_unknown AND o.status = 'scheduled'
+        WHERE (o.time_unknown OR (e.venue_id IS NULL AND e.geo IS NULL))
+          AND o.status = 'scheduled'
           AND o.starts_at >= now()
           AND e.url IS NOT NULL AND e.url !~ '^https?://[^/]+/?$'
+          -- an event url identical to a registered source url is the
+          -- LISTING page, not a detail page - re-fetching it per event
+          -- burns an LLM extraction to learn nothing new (WKO class)
+          AND NOT EXISTS (SELECT 1 FROM source s2 WHERE s2.url = e.url)
           AND NOT EXISTS (
             SELECT 1 FROM jobs j WHERE j.kind = 'timefix'
               AND j.payload->>'event_id' = e.id::text
@@ -171,10 +178,67 @@ def enqueue_timefix(conn) -> int:
     return len(rows)
 
 
+VENUE_ESCALATION_MIN_EVENTS = 5
+
+
+def venue_escalation(conn) -> int:
+    """Venue completeness contract (Alexander 2026-07-14): a source whose
+    crawled future events mostly carry neither a venue nor their own detail
+    URL gives the pipeline nothing to recover a location from (the detail
+    re-fetch needs deep links) - re-onboard it once with venue orders; the
+    hard gate lives in recipe self-validation. Found via WKO: recipe
+    scraped title+date off the listing, everything else sat on detail
+    pages it never followed."""
+    rows = conn.execute(
+        """
+        SELECT s.id, s.name FROM source s
+        WHERE s.status = 'active'
+          AND s.extraction_hint->>'venue_escalated' IS NULL
+          AND (
+            SELECT count(*) FILTER (
+                     WHERE e.venue_id IS NULL AND e.geo IS NULL
+                       AND (e.url IS NULL OR e.url ~ '^https?://[^/]+/?$'
+                            OR EXISTS (SELECT 1 FROM source s2
+                                       WHERE s2.url = e.url))
+                   ) >= greatest(%(min)s, 0.5 * count(*))
+            FROM (
+                SELECT DISTINCT e2.id, e2.venue_id, e2.geo, e2.url
+                FROM event e2
+                JOIN identity i ON i.event_id = e2.id
+                JOIN event_claim c ON c.fingerprint = i.fingerprint
+                JOIN occurrence o ON o.event_id = e2.id
+                WHERE c.source_id = s.id AND o.starts_at > now()
+            ) e
+          )
+        """,
+        {"min": VENUE_ESCALATION_MIN_EVENTS},
+    ).fetchall()
+    for r in rows:
+        with conn.transaction():
+            enqueue(conn, "onboard", {
+                "source_id": str(r["id"]),
+                "reason": ("venue completeness escalation: this source's events "
+                           "arrive without venue/location AND without their own "
+                           "detail URLs. Extract both for every event (set "
+                           "follow_detail=true if the listing does not show "
+                           "them) - anything findable without a login must be "
+                           "extracted, however unstructured."),
+            })
+            conn.execute(
+                "UPDATE source SET extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
+                "|| '{\"venue_escalated\": true}'::jsonb WHERE id = %s",
+                (r["id"],),
+            )
+    return len(rows)
+
+
 def schedule(conn) -> int:
     flagged = completeness_escalation(conn)
     if flagged:
         print(f"completeness escalation: {flagged} capped sources sent to onboarding")
+    venue_flagged = venue_escalation(conn)
+    if venue_flagged:
+        print(f"venue escalation: {venue_flagged} location-less sources sent to onboarding")
     parked = park_dormant(conn)
     if parked:
         print(f"parked {parked} yieldless sources as dormant")

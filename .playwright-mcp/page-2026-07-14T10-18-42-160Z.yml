@@ -1,0 +1,174 @@
+- generic [active] [ref=f3e1]:
+  - navigation [ref=f3e3]:
+    - link "Wasup" [ref=f3e4] [cursor=pointer]:
+      - /url: /
+    - generic [ref=f3e5]:
+      - link "ChatGPT" [ref=f3e6] [cursor=pointer]:
+        - /url: "#chatgpt"
+      - link "Claude" [ref=f3e7] [cursor=pointer]:
+        - /url: "#claude"
+      - link "API" [ref=f3e8] [cursor=pointer]:
+        - /url: "#dev"
+    - link "Loslegen" [ref=f3e9] [cursor=pointer]:
+      - /url: "#use"
+  - generic [ref=f3e10]:
+    - generic [ref=f3e11]: 🎸
+    - generic [ref=f3e12]: 🎭
+    - generic [ref=f3e13]: ⚽️
+    - generic [ref=f3e14]: 🎪
+    - generic [ref=f3e15]: 💃
+    - generic [ref=f3e16]:
+      - heading [level=1] [ref=f3e17]:
+        - text: Was gehtwirklich in
+        - emphasis [ref=f3e18]: Linz
+        - text: "?"
+      - paragraph [ref=f3e19]:
+        - text: Wasup indexiert
+        - strong [ref=f3e20]: alle
+        - text: öffentlichen Veranstaltungen in und um Linz — auch die, die auf keinem Portal stehen. Und deine KI kann ihn direkt fragen.
+      - generic [ref=f3e21]:
+        - link "In ChatGPT nutzen" [ref=f3e22] [cursor=pointer]:
+          - /url: "#chatgpt"
+        - link "In Claude nutzen" [ref=f3e25] [cursor=pointer]:
+          - /url: "#claude"
+    - generic [ref=f3e28]:
+      - banner [ref=f3e29]:
+        - text: dein KI-Assistent
+        - generic [ref=f3e33]: ●live aus dem Index
+      - generic [ref=f3e34]: W
+  - generic [ref=f3e36]:
+    - generic [ref=f3e37]:
+      - generic [ref=f3e38]: 0+
+      - text: Termine
+    - generic [ref=f3e39]:
+      - generic [ref=f3e40]: 0+
+      - text: Veranstaltungen
+    - generic [ref=f3e41]:
+      - generic [ref=f3e42]: 0+
+      - text: Quellen
+    - generic [ref=f3e43]:
+      - generic [ref=f3e44]: ~0 km
+      - text: rund um Linz
+  - generic [ref=f3e45]:
+    - paragraph [ref=f3e46]: So einfach geht's
+    - heading "Wasup mit deinem Assistenten verbinden" [level=2] [ref=f3e47]
+    - generic [ref=f3e48]:
+      - generic [ref=f3e49]:
+        - generic [ref=f3e50]: ChatGPT
+        - list [ref=f3e53]:
+          - listitem [ref=f3e54]:
+            - text: Settings →
+            - emphasis [ref=f3e55]: Apps & Connectors
+            - text: →
+            - emphasis [ref=f3e56]: Advanced
+            - text: →
+            - strong [ref=f3e57]: Developer Mode
+            - text: aktivieren
+          - listitem [ref=f3e58]:
+            - emphasis [ref=f3e59]: Create
+            - text: wählen und die MCP-URL unten eintragen (keine Authentifizierung)
+          - listitem [ref=f3e60]:
+            - text: "Fragen:"
+            - emphasis [ref=f3e61]: „Was geht am Samstag in Linz?"
+        - generic [ref=f3e62]:
+          - generic [ref=f3e63]: https://wasup.at/mcp
+          - button "Kopieren" [ref=f3e64] [cursor=pointer]
+        - paragraph [ref=f3e65]:
+          - text: Wasup ist im ChatGPT-App-Verzeichnis eingereicht — sobald gelistet, reicht dort ein Klick auf
+          - emphasis [ref=f3e66]: Connect
+          - text: .
+      - generic [ref=f3e67]:
+        - generic [ref=f3e68]: Claude
+        - list [ref=f3e71]:
+          - listitem [ref=f3e72]:
+            - text: claude.ai → Settings →
+            - strong [ref=f3e73]: Connectors
+          - listitem [ref=f3e74]:
+            - emphasis [ref=f3e75]: Add custom connector
+            - text: ": Name"
+            - strong [ref=f3e76]: Wasup
+            - text: ", dazu die MCP-URL unten"
+          - listitem [ref=f3e77]: Im Chat das Werkzeug-Menü öffnen und Wasup aktivieren
+        - generic [ref=f3e78]:
+          - generic [ref=f3e79]: https://wasup.at/mcp
+          - button "Kopieren" [ref=f3e80] [cursor=pointer]
+        - paragraph [ref=f3e81]: Funktioniert ab dem Free-Plan — ein eigener Connector ist inklusive.
+    - paragraph [ref=f3e82]:
+      - text: "Dann einfach fragen:"
+      - emphasis [ref=f3e83]: „Konzerte am Wochenende"
+      - text: ·
+      - emphasis [ref=f3e84]: „gratis & mit Kindern, draußen"
+      - text: ·
+      - emphasis [ref=f3e85]: „bau mir ein Salsa-Kalender-Abo"
+  - generic [ref=f3e86]:
+    - paragraph [ref=f3e87]: Warum Wasup
+    - heading "Der ehrlichste Event-Index, den Linz je hatte" [level=2] [ref=f3e88]
+    - generic [ref=f3e89]:
+      - generic [ref=f3e90]:
+        - generic [ref=f3e91]: 🕸️
+        - heading "Direkt von der Quelle" [level=3] [ref=f3e92]
+        - paragraph [ref=f3e93]: "Täglich gecrawlt von 200+ Veranstalter-Websites: das Hinterhof-Konzert, der Verein im Umland, der Ball, der Stammtisch — der Long Tail, den kein Portal pflegt."
+      - generic [ref=f3e94]:
+        - generic [ref=f3e95]: 🧩
+        - heading "Dedupliziert & bewertet" [level=3] [ref=f3e96]
+        - paragraph [ref=f3e97]: Dubletten aus mehreren Quellen werden zusammengeführt, jede Angabe trägt eine Konfidenz. Wiederkehrende Termine werden projiziert — und als solche markiert.
+      - generic [ref=f3e98]:
+        - generic [ref=f3e99]: 🤝
+        - heading "Ehrlich per Design" [level=3] [ref=f3e100]
+        - paragraph [ref=f3e101]:
+          - text: "Der Index behauptet nichts, was er nicht belegen kann: Unbekanntes bleibt"
+          - emphasis [ref=f3e102]: unbekannt
+          - text: statt geraten, Schätzungen sind klar als Schätzung gekennzeichnet.
+  - generic [ref=f3e104]:
+    - heading "Für Entwickler & Agenten" [level=2] [ref=f3e105]
+    - list [ref=f3e106]:
+      - listitem [ref=f3e107]:
+        - text: "Semantik & Filter-Schema:"
+        - link [ref=f3e108] [cursor=pointer]:
+          - /url: /llms.txt
+          - code [ref=f3e109]: /llms.txt
+      - listitem [ref=f3e110]:
+        - text: "MCP-Server (Streamable HTTP, kein Auth):"
+        - code [ref=f3e111]: https://wasup.at/mcp
+      - listitem [ref=f3e112]:
+        - text: "REST:"
+        - code [ref=f3e113]: GET /v1/occurrences
+        - text: ·
+        - code [ref=f3e114]: POST /v1/query
+        - text: ·
+        - code [ref=f3e115]: GET /v1/feed.ics
+        - text: — Spezifikation unter
+        - link [ref=f3e116] [cursor=pointer]:
+          - /url: /docs
+          - code [ref=f3e117]: /docs
+      - listitem [ref=f3e118]: Lesend keyless (Rate-Limit pro IP) — einfach loslegen.
+  - generic [ref=f3e119]:
+    - paragraph [ref=f3e120]: Wer steckt dahinter?
+    - generic [ref=f3e121]:
+      - img "Wasup Logo" [ref=f3e122]
+      - paragraph [ref=f3e123]:
+        - text: Wasup ist ein Ein-Personen-Projekt von
+        - strong [ref=f3e124]: Alexander Krauck
+        - text: ", Data Scientist aus Linz — entstanden aus einer Frage, auf die kein Portal eine vollständige Antwort hatte. Fragen, Korrekturen oder Löschwünsche als Veranstalter:"
+        - link "alexander.krauck@gmail.com" [ref=f3e125] [cursor=pointer]:
+          - /url: mailto:alexander.krauck@gmail.com
+        - text: — siehe auch
+        - link "Support" [ref=f3e126] [cursor=pointer]:
+          - /url: /support
+        - text: .
+  - contentinfo [ref=f3e127]:
+    - text: Wasup · Alexander Krauck · Linz, Österreich ·
+    - link "Kontakt" [ref=f3e128] [cursor=pointer]:
+      - /url: mailto:alexander.krauck@gmail.com
+    - text: ·
+    - link "Datenschutz" [ref=f3e129] [cursor=pointer]:
+      - /url: /privacy
+    - text: ·
+    - link "Nutzungsbedingungen" [ref=f3e130] [cursor=pointer]:
+      - /url: /terms
+    - text: ·
+    - link "Support" [ref=f3e131] [cursor=pointer]:
+      - /url: /support
+    - text: ·
+    - link "llms.txt" [ref=f3e132] [cursor=pointer]:
+      - /url: /llms.txt

@@ -47,6 +47,7 @@ Internal module APIs, test organization, exact index DDL, digest formatting, log
 
 ## Changelog (agent appends one-liners here)
 
+- 2026-07-14: added a clean 24-color, 256px submission-logo derivative at `assets/wasup-logo-10kb.png` (9,507 bytes); the full-size source stays unchanged.
 - 2026-07-14: frontend scope fence extended by Alexander (plugin submissions need the URLs): landing page at `/` with install instructions (calendar moved to `/calendar`), `/terms`, `/support`, `/privacy` now styled HTML (privacy.md deleted), `/logo.png`. Canonical domain switched to wasup.at (live with TLS since today); wasup.goedly.com stays a serving alias and accepted MCP Host for pre-existing connectors.
 - 2026-07-14: selected the Austrian red-white-red shouting-pin mascot as the Wasup submission logo and saved the 1254px PNG at `assets/wasup-logo.png`.
 - 2026-07-14: added `chatgpt-app-submission.json` from the live five-tool MCP descriptor: submission metadata, exact tool-hint justifications, five positive review cases, and three negative trigger cases; no app/server behavior changed.

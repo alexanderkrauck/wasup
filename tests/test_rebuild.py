@@ -407,6 +407,40 @@ def test_explicit_daily_wording_still_expands(conn):
     } == {"2026-07-12", "2026-07-13", "2026-07-14"}
 
 
+def test_unrepresentable_daily_weekday_exceptions_do_not_expand(conn):
+    """The v1 schema cannot encode daily-except-Tue/Sat; keep truth over recall."""
+    sid = _source(conn, "stift", 0.8)
+    unsupported = {
+        "freq": "daily", "weekday": None, "week_of_month": None,
+        "interval": 1, "time": "14:30", "duration_minutes": None,
+        "except_holidays": [], "valid_from": "2026-05-06",
+        "valid_until": "2026-10-26",
+        "as_stated": (
+            "Täglich von 6. Mai bis 26. Oktober "
+            "(außer dienstags und samstags) um 14:30 Uhr"
+        ),
+    }
+    _claim(
+        conn, sid,
+        _concert(
+            "Orgelkurzkonzert an der Brucknerorgel",
+            starts="2026-07-12T14:30:00+02:00",
+            venue="Stiftsbasilika St. Florian",
+            recurrence=(unsupported, 0.9),
+        ),
+        "orgelkurzkonzert brucknerorgel|2026-07-12|feed",
+    )
+
+    rb.rebuild(conn, now=NOW)
+
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert events[0]["kind"] == "one_off"
+    assert len(occs) == 1
+    assert occs[0]["starts_at"].astimezone(rb.VIENNA).date().isoformat() == \
+        "2026-07-12"
+
+
 def test_text_recurrence_verified_at_birth(conn, monkeypatch):
     """A text-extracted rule the verifier rejects (wrong weekday) must never
     become a series - the claim stays a one-off and the rejection is cached."""

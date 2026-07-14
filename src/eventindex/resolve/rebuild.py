@@ -208,13 +208,20 @@ def _recurrence_of_raw(raw) -> Recurrence | None:
 
 def _recurrence_of(c: Claim) -> Recurrence | None:
     rec = _recurrence_of_raw(c.value("recurrence"))
-    if rec is not None and rec.freq == "daily" and not _DAILY_CADENCE_RE.search(
-        rec.as_stated or ""
+    stated = rec.as_stated if rec is not None else ""
+    if rec is not None and rec.freq == "daily" and (
+        not _DAILY_CADENCE_RE.search(stated or "")
+        or (
+            _RECURRENCE_EXCEPTION_RE.search(stated or "")
+            and _WEEKDAY_WORD_RE.search(stated or "")
+        )
     ):
         # A bare validity range (live example: "bis 16.08.2026") is not
         # evidence that an event happens every day.  The constrained schema
         # promises `as_stated` is the source wording; reject an invented
         # daily cadence deterministically and keep the observed dates only.
+        # The schema also cannot represent "daily except Tue/Sat"; expanding
+        # that as all seven days is knowingly wrong, so it fails closed too.
         return None
     return rec
 
@@ -223,6 +230,15 @@ _DAILY_CADENCE_RE = re.compile(
     r"\b(täglich|taeglich|jeden\s+tag|alle\s+tage|daily|every\s+day"
     r"|mehr(mals|fach)\s+(am|pro)\s+tag"
     r"|(several|multiple)\s+times\s+(a|per)\s+day)\b",
+    re.IGNORECASE,
+)
+_RECURRENCE_EXCEPTION_RE = re.compile(
+    r"\b(außer|ausser|ausgenommen|except|not\s+on|nicht\s+(am|an))\b",
+    re.IGNORECASE,
+)
+_WEEKDAY_WORD_RE = re.compile(
+    r"\b(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)(s|en)?\b",
     re.IGNORECASE,
 )
 

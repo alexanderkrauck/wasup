@@ -31,7 +31,8 @@ This index inverts the model:
 - **Honesty as an API contract**: `null` means unknown and never matches a
   filter; every inferred attribute carries a certainty (capped, evidence-
   gated); forward-projected occurrences are flagged `projected`; every
-  event exposes its per-source provenance down to the raw claims.
+  event exposes sanitized per-source provenance without publishing the raw
+  append-only claim payloads.
 - **Audience attributes no portal has**: expected age range, gender split,
   energy, kid/newcomer/solo-friendliness, and whether the event's *format*
   forces interaction (`interaction_structure`) — each an explicit estimate
@@ -60,8 +61,8 @@ POST /v1/query
  "newcomer_friendly": true, "importance": {"newcomer_friendly": 1.0}}
 ```
 
-Also: `GET /v1/occurrences` (raw listing), `GET /v1/events/{id}` (full
-provenance), `GET /v1/feed.ics` (any filter combo as a calendar
+Also: `GET /v1/occurrences` (raw listing), `GET /v1/events/{id}` (sanitized
+event detail + source provenance), `GET /v1/feed.ics` (any filter combo as a calendar
 subscription), `GET /v1/changes` (delta stream), `POST /v1/reports`
 (feedback feeds source trust). A drop-in Claude skill lives in
 `skills/wasup/`.

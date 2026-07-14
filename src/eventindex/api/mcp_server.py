@@ -1,30 +1,26 @@
-"""MCP surface for ChatGPT apps and Claude connectors, mounted at /mcp on
-the one API process (stateless streamable HTTP, JSON responses - what both
-directories require; HTTPS comes from Caddy).
+"""Submission-ready, tool-only MCP surface mounted at ``/mcp``.
 
-All tools are read-only views over the same deterministic query core as
-/v1/query - no LLM runs, no auth (public-data tier; the /mcp rate limit
-lives in app.py). `search`/`fetch` exist verbatim because ChatGPT's chat
-connector surface requires tools with exactly those names and shapes.
-
-Directory-listing requirements covered here: every tool carries a title and
-readOnlyHint/destructiveHint/openWorldHint annotations (missing ones are a
-standard rejection reason), descriptions state a narrow trigger, and
-responses reuse the documented public API payloads.
+Every tool is a read-only view over the deterministic Postgres query core.
+The public REST API keeps its general query semantics; this adapter adds the
+ChatGPT-specific safety, relevance, response-shaping, and standard
+``search``/``fetch`` contracts.
 """
 
-from typing import Any
+import json
+import re
+from datetime import datetime, timedelta
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
+from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
 
-from eventindex.api.search import QueryBody
+from eventindex.api.search import FILTER_DEFAULTS, QueryBody, SearchFilters, VIENNA
 
 BASE_URL = "https://wasup.at"
-# first-deploy domain; connectors registered before 2026-07-14 still send
-# this Host, so it stays accepted (Caddy serves both)
 _LEGACY_URL = "https://wasup.goedly.com"
 _HOST = BASE_URL.removeprefix("https://")
 _LEGACY_HOST = _LEGACY_URL.removeprefix("https://")
@@ -36,30 +32,19 @@ _READ_ONLY = ToolAnnotations(
 mcp = FastMCP(
     "Wasup - Linz Event Index",
     instructions=(
-        "Public events in Linz, Austria (~25km around): the long tail no "
-        "portal has, crawled from 200+ sources, deduplicated and "
-        "confidence-scored. Contracts: null means unknown (never 'no'); "
-        "inferred audience attributes are estimates with certainties; "
-        "`projected: true` = forward-projected repetition, unconfirmed; "
-        "`match_score` is ordinal, compare within one result set. "
-        "When presenting results to a user: show ALL returned events (not "
-        "a selection), each with its url as a clickable link, the LOCAL "
-        "Europe/Vienna date+time (starts_at is UTC - always convert), "
-        "venue and price; a compact table or day-grouped list beats "
-        "prose. time_unknown=true means the midnight timestamp is a "
-        "placeholder, never a real time. Some indexed venues are commercial "
-        "sex establishments; their events carry "
-        "sex_service_context=true - filter these by default (soft "
-        "preference false) unless the user explicitly asks for that "
-        "milieu. Full semantics: "
-        f"{BASE_URL}/llms.txt"
+        "Find public events in Linz and roughly 25 km around it. Use "
+        "search_events for structured date/category/price requests, search "
+        "and fetch for keyword retrieval, get_event after selecting a "
+        "result, and get_calendar_link for read-only .ics subscriptions. "
+        "Do not use Wasup for Vienna, restaurants, private-event creation, "
+        "or invitations. Known commercial sex-service contexts are excluded "
+        "unless a supported tool receives an explicit true opt-in. Null "
+        "means unknown; projected dates and inferred attributes are estimates."
     ),
     website_url=BASE_URL,
     stateless_http=True,
     json_response=True,
     streamable_http_path="/",
-    # the SDK's DNS-rebinding guard rejects unknown Host headers; Caddy
-    # forwards the public host, dev/tests arrive as localhost/testserver
     transport_security=TransportSecuritySettings(
         allowed_hosts=[_HOST, _LEGACY_HOST, "localhost:*", "127.0.0.1:*",
                        "testserver"],
@@ -69,49 +54,327 @@ mcp = FastMCP(
 )
 
 
-def _query(filters: QueryBody | None, limit: int,
-           sort: str = "relevance") -> dict[str, Any]:
+class _Output(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Estimate(_Output):
+    value: bool | float | str | None
+    confidence: float | None
+
+
+class EventEstimates(_Output):
+    age_min: Estimate | None = None
+    age_max: Estimate | None = None
+    gender_split: Estimate | None = None
+    expected_attendance: Estimate | None = None
+    language: Estimate | None = None
+    kid_friendly: Estimate | None = None
+    newcomer_friendly: Estimate | None = None
+    outdoor: Estimate | None = None
+    solo_friendly: Estimate | None = None
+    interaction_structure: Estimate | None = None
+    energy: Estimate | None = None
+    sex_service_context: Estimate | None = None
+    vibe_tags: list[str] = Field(default_factory=list)
+    start_time: Estimate | None = None
+
+
+class SearchOccurrence(_Output):
+    id: UUID
+    event_id: UUID
+    title: str
+    url: str
+    starts_at: datetime
+    ends_at: datetime | None
+    ongoing: bool
+    projected: bool
+    time_unknown: bool
+    start_time_estimate: Estimate | None
+    category: list[str]
+    venue_name: str | None
+    venue_address: str | None
+    organizer: str | None
+    price_min: float | None
+    price_max: float | None
+    booking_url: str | None
+    registration_required: bool | None
+    kind: str
+    event_status: str
+    confidence: float
+    match_score: float
+    provenance_summary: list[str]
+
+
+class SearchEventsResponse(_Output):
+    data_freshness: datetime | None
+    parsed_filters: SearchFilters
+    importance: dict[str, float]
+    pool_truncated: bool
+    occurrences: list[SearchOccurrence]
+
+
+class EventOccurrence(_Output):
+    id: UUID
+    starts_at: datetime
+    ends_at: datetime | None
+    status: str
+    projected: bool
+    availability: str | None
+    waitlist_url: str | None
+    fullness_estimate: float | None
+    last_confirmed_at: datetime | None
+    time_unknown: bool
+
+
+class EventSource(_Output):
+    name: str
+    url: str
+    extracted_at: datetime
+
+
+class EventRecord(_Output):
+    id: UUID
+    canonical_url: str
+    kind: str
+    title: str
+    description: str | None
+    category: list[str]
+    tags: list[str]
+    venue_name: str | None
+    venue_address: str | None
+    lat: float | None
+    lon: float | None
+    organizer: str | None
+    registration_required: bool | None
+    registration_deadline: datetime | None
+    booking_url: str | None
+    price_min: float | None
+    price_max: float | None
+    url: str | None
+    image_url: str | None
+    language: str | None
+    expected_age_range: str | None
+    expected_age_range_confidence: float | None
+    confidence: float
+    status: str
+    estimates: EventEstimates
+    provenance_summary: list[str]
+    updated_at: datetime
+
+
+class EventDetailResponse(_Output):
+    data_freshness: datetime | None
+    event: EventRecord
+    occurrences: list[EventOccurrence]
+    sources: list[EventSource]
+
+
+class CalendarLinkResponse(_Output):
+    ics_url: str
+
+
+class SearchResultStub(_Output):
+    id: str
+    title: str
+    url: str
+
+
+class StandardSearchResponse(_Output):
+    results: list[SearchResultStub]
+
+
+class FetchMetadata(_Output):
+    confidence: float
+    status: str
+
+
+class StandardFetchResponse(_Output):
+    id: str
+    title: str
+    text: str
+    url: str
+    metadata: FetchMetadata
+
+
+def _event_url(event_id: str | UUID) -> str:
+    return f"{BASE_URL}/v1/events/{event_id}"
+
+
+def _estimate(value: Any) -> Estimate | None:
+    if not isinstance(value, dict):
+        return None
+    return Estimate(value=value.get("value"), confidence=value.get("confidence"))
+
+
+def _estimates(values: dict | None, *, include_sex: bool) -> EventEstimates:
+    values = values or {}
+    return EventEstimates(
+        age_min=_estimate(values.get("age_min")),
+        age_max=_estimate(values.get("age_max")),
+        gender_split=_estimate(values.get("gender_split")),
+        expected_attendance=_estimate(values.get("expected_attendance")),
+        language=_estimate(values.get("language")),
+        kid_friendly=_estimate(values.get("kid_friendly")),
+        newcomer_friendly=_estimate(values.get("newcomer_friendly")),
+        outdoor=_estimate(values.get("outdoor")),
+        solo_friendly=_estimate(values.get("solo_friendly")),
+        interaction_structure=_estimate(values.get("interaction_structure")),
+        energy=_estimate(values.get("energy")),
+        sex_service_context=(
+            _estimate(values.get("sex_service_context")) if include_sex else None
+        ),
+        vibe_tags=list(values.get("vibe_tags") or []),
+        start_time=_estimate(values.get("start_time")),
+    )
+
+
+def _search_occurrence(row: dict) -> SearchOccurrence:
+    return SearchOccurrence(
+        id=row["id"],
+        event_id=row["event_id"],
+        title=row["title"],
+        url=row.get("url") or _event_url(row["event_id"]),
+        starts_at=row["starts_at"],
+        ends_at=row.get("ends_at"),
+        ongoing=bool(row.get("ongoing")),
+        projected=bool(row.get("projected")),
+        time_unknown=bool(row.get("time_unknown")),
+        start_time_estimate=_estimate(row.get("start_time_estimate")),
+        category=list(row.get("category") or []),
+        venue_name=row.get("venue_name"),
+        venue_address=row.get("venue_address"),
+        organizer=row.get("organizer"),
+        price_min=row.get("price_min"),
+        price_max=row.get("price_max"),
+        booking_url=row.get("booking_url"),
+        registration_required=row.get("registration_required"),
+        kind=row["kind"],
+        event_status=row["event_status"],
+        confidence=row["confidence"],
+        match_score=row["match_score"],
+        provenance_summary=list(row.get("provenance_summary") or []),
+    )
+
+
+def _credible_ongoing(row: dict) -> bool:
+    """Defense in depth while pre-fix canonical rows age out/rebuild."""
+    if not row.get("ongoing"):
+        return True
+    ends_at = row.get("ends_at")
+    if ends_at is None:
+        return False
+    if set(row.get("category") or []) & {"art", "culture"}:
+        return True
+    return ends_at - row["starts_at"] <= timedelta(days=14)
+
+
+def _event_detail(event_id: str, *, include_sex: bool) -> EventDetailResponse:
     from eventindex.api import app as api
 
-    return api.query(filters or QueryBody(), limit=limit, sort=sort)
+    detail = api._event_detail(UUID(event_id), include_policy_marker=True)
+    if detail.pop("_sex_service_context") and not include_sex:
+        raise ValueError("event unavailable through this tool")
+    event = detail["event"]
+    return EventDetailResponse(
+        data_freshness=detail["data_freshness"],
+        event=EventRecord(
+            id=event["id"],
+            canonical_url=_event_url(event["id"]),
+            kind=event["kind"],
+            title=event["title"],
+            description=event.get("description"),
+            category=list(event.get("category") or []),
+            tags=list(event.get("tags") or []),
+            venue_name=event.get("venue_name"),
+            venue_address=event.get("venue_address"),
+            lat=event.get("lat"),
+            lon=event.get("lon"),
+            organizer=event.get("organizer"),
+            registration_required=event.get("registration_required"),
+            registration_deadline=event.get("registration_deadline"),
+            booking_url=event.get("booking_url"),
+            price_min=event.get("price_min"),
+            price_max=event.get("price_max"),
+            url=event.get("url"),
+            image_url=event.get("image_url"),
+            language=event.get("lang"),
+            expected_age_range=event.get("expected_age_range"),
+            expected_age_range_confidence=(
+                event.get("expected_age_range_confidence")
+            ),
+            confidence=event["confidence"],
+            status=event["status"],
+            estimates=_estimates(event.get("estimates"), include_sex=include_sex),
+            provenance_summary=list(event.get("provenance_summary") or []),
+            updated_at=event["updated_at"],
+        ),
+        occurrences=[EventOccurrence.model_validate(o) for o in detail["occurrences"]],
+        sources=[EventSource.model_validate(s) for s in detail["sources"]],
+    )
+
+
+def _validated_filters(body: QueryBody) -> tuple[SearchFilters, dict[str, float]]:
+    from eventindex.api.search import SOFT_ATTRIBUTES
+
+    values = body.model_dump()
+    importance = values.pop("importance")
+    if not all(
+        name in SOFT_ATTRIBUTES and 0 <= weight <= 1
+        for name, weight in importance.items()
+    ):
+        raise ValueError("importance must use known attributes with weights 0..1")
+    return SearchFilters(**values), importance
 
 
 @mcp.tool(title="Search Linz events", annotations=_READ_ONLY)
-def search_events(filters: QueryBody | None = None, limit: int = 20,
-                  sort: str = "relevance") -> dict[str, Any]:
-    """Search events in Linz, Austria by structured filters. Use for any
-    'what's on in Linz' question. Window/categories/exclusions/price in
-    `filters` are hard set logic (null = unknown never matches); audience
-    attributes (kid_friendly, newcomer_friendly, solo_friendly, ...) are
-    soft preferences ranked by your `importance` weights x the stored
-    certainty - see the match_score on each row. Omit every filter the
-    user did not imply - EXCEPT sex_service_context: set it false by
-    default (some indexed venues are commercial sex establishments whose
-    events otherwise surface in innocent queries); leave it unset only
-    when the user explicitly asks for that milieu. Keep it a soft
-    preference, not in required_attributes - a hard filter would also
-    drop every event where the attribute is still unknown. sort="starts_at"
-    gives chronological order; ask for a generous limit (default 20)
-    rather than a tiny one.
+def search_events(
+    filters: QueryBody | None = None,
+    limit: Annotated[int, Field(ge=1, le=100)] = 20,
+    sort: Literal["relevance", "starts_at"] = "relevance",
+) -> SearchEventsResponse:
+    """Use this when the user wants structured discovery of public events in
+    Linz or roughly 25 km around it by date, category, price, exclusions, or
+    audience preferences. Do not use it for Vienna, restaurants, private
+    event creation, or invitations. Omitted or false sex_service_context
+    excludes known commercial sex-service contexts; only explicit true
+    permits them. Unknown attributes remain visible. Ongoing events are
+    labeled and placed after events that start inside the requested window."""
+    from eventindex.api import app as api
 
-    PRESENTING RESULTS: users want specifics, not a digest. Show EVERY
-    returned event unless they asked for a shortlist - as a table or
-    day-grouped list with: linked title (`url`), LOCAL Europe/Vienna
-    date+time (starts_at is UTC!), venue, price. On time_unknown=true
-    rows the midnight is a placeholder - say the time is unknown or show
-    start_time_estimate as an estimate, never as fact."""
-    return _query(filters, limit, sort)
+    parsed, importance = _validated_filters(filters or QueryBody())
+    exclude_sex = parsed.sex_service_context is not True
+    payload = api._run_filters(
+        parsed,
+        limit=2000,
+        importance=importance,
+        sort=sort,
+        exclude_sex_service_context=exclude_sex,
+    )
+    # Stable partition preserves relevance or chronology inside each group.
+    # Actual starts in the window must not be buried under old ongoing spans.
+    rows = [row for row in payload["occurrences"] if _credible_ongoing(row)]
+    rows = sorted(rows, key=lambda row: bool(row["ongoing"]))
+    return SearchEventsResponse(
+        data_freshness=payload["data_freshness"],
+        parsed_filters=parsed,
+        importance=importance,
+        pool_truncated=payload["pool_truncated"],
+        occurrences=[_search_occurrence(row) for row in rows[:limit]],
+    )
 
 
 @mcp.tool(title="Get event details", annotations=_READ_ONLY)
-def get_event(event_id: str) -> dict[str, Any]:
-    """Full record of one event by id: every field with provenance, all
-    known occurrences, and the raw claims per source."""
-    from uuid import UUID
-
-    from eventindex.api import app as api
-
-    return api.event(UUID(event_id))
+def get_event(
+    event_id: str,
+    include_sex_service_context: bool = False,
+) -> EventDetailResponse:
+    """Use this when the user selected a Wasup event and wants its sanitized
+    public details, future and historical occurrences, confidence estimates,
+    and source provenance. Raw source claims and suppressed private-location
+    evidence are never returned. A known commercial sex-service event is
+    unavailable unless include_sex_service_context is explicitly true."""
+    return _event_detail(event_id, include_sex=include_sex_service_context)
 
 
 @mcp.tool(title="Get calendar subscription link", annotations=_READ_ONLY)
@@ -119,84 +382,174 @@ def get_calendar_link(
     category: str | None = None,
     from_dt: str | None = None,
     to_dt: str | None = None,
-    min_confidence: float | None = None,
-) -> dict[str, Any]:
-    """Build an .ics calendar subscription URL for a filter combination
-    (category comma-separated, ISO datetimes). Give the user this URL to
-    subscribe in any calendar app."""
+    min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
+) -> CalendarLinkResponse:
+    """Use this when the user wants a read-only .ics subscription URL for
+    public Linz-area events. This only builds a link; it does not subscribe,
+    create calendar entries, or invite anyone. The returned feed always
+    excludes known commercial sex-service contexts while retaining unknowns."""
     params = {
-        k: v
-        for k, v in [
-            ("category", category), ("from", from_dt), ("to", to_dt),
+        key: value
+        for key, value in [
+            ("category", category),
+            ("from", from_dt),
+            ("to", to_dt),
             ("min_confidence", min_confidence),
         ]
-        if v is not None
+        if value is not None
     }
-    url = f"{BASE_URL}/v1/feed.ics"
-    return {"ics_url": url + (f"?{urlencode(params)}" if params else "")}
-
-
-# --- ChatGPT chat-connector contract: tools literally named search/fetch ---
-
-def _event_url(row: dict) -> str:
-    return row.get("url") or f"{BASE_URL}/v1/events/{row['event_id']}"
-
-
-@mcp.tool(title="Search (keyword)", annotations=_READ_ONLY)
-def search(query: str) -> dict[str, Any]:
-    """Keyword search over upcoming Linz events; returns result stubs whose
-    ids feed `fetch`. Prefer `search_events` when you can state structured
-    filters."""
-    from eventindex.api import app as api
-    from eventindex.api.search import FILTER_DEFAULTS, SearchFilters
-
-    filters = SearchFilters(
-        **{**FILTER_DEFAULTS, "vibe_terms": query.split()}
+    params["exclude_sex_service_context"] = "true"
+    return CalendarLinkResponse(
+        ics_url=f"{BASE_URL}/v1/feed.ics?{urlencode(params)}"
     )
-    rows = api._run_filters(filters, limit=25)["occurrences"]
+
+
+_STOPWORDS = {
+    "a", "an", "and", "around", "at", "events", "event", "find", "for",
+    "in", "linz", "me", "near", "of", "please", "search", "show", "the",
+    "wasup", "what", "with", "veranstaltung", "veranstaltungen", "für",
+    "im", "in", "mir", "suche", "und", "zeige",
+}
+_SYNONYMS = {
+    "running": ("running", "run", "lauf", "jogging"),
+    "runs": ("run", "lauf", "running", "jogging"),
+    "run": ("run", "lauf", "running", "jogging"),
+    "laufen": ("lauf", "run", "running", "jogging"),
+    "lauf": ("lauf", "run", "running", "jogging"),
+    "concert": ("concert", "konzert"),
+    "concerts": ("concert", "konzert"),
+    "konzerte": ("konzert", "concert"),
+    "dancing": ("dancing", "dance", "tanz"),
+    "dance": ("dance", "dancing", "tanz"),
+    "tanzen": ("tanz", "dance", "dancing"),
+}
+
+
+def _keyword_tokens(query: str) -> list[str]:
+    return [
+        token for token in re.findall(r"[^\W\d_]+", query.lower())
+        if len(token) >= 3 and token not in _STOPWORDS
+    ]
+
+
+def _keyword_terms(tokens: list[str]) -> list[str]:
+    terms: list[str] = []
+    for token in tokens:
+        for term in _SYNONYMS.get(token, (token,)):
+            if term not in terms:
+                terms.append(term)
+    return terms
+
+
+def _keyword_categories(tokens: list[str]) -> list[str] | None:
+    if set(tokens) & {"running", "runs", "run", "laufen", "lauf"}:
+        return ["sport"]
+    if set(tokens) & {"concert", "concerts", "konzert", "konzerte"}:
+        return ["music"]
+    return None
+
+
+@mcp.tool(title="Search public Linz events by keyword", annotations=_READ_ONLY)
+def search(query: str) -> StandardSearchResponse:
+    """Use this when the user wants keyword search over upcoming public
+    Linz-area events or a client requires the standard search/fetch contract.
+    Use search_events for structured dates, categories, prices, or exclusions.
+    Do not use for other cities, restaurants, private events, or invitations.
+    Known commercial sex-service events and past-start occurrences are always
+    excluded; fewer than ten results is preferable to irrelevant filler."""
+    from eventindex.api import app as api
+
+    cutoff = datetime.now(VIENNA)
+    tokens = _keyword_tokens(query)
+    filters = SearchFilters(**(
+        FILTER_DEFAULTS | {
+            "from_dt": cutoff.isoformat(),
+            "categories": _keyword_categories(tokens),
+            "include_terms": _keyword_terms(tokens),
+        }
+    ))
+    payload = api._run_filters(
+        filters,
+        limit=2000,
+        sort="starts_at",
+        distinct=True,
+        exclude_sex_service_context=True,
+        include_inferred_terms=False,
+    )
+    rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
     results, seen = [], set()
-    for r in rows:
-        if r["event_id"] in seen:
+    for row in rows:
+        semantic_key = (
+            re.sub(r"\W+", "", row["title"].casefold()),
+            (row.get("venue_name") or "").casefold(),
+        )
+        if semantic_key in seen:
             continue
-        seen.add(r["event_id"])
-        venue = f" @ {r['venue_name']}" if r.get("venue_name") else ""
-        results.append({
-            "id": str(r["event_id"]),
-            "title": f"{r['title']} ({r['starts_at']:%a %Y-%m-%d %H:%M}{venue})",
-            "url": _event_url(r),
-        })
+        seen.add(semantic_key)
+        local = row["starts_at"].astimezone(VIENNA)
+        venue = f" @ {row['venue_name']}" if row.get("venue_name") else ""
+        results.append(SearchResultStub(
+            id=str(row["event_id"]),
+            title=f"{row['title']} ({local:%a %Y-%m-%d %H:%M}{venue})",
+            url=_event_url(row["event_id"]),
+        ))
         if len(results) >= 10:
             break
-    return {"results": results}
+    return StandardSearchResponse(results=results)
 
 
-@mcp.tool(title="Fetch event", annotations=_READ_ONLY)
-def fetch(id: str) -> dict[str, Any]:
-    """Fetch the full document for one search result id (an event id)."""
-    from uuid import UUID
+def _format_estimates(estimates: EventEstimates) -> str | None:
+    values = estimates.model_dump(exclude_none=True)
+    values.pop("vibe_tags", None)
+    if not values:
+        return None
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
 
-    from eventindex.api import app as api
 
-    detail = api.event(UUID(id))
-    e, occs = detail["event"], detail["occurrences"]
-    lines = [
-        f"# {e['title']}",
-        f"Categories: {', '.join(e['category'] or []) or 'unknown'}",
-        f"Price: {e['price_min']}-{e['price_max']}"
-        if e["price_min"] is not None else "Price: unknown",
-        "Dates: " + "; ".join(
-            f"{o['starts_at']:%a %Y-%m-%d %H:%M}"
-            + (" (projected, unconfirmed)" if o["projected"] else "")
-            for o in occs
-        ),
-        f"Sources: {', '.join(e['provenance_summary'] or [])}",
+@mcp.tool(title="Fetch public event document", annotations=_READ_ONLY)
+def fetch(id: str) -> StandardFetchResponse:
+    """Use this when a client needs the full document for an id returned by
+    the standard search tool. It returns sanitized public data and current or
+    future occurrences only. Raw claims, suppressed private-location evidence,
+    and known commercial sex-service events are never returned."""
+    detail = _event_detail(id, include_sex=False)
+    event = detail.event
+    now = datetime.now(VIENNA)
+    occurrences = [
+        occurrence for occurrence in detail.occurrences
+        if (occurrence.ends_at or occurrence.starts_at) >= now
     ]
-    if e.get("inferred"):
-        lines.append(f"Inferred audience attributes (estimates): {e['inferred']}")
-    return {
-        "id": id,
-        "title": e["title"],
-        "text": "\n".join(lines),
-        "url": e.get("url") or f"{BASE_URL}/v1/events/{id}",
-        "metadata": {"confidence": e["confidence"], "status": e["status"]},
-    }
+    dates = []
+    for occurrence in occurrences:
+        local = occurrence.starts_at.astimezone(VIENNA)
+        label = f"{local:%a %Y-%m-%d %H:%M}"
+        if occurrence.starts_at < now:
+            label += " (ongoing)"
+        if occurrence.projected:
+            label += " (projected, unconfirmed)"
+        if occurrence.time_unknown:
+            label += " (time unknown)"
+        dates.append(label)
+    lines = [
+        f"# {event.title}",
+        f"Categories: {', '.join(event.category) or 'unknown'}",
+        f"Venue: {event.venue_name or 'unknown'}",
+        f"Organizer: {event.organizer or 'unknown'}",
+        (
+            f"Price: {event.price_min}-{event.price_max}"
+            if event.price_min is not None else "Price: unknown"
+        ),
+        "Dates: " + ("; ".join(dates) if dates else "no current or future occurrence"),
+        f"Sources: {', '.join(source.name for source in detail.sources) or 'unknown'}",
+    ]
+    if event.description:
+        lines.append(f"Description: {event.description[:2000]}")
+    if estimate_text := _format_estimates(event.estimates):
+        lines.append(f"Inferred audience attributes (estimates): {estimate_text}")
+    return StandardFetchResponse(
+        id=id,
+        title=event.title,
+        text="\n".join(lines),
+        url=event.canonical_url,
+        metadata=FetchMetadata(confidence=event.confidence, status=event.status),
+    )

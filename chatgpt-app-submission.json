@@ -29,7 +29,7 @@
       "justifications": {
         "read_only_justification": "Retrieves one existing public event record, including occurrences and provenance, without changing any stored data.",
         "open_world_justification": "Reads the requested record only from Wasup's event index and does not contact its source websites.",
-        "destructive_justification": "Does not modify or remove the event, its occurrences, its claims, or any other record."
+        "destructive_justification": "Does not modify or remove the event, its occurrences, its source provenance, or any other record."
       }
     },
     "get_calendar_link": {
@@ -75,31 +75,31 @@
       "user_prompt": "What is happening in Linz this Friday evening for under €20? Please exclude techno events.",
       "file_attachment_urls": null,
       "tools_triggered": "search_events",
-      "expected_output": "A linked list or table of every returned matching event with Europe/Vienna date and time, venue, and price, with no techno results.",
+      "expected_output": "A linked list or table of matching events with Europe/Vienna date and time, venue, and price. Events starting in the window appear before clearly labeled ongoing events; no techno or known commercial sex-service results appear.",
       "expected_output_url": null
     },
     {
-      "description": "Retrieve full provenance and occurrence details for a selected event.",
+      "description": "Retrieve sanitized provenance and occurrence details for a selected event.",
       "user_prompt": "Find a concert in Linz next week, then show me the full details and source provenance for the first result.",
       "file_attachment_urls": null,
       "tools_triggered": "search_events, get_event",
-      "expected_output": "A matching concert followed by its known occurrences, event fields, confidence information, and reporting-source provenance.",
+      "expected_output": "A matching concert followed by its known occurrences, public event fields, confidence information, and reporting-source provenance, without raw source claim payloads.",
       "expected_output_url": null
     },
     {
       "description": "Create a filtered calendar subscription URL without subscribing on the user's behalf.",
-      "user_prompt": "Give me a calendar subscription link for music events in Linz from August 1 through August 31, 2026.",
+      "user_prompt": "Give me a calendar subscription link for music events in Linz during the next calendar month.",
       "file_attachment_urls": null,
       "tools_triggered": "get_calendar_link",
-      "expected_output": "A Wasup HTTPS .ics subscription URL containing the requested category and date filters, plus a brief instruction to add it to a calendar app.",
-      "expected_output_url": "https://wasup.goedly.com/v1/feed.ics"
+      "expected_output": "A wasup.at HTTPS .ics subscription URL containing the requested category, relative date filters, and the app's default adult-context exclusion, plus a brief instruction to add it to a calendar app.",
+      "expected_output_url": "https://wasup.at/v1/feed.ics"
     },
     {
       "description": "Exercise the standard keyword search contract for event discovery.",
       "user_prompt": "Search the Linz event index for salsa.",
       "file_attachment_urls": null,
       "tools_triggered": "search",
-      "expected_output": "Up to ten relevant upcoming event stubs with an event id, descriptive title, and URL for each result.",
+      "expected_output": "Up to ten future-starting salsa event stubs with an event id, descriptive title, and canonical Wasup URL for each result; no unrelated filler is added.",
       "expected_output_url": null
     },
     {
@@ -107,7 +107,7 @@
       "user_prompt": "Search for running events in Linz and fetch the full event document for the first result.",
       "file_attachment_urls": null,
       "tools_triggered": "search, fetch",
-      "expected_output": "Keyword search results followed by the first event's title, dates, categories, price, sources, confidence metadata, and any inferred attributes labeled as estimates.",
+      "expected_output": "Only relevant future-starting running-event search results, followed by the first event's sanitized title, current or future dates, categories, price, sources, confidence metadata, and inferred attributes labeled as estimates.",
       "expected_output_url": null
     }
   ],

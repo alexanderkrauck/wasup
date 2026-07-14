@@ -33,7 +33,9 @@ Read the response honestly: `match_score` (preference fit), `confidence`
 (existence certainty, staleness-decayed), `projected: true` = unconfirmed
 forward projection - tell the user when a recommendation rests on estimates.
 
-Details per event: `GET /v1/events/{id}`. Calendar: `/v1/feed.ics?...`.
+Details per event: `GET /v1/events/{id}` (sanitized public fields,
+occurrences, and source provenance; never raw claim payloads). Calendar:
+`/v1/feed.ics?...&exclude_sex_service_context=true` for the safe default.
 Wrong/cancelled data: `POST /v1/reports`.
 
 Prefer a connector? The same read surface is an MCP server at

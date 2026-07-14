@@ -34,7 +34,9 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 - **`confidence`** on results decays with staleness (missed re-confirmation
   cycles); `last_confirmed_at` says when a source last showed the event.
 - **`provenance_summary`** lists the reporting sources; `GET /v1/events/{id}`
-  returns every raw claim per source.
+  returns sanitized event fields, occurrences, and source name/URL/timestamp
+  provenance. Raw append-only claim payloads and evidence snippets are never
+  published.
 
 ## Querying (use this, it costs the index nothing)
 
@@ -147,8 +149,11 @@ queries are COMPOSITIONS you build at query time. Examples:
 ## Other endpoints
 
 - `GET /v1/occurrences?from=&to=&near=lat,lon&radius=5km&category=&min_confidence=&cursor=` - plain listing, keyset-paginated.
-- `GET /v1/events/{id}` - full record: field provenance, all claims, all occurrences.
-- `GET /v1/feed.ics?...` - any filter combo as a calendar subscription.
+- `GET /v1/events/{id}` - sanitized public fields, occurrences, and source
+  provenance; no raw claims/evidence.
+- `GET /v1/feed.ics?...` - any filter combo as a calendar subscription;
+  `exclude_sex_service_context=true` removes positively known commercial
+  sex-service contexts while retaining unknowns.
 - `GET /v1/changes?since=<cursor>` - delta stream over event updates.
 - `POST /v1/reports` `{occurrence_id, reason: wrong|cancelled|duplicate, note}` - flag bad data; feeds source trust.
 - `GET /v1/search?q=...` - natural-language convenience endpoint (the index
@@ -156,4 +161,8 @@ queries are COMPOSITIONS you build at query time. Examples:
 - `POST /mcp` - MCP server (streamable HTTP, stateless, no auth): the same
   read surface as tools (search_events, get_event, get_calendar_link,
   search, fetch) for MCP clients - ChatGPT apps/connectors, Claude
-  connectors. Point your client at https://wasup.at/mcp
+  connectors. MCP policy is stricter than the general REST query: omitted or
+  false sex_service_context hard-excludes known true events; only explicit
+  true on search_events/get_event permits them, while standard search/fetch
+  and generated calendar links always exclude them. Point your client at
+  https://wasup.at/mcp

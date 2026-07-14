@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from eventindex.api.app import app
 
@@ -137,6 +138,27 @@ def test_feed_ics_serves_filtered_calendar(client):
     only_music = client.get("/v1/feed.ics", params={"category": "learning"})
     assert b"Unknown Location Talk" in only_music.content
     assert b"Nearby Concert" not in only_music.content
+
+
+def test_feed_can_exclude_known_adult_context_without_dropping_unknown(conn, client):
+    adult_id = _add_event(
+        conn, "Commercial Adult Venue Party", starts=NOW + timedelta(days=1),
+        lat=48.3069, lon=14.2858, category=["nightlife"],
+    )
+    conn.execute(
+        "UPDATE event SET inferred = %s WHERE id = %s",
+        (Jsonb({"sex_service_context": {
+            "value": True, "confidence": 0.8, "evidence": "venue",
+        }}), adult_id),
+    )
+    conn.commit()
+    default = client.get("/v1/feed.ics")
+    assert b"Commercial Adult Venue Party" in default.content
+    safe = client.get(
+        "/v1/feed.ics", params={"exclude_sex_service_context": "true"}
+    )
+    assert b"Commercial Adult Venue Party" not in safe.content
+    assert b"Unknown Location Talk" in safe.content
 
 
 def test_report_enqueues_qa_check(conn, client):

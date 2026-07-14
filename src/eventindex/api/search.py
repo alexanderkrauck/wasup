@@ -128,8 +128,10 @@ class SearchFilters(BaseModel):
     language: Literal["de", "en"] | None
     sex_service_context: bool | None = Field(
         description="event at a commercial sex establishment (Bordell, "
-        "strip club, swinger club) - NOT mere 18+ nightlife; set false BY "
-        "DEFAULT, leave unset only if the user asks for that milieu"
+        "strip club, swinger club) - NOT mere 18+ nightlife. On the public "
+        "query API this remains a soft preference. The ChatGPT search tool "
+        "hard-excludes known true values when omitted or false; true is an "
+        "explicit request to permit that context"
     )
     required_attributes: list[str] = Field(
         description="attribute names the user makes NON-NEGOTIABLE "
@@ -326,7 +328,10 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
 
 # ------------------------------------------------------------------- SQL
 
-def build_sql(f: SearchFilters) -> tuple[str, dict]:
+def build_sql(
+    f: SearchFilters, *, exclude_sex_service_context: bool = False,
+    include_inferred_terms: bool = True,
+) -> tuple[str, dict]:
     """HARD conditions only: guarantees + attributes marked required.
     null attribute = unknown = never matches a hard constraint (§7)."""
     conditions = ["o.status = 'scheduled'"]
@@ -402,8 +407,12 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
             alts.append(
                 f"e.title ~* %({key})s "
                 f"OR coalesce(v.name ~* %({key})s, false) "
-                f"OR coalesce(e.organizer ~* %({key})s, false) "
-                f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false)"
+                f"OR coalesce(e.organizer ~* %({key})s, false)"
+                + (
+                    f" OR coalesce(e.inferred->'vibe_tags' @> "
+                    f"to_jsonb(lower(%({key}raw)s)::text), false)"
+                    if include_inferred_terms else ""
+                )
             )
             # multi-word terms tolerate hyphen/compound spelling: 'krone
             # fest' must find 'Krone-Fest' AND 'Kronefest' (audit B4)
@@ -416,6 +425,16 @@ def build_sql(f: SearchFilters) -> tuple[str, dict]:
     elif f.max_price is not None:
         conditions.append("e.price_min <= %(max_price)s")
         params["max_price"] = f.max_price
+
+    if exclude_sex_service_context:
+        # MCP-safe default: suppress only a positively known commercial-sex
+        # context. NULL stays visible because null means unknown throughout
+        # the public index. The public API never enables this implicitly.
+        conditions.append(
+            "coalesce(v.sex_service, false) IS DISTINCT FROM TRUE AND "
+            "(e.inferred->'sex_service_context'->>'value')::bool "
+            "IS DISTINCT FROM TRUE"
+        )
 
     wanted = _wanted(f)
     for name in f.required_attributes:

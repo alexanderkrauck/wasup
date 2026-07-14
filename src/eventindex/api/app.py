@@ -267,7 +267,7 @@ def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
 
 def _occurrence_filters(
     from_, to, near, radius, bbox, category, min_confidence,
-    include_terms=None,
+    include_terms=None, exclude_sex_service_context: bool = False,
 ) -> tuple[list[str], dict]:
     """The shared filter set of /v1/occurrences and /v1/feed.ics."""
     from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER
@@ -348,6 +348,14 @@ def _occurrence_filters(
             params[key] = rf"\m{pat}|{pat}\M"
         if alts:
             conditions.append("(" + " OR ".join(alts) + ")")
+    if exclude_sex_service_context:
+        # Keep unknown classifications: the MCP safety policy suppresses
+        # only events positively identified as commercial sex services.
+        conditions.append(
+            "coalesce(v.sex_service, false) IS DISTINCT FROM TRUE AND "
+            "(e.inferred->'sex_service_context'->>'value')::bool "
+            "IS DISTINCT FROM TRUE"
+        )
     return conditions, params
 
 
@@ -423,13 +431,19 @@ def feed_ics(
     category: str | None = Query(None, description="comma-separated"),
     min_confidence: float | None = Query(None, ge=0, le=1),
     include_terms: str | None = Query(None, description="comma-separated"),
+    exclude_sex_service_context: bool = Query(
+        False,
+        description="exclude events positively identified as taking place "
+        "in a commercial sex-service context; unknown remains included",
+    ),
     limit: int = Query(500, le=1000, ge=1),
 ):
     """Any filter combo as a calendar subscription (§9)."""
     from icalendar import Calendar, Event as ICalEvent
 
     conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence, include_terms
+        from_, to, near, radius, bbox, category, min_confidence, include_terms,
+        exclude_sex_service_context,
     )
     params["limit"] = limit
     sql = f"""
@@ -469,14 +483,20 @@ def feed_ics(
 def _run_filters(filters, limit: int,
                  importance: dict[str, float] | None = None,
                  sort: str = "relevance", distinct: bool = False,
-                 offset: int = 0) -> dict:
+                 offset: int = 0,
+                 exclude_sex_service_context: bool = False,
+                 include_inferred_terms: bool = True) -> dict:
     """The deterministic search core shared by /v1/search and /v1/query:
     guarantees as set logic in SQL; soft attribute preferences scored as
     importance x certainty; vibe terms only rank."""
     from eventindex.api.search import attribute_select, build_sql, rank
 
     with db.connect() as conn:
-        where, params = build_sql(filters)
+        where, params = build_sql(
+            filters,
+            exclude_sex_service_context=exclude_sex_service_context,
+            include_inferred_terms=include_inferred_terms,
+        )
         # soft preferences reorder, so the pool must cover the WHOLE window -
         # a small pool ordered by starts_at would only ever score the first
         # days (bit us live: a 14-day running query missed day-3 events). At
@@ -632,48 +652,98 @@ def query(
                         sort=sort, distinct=distinct == "event", offset=offset)
 
 
-@app.get("/v1/events/{event_id}")
-def event(event_id: UUID):
+def _safe_estimates(inferred: dict | None) -> dict:
+    """Expose estimate values and certainties without raw evidence snippets.
+
+    Evidence originates in source text and can repeat a private address or
+    personal contact that the canonical projection intentionally suppressed.
+    """
+    safe: dict = {}
+    for name, value in (inferred or {}).items():
+        if name == "vibe_tags":
+            # Legacy enrichment rows predate the six-tag clamp and some
+            # contain model rambling; never turn that into a giant MCP dump.
+            safe[name] = [str(tag)[:25] for tag in list(value or [])[:6]]
+        elif isinstance(value, dict):
+            safe[name] = {
+                "value": value.get("value"),
+                "confidence": value.get("confidence"),
+            }
+        else:
+            safe[name] = {"value": value, "confidence": None}
+    return safe
+
+
+def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dict:
+    """Sanitized public event detail; raw append-only claims never leave DB."""
     with db.connect() as conn:
         row = conn.execute(
             f"""
-            SELECT e.*, ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
+            SELECT e.id, e.kind, e.parent_event_id, e.title, e.description,
+                   e.rights, e.category, e.tags, e.is_recurring, e.rrule,
+                   e.registration_required, e.registration_deadline,
+                   e.booking_url, e.late_entry_ok,
+                   e.price_min, e.price_max, e.url, e.image_url, e.lang,
+                   e.expected_age_range, e.expected_age_range_confidence,
+                   e.expected_gender_split,
+                   e.expected_gender_split_confidence,
+                   e.expected_attendance, e.expected_attendance_confidence,
+                   e.inferred, e.confidence, e.status,
+                   e.first_seen, e.last_seen, e.updated_at, e.organizer,
+                   v.name AS venue_name, v.address AS venue_address,
+                   v.sex_service AS venue_sex_service,
+                   ST_Y(coalesce(e.geo, v.geo)) AS lat,
+                   ST_X(coalesce(e.geo, v.geo)) AS lon,
                    ({_PROVENANCE_SQL}) AS provenance_summary
-            FROM event e WHERE e.id = %s
+            FROM event e LEFT JOIN venue v ON v.id = e.venue_id
+            WHERE e.id = %s
             """,
             (event_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(404, "event not found")
-        del row["geo"], row["vibe_embedding"]
-        # int4range is not JSON-serializable - enriched events 500ed here
-        # (found by the first external consumer, 2026-07-09)
+        inferred = row.pop("inferred") or {}
+        sex_service_context = row.pop("venue_sex_service") is True or (
+            inferred.get("sex_service_context", {}).get("value") is True
+        )
+        row["estimates"] = _safe_estimates(inferred)
         if row.get("expected_age_range") is not None:
             row["expected_age_range"] = str(row["expected_age_range"])
         occurrences = conn.execute(
             "SELECT id, starts_at, ends_at, status, projected, availability, "
-            "last_confirmed_at FROM occurrence WHERE event_id = %s "
+            "waitlist_url, fullness_estimate, last_confirmed_at, time_unknown "
+            "FROM occurrence WHERE event_id = %s "
             "ORDER BY starts_at",
             (event_id,),
         ).fetchall()
-        claims = conn.execute(
+        sources = conn.execute(
             """
-            SELECT c.id, s.name AS source, c.extracted_at, c.payload
+            SELECT s.name, s.url, max(c.extracted_at) AS extracted_at
             FROM identity i
             JOIN event_claim c ON c.fingerprint = i.fingerprint
             JOIN source s ON s.id = c.source_id
-            WHERE i.event_id = %s ORDER BY c.extracted_at DESC
+            WHERE i.event_id = %s AND s.kind <> 'internal'
+            GROUP BY s.id, s.name, s.url
+            ORDER BY max(c.extracted_at) DESC
             """,
             (event_id,),
         ).fetchall()
         freshness = _data_freshness(conn)
 
-    return {
+    detail = {
         "data_freshness": freshness,
         "event": row,
         "occurrences": occurrences,
-        "claims": claims,
+        "sources": sources,
     }
+    if include_policy_marker:
+        detail["_sex_service_context"] = sex_service_context
+    return detail
+
+
+@app.get("/v1/events/{event_id}")
+def event(event_id: UUID):
+    return _event_detail(event_id)
 
 
 class Report(BaseModel):

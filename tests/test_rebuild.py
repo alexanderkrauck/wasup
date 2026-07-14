@@ -497,9 +497,9 @@ def test_dateonly_claim_confirms_timed_occurrence(conn):
     assert occs[0]["starts_at"].astimezone(rb.VIENNA).hour == 19
 
 
-def test_inverted_and_multiyear_spans_become_unknown(conn):
-    """A21: offerings arrived as one two-year occurrence; 4 spans ended
-    before they started."""
+def test_invalid_and_validity_spans_become_unknown_but_exhibitions_survive(conn):
+    """Validity periods must not become continuous occurrences; genuine
+    long exhibitions still use overlap semantics."""
     sid = _source(conn, "s1", 0.8)
     _claim(conn, sid,
            _concert("Friday Night Magic", starts="2026-07-10T18:00:00+02:00",
@@ -509,9 +509,28 @@ def test_inverted_and_multiyear_spans_become_unknown(conn):
            _concert("HA", starts="2026-10-05T20:00:00+02:00",
                     ends_at=("2026-06-05T20:00:00+02:00", 0.9)),
            "ha|2026-10-05|v")
+    _claim(conn, sid,
+           _concert("Weekly Music Validity", starts="2026-07-10T18:00:00+02:00",
+                    ends_at=("2026-08-31T18:00:00+02:00", 0.9),
+                    category=(["music"], 0.9)),
+           "weekly validity|2026-07-10|v")
+    _claim(conn, sid,
+           _concert("Summer Exhibition", starts="2026-07-10T10:00:00+02:00",
+                    ends_at=("2026-10-10T18:00:00+02:00", 0.9),
+                    category=(["art"], 0.9)),
+           "summer exhibition|2026-07-10|v")
     rb.rebuild(conn, now=NOW)
-    ends = [r["ends_at"] for r in conn.execute("SELECT ends_at FROM occurrence")]
-    assert ends == [None, None]
+    ends = {
+        r["title"]: r["ends_at"]
+        for r in conn.execute(
+            "SELECT e.title, o.ends_at FROM occurrence o "
+            "JOIN event e ON e.id = o.event_id"
+        )
+    }
+    assert ends["Friday Night Magic"] is None
+    assert ends["HA"] is None
+    assert ends["Weekly Music Validity"] is None
+    assert ends["Summer Exhibition"] is not None
 
 
 def test_no_event_row_ever_lacks_occurrences(conn):

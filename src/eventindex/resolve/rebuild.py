@@ -759,14 +759,26 @@ def _deep_url(url: str | None) -> bool:
     return bool(url) and not _BARE_DOMAIN_RE.match(url)
 
 
-_MAX_SPAN = timedelta(days=370)
+_MAX_EVENT_SPAN = timedelta(days=14)
+_MAX_EXHIBITION_SPAN = timedelta(days=370)
 
 
-def _sane_end(starts: datetime, ends: datetime | None) -> datetime | None:
-    """ends_at is claim data and claims lie: inverted spans and multi-year
-    'validity periods' (a weekly offering stored as one two-year occurrence,
-    audit A21) become NULL = unknown."""
-    if ends is None or ends < starts or ends - starts > _MAX_SPAN:
+def _sane_end(
+    starts: datetime, ends: datetime | None, categories: list[str] | None = None,
+) -> datetime | None:
+    """Reject validity periods masquerading as continuous occurrences.
+
+    Long art/culture exhibitions are real overlapping events. For ordinary
+    activities, courses, markets, and series, a span beyond two weeks is a
+    schedule validity range and must not make the event appear to run every
+    minute for months.
+    """
+    max_span = (
+        _MAX_EXHIBITION_SPAN
+        if set(categories or []) & {"art", "culture"}
+        else _MAX_EVENT_SPAN
+    )
+    if ends is None or ends < starts or ends - starts > max_span:
         return None
     return ends
 
@@ -798,7 +810,11 @@ def _fold_pairs(cands: list[tuple[datetime, datetime | None, bool]]) -> list:
 
 def _claim_cands(claims: list) -> list[tuple[datetime, datetime | None, bool]]:
     return [
-        (c.starts_at, _sane_end(c.starts_at, c.ends_at), c.has_time)
+        (
+            c.starts_at,
+            _sane_end(c.starts_at, c.ends_at, c.value("category")),
+            c.has_time,
+        )
         for c in claims
     ]
 
@@ -833,7 +849,9 @@ def _occurrences_for(
             horizon = now + recurrence.timedelta(weeks=recurrence.EXPANSION_WEEKS)
             duration = None
             first = g["claims"][0]
-            if first.ends_at and _sane_end(first.starts_at, first.ends_at):
+            if first.ends_at and _sane_end(
+                first.starts_at, first.ends_at, first.value("category")
+            ):
                 duration = first.ends_at - first.starts_at
             pairs = [
                 (o, o + duration if duration else None)

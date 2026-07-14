@@ -91,7 +91,7 @@
       "user_prompt": "Give me a calendar subscription link for music events in Linz during the next calendar month.",
       "file_attachment_urls": null,
       "tools_triggered": "get_calendar_link",
-      "expected_output": "A wasup.at HTTPS .ics subscription URL containing the requested category, relative date filters, and the app's default adult-context exclusion, plus a brief instruction to add it to a calendar app.",
+      "expected_output": "A clickable wasup.at HTTPS .ics subscription URL containing the requested category, relative date filters, and the app's default adult-context exclusion.",
       "expected_output_url": "https://wasup.at/v1/feed.ics"
     },
     {
@@ -107,7 +107,7 @@
       "user_prompt": "Search for running events in Linz and fetch the full event document for the first result.",
       "file_attachment_urls": null,
       "tools_triggered": "search, fetch",
-      "expected_output": "Only relevant future-starting running-event search results, followed by the first event's sanitized title, current or future dates, categories, price, sources, confidence metadata, and inferred attributes labeled as estimates.",
+      "expected_output": "Only relevant future-starting running-event search results, followed by the first event's sanitized title, current or future dates, categories, price, sources, confidence metadata, and any available inferred attributes labeled as estimates.",
       "expected_output_url": null
     }
   ],
@@ -117,7 +117,7 @@
       "user_prompt": "What concerts are happening in Vienna tonight?",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "Explain that Wasup covers Linz and the surrounding area, then answer without invoking the app or ask whether the user wants Linz results instead.",
+      "expected_output": "Do not invoke Wasup. Answer from an appropriate Vienna source, or explain Wasup's Linz-area scope and ask whether the user wants Linz results instead.",
       "expected_output_url": null
     },
     {
@@ -133,7 +133,7 @@
       "user_prompt": "Create a private birthday party in my calendar tomorrow and invite my contacts.",
       "file_attachment_urls": null,
       "tools_triggered": null,
-      "expected_output": "Do not invoke Wasup; explain that it searches public Linz events and cannot create calendar events or send invitations.",
+      "expected_output": "Do not invoke Wasup. Use an appropriate calendar capability if available, ask for the details required to proceed, or explain that Wasup cannot create events or send invitations.",
       "expected_output_url": null
     }
   ]

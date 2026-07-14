@@ -380,6 +380,33 @@ def test_bare_validity_range_cannot_invent_daily_occurrences(conn):
     } == {"2026-07-12", "2026-07-17", "2026-07-19"}
 
 
+def test_explicit_daily_wording_still_expands(conn):
+    sid = _source(conn, "museum", 0.8)
+    daily = {
+        "freq": "daily", "weekday": None, "week_of_month": None,
+        "interval": 1, "time": "10:00", "duration_minutes": 30,
+        "except_holidays": [], "valid_from": "2026-07-12",
+        "valid_until": "2026-07-14", "as_stated": "mehrmals am Tag",
+    }
+    _claim(
+        conn, sid,
+        _concert(
+            "Deep Space Selection", starts="2026-07-12T10:00:00+02:00",
+            venue="AEC", recurrence=(daily, 0.9),
+        ),
+        "deep space selection|2026-07-12|feed",
+    )
+
+    rb.rebuild(conn, now=NOW)
+
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert events[0]["kind"] == "series"
+    assert {
+        o["starts_at"].astimezone(rb.VIENNA).date().isoformat() for o in occs
+    } == {"2026-07-12", "2026-07-13", "2026-07-14"}
+
+
 def test_text_recurrence_verified_at_birth(conn, monkeypatch):
     """A text-extracted rule the verifier rejects (wrong weekday) must never
     become a series - the claim stays a one-off and the rejection is cached."""

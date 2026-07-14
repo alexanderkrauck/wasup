@@ -220,7 +220,9 @@ def _recurrence_of(c: Claim) -> Recurrence | None:
 
 
 _DAILY_CADENCE_RE = re.compile(
-    r"\b(täglich|taeglich|jeden\s+tag|alle\s+tage|daily|every\s+day)\b",
+    r"\b(täglich|taeglich|jeden\s+tag|alle\s+tage|daily|every\s+day"
+    r"|mehr(mals|fach)\s+(am|pro)\s+tag"
+    r"|(several|multiple)\s+times\s+(a|per)\s+day)\b",
     re.IGNORECASE,
 )
 

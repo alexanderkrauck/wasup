@@ -5,7 +5,7 @@ description: Query Wasup (wasup.at), the Linz event index (every public event in
 
 # Querying Wasup — the Linz Event Index
 
-Base URL: https://wasup.goedly.com — reads need NO key (rate-limited
+Base URL: https://wasup.at — reads need NO key (rate-limited
 60/min); an `X-API-Key` header lifts the limit and unlocks /v1/search and
 /v1/reports.
 

@@ -1,6 +1,6 @@
 # Wasup — Linz Event Index
 
-Live at: https://wasup.goedly.com (canonical home; wasup.at planned)
+Live at: https://wasup.at (canonical home; wasup.goedly.com is a legacy alias)
 
 An index of every public event in Linz, Austria (and ~25km around): concerts,
 theatre, sport courses, Vereine, markets, church fests, gym timetables - the
@@ -156,4 +156,4 @@ queries are COMPOSITIONS you build at query time. Examples:
 - `POST /mcp` - MCP server (streamable HTTP, stateless, no auth): the same
   read surface as tools (search_events, get_event, get_calendar_link,
   search, fetch) for MCP clients - ChatGPT apps/connectors, Claude
-  connectors. Point your client at https://wasup.goedly.com/mcp
+  connectors. Point your client at https://wasup.at/mcp

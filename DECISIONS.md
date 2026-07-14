@@ -47,6 +47,9 @@ Internal module APIs, test organization, exact index DDL, digest formatting, log
 
 ## Changelog (agent appends one-liners here)
 
+- 2026-07-14: frontend scope fence extended by Alexander (plugin submissions need the URLs): landing page at `/` with install instructions (calendar moved to `/calendar`), `/terms`, `/support`, `/privacy` now styled HTML (privacy.md deleted), `/logo.png`. Canonical domain switched to wasup.at (live with TLS since today); wasup.goedly.com stays a serving alias and accepted MCP Host for pre-existing connectors.
+- 2026-07-14: selected the Austrian red-white-red shouting-pin mascot as the Wasup submission logo and saved the 1254px PNG at `assets/wasup-logo.png`.
+- 2026-07-14: added `chatgpt-app-submission.json` from the live five-tool MCP descriptor: submission metadata, exact tool-hint justifications, five positive review cases, and three negative trigger cases; no app/server behavior changed.
 - 2026-07-03: kit created; no code exists yet.
 - 2026-07-03: OPEN-QUESTIONS #1-3, #6 answered (OpenRouter, local Docker Postgres for dev, gmail contact, local git); details there.
 - 2026-07-03: phase 0 built. Class B picks: src/ layout (uv default), initial models mini=openai/gpt-5-mini mid=anthropic/claude-sonnet-4.5 frontier=anthropic/claude-opus-4.5, retry backoff 60s×5^n (3 attempts), digest to var/digests/ as text file. Dev DB image is pgvector base + PostGIS apt package (postgis/postgis has no arm64).

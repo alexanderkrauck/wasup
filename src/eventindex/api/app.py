@@ -46,9 +46,10 @@ _EFFECTIVE_CONFIDENCE_SQL = """
 
 
 # discovery surfaces stay open like /docs: they carry no data, only the
-# instructions an agent needs before it has a key ("/" is the plain human
-# calendar page; the data it fetches goes through the rate-limited reads)
-_OPEN_PATHS = {"/", "/llms.txt", "/.well-known/api-catalog", "/privacy"}
+# instructions an agent needs before it has a key (the human pages fetch
+# their data through the rate-limited reads)
+_OPEN_PATHS = {"/", "/calendar", "/llms.txt", "/.well-known/api-catalog",
+               "/privacy", "/terms", "/support", "/logo.png"}
 
 # read-only surfaces are keyless (public data, zero LLM cost - /v1/query is
 # pure Postgres by design) but rate-limited per IP. /v1/search stays keyed
@@ -171,7 +172,20 @@ def llms_txt():
     )
 
 
+def _page(name: str) -> Response:
+    return Response((Path(__file__).parent / name).read_text(),
+                    media_type="text/html; charset=utf-8")
+
+
 @app.get("/", include_in_schema=False)
+def landing_page():
+    """Landing + install instructions (scope fence extended to landing,
+    terms, privacy, support by Alexander, 2026-07-14 — plugin-directory
+    submissions require them)."""
+    return _page("index.html")
+
+
+@app.get("/calendar", include_in_schema=False)
 def calendar_page():
     """One plain HTML calendar view over the public read API (frontend scope
     fence lifted for exactly this page by Alexander, 2026-07-09)."""
@@ -184,9 +198,25 @@ def calendar_page():
 
 @app.get("/privacy", include_in_schema=False)
 def privacy():
-    """GDPR-facing policy; also a ChatGPT app-directory requirement."""
-    return Response((Path(__file__).parent / "privacy.md").read_text(),
-                    media_type="text/markdown")
+    """GDPR-facing policy; also a plugin-directory requirement."""
+    return _page("privacy.html")
+
+
+@app.get("/terms", include_in_schema=False)
+def terms():
+    return _page("terms.html")
+
+
+@app.get("/support", include_in_schema=False)
+def support():
+    return _page("support.html")
+
+
+@app.get("/logo.png", include_in_schema=False)
+def logo():
+    return Response((Path(__file__).parent / "wasup-logo.png").read_bytes(),
+                    media_type="image/png",
+                    headers={"cache-control": "public, max-age=86400"})
 
 
 @app.get("/.well-known/api-catalog", include_in_schema=False)

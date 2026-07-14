@@ -22,8 +22,12 @@ from mcp.types import ToolAnnotations
 
 from eventindex.api.search import QueryBody
 
-BASE_URL = "https://wasup.goedly.com"
+BASE_URL = "https://wasup.at"
+# first-deploy domain; connectors registered before 2026-07-14 still send
+# this Host, so it stays accepted (Caddy serves both)
+_LEGACY_URL = "https://wasup.goedly.com"
 _HOST = BASE_URL.removeprefix("https://")
+_LEGACY_HOST = _LEGACY_URL.removeprefix("https://")
 
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, openWorldHint=False
@@ -57,8 +61,10 @@ mcp = FastMCP(
     # the SDK's DNS-rebinding guard rejects unknown Host headers; Caddy
     # forwards the public host, dev/tests arrive as localhost/testserver
     transport_security=TransportSecuritySettings(
-        allowed_hosts=[_HOST, "localhost:*", "127.0.0.1:*", "testserver"],
-        allowed_origins=[BASE_URL, "http://localhost:*", "http://127.0.0.1:*"],
+        allowed_hosts=[_HOST, _LEGACY_HOST, "localhost:*", "127.0.0.1:*",
+                       "testserver"],
+        allowed_origins=[BASE_URL, _LEGACY_URL, "http://localhost:*",
+                         "http://127.0.0.1:*"],
     ),
 )
 

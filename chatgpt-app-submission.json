@@ -1,0 +1,140 @@
+{
+  "$schema": "https://developers.openai.com/apps-sdk/schemas/chatgpt-app-submission.v1.json",
+  "schema_version": 1,
+  "app_info": {
+    "display_name": "Wasup — Linz Event Index",
+    "subtitle": "Find events around Linz",
+    "description": "Wasup helps people discover public events in and around Linz, Austria. Users can search by date, category, price, location, exclusions, and audience preferences; inspect an event's dates, venue, confidence, and source provenance; or create a filtered calendar subscription link. Results come from a continuously refreshed, deduplicated public event index, and inferred attributes and projected dates are clearly labeled as estimates.",
+    "category": "LIFESTYLE"
+  },
+  "tools": {
+    "search_events": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Searches the existing public event index and returns matching records without creating, updating, or deleting data.",
+        "open_world_justification": "Queries only Wasup's existing event index and does not access arbitrary external websites or services.",
+        "destructive_justification": "Performs no deletion, cancellation, or other irreversible action and leaves the event index unchanged."
+      }
+    },
+    "get_event": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Retrieves one existing public event record, including occurrences and provenance, without changing any stored data.",
+        "open_world_justification": "Reads the requested record only from Wasup's event index and does not contact its source websites.",
+        "destructive_justification": "Does not modify or remove the event, its occurrences, its claims, or any other record."
+      }
+    },
+    "get_calendar_link": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Constructs and returns a Wasup calendar subscription URL from the supplied filters without storing a subscription or changing data.",
+        "open_world_justification": "Builds a URL on Wasup's own domain and does not contact a calendar provider or any arbitrary external service.",
+        "destructive_justification": "Creates no calendar entries and performs no deletion or other irreversible operation."
+      }
+    },
+    "search": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Searches existing upcoming events by keyword and returns result stubs without changing the index.",
+        "open_world_justification": "Searches only Wasup's indexed event data and does not perform an open-web search.",
+        "destructive_justification": "Does not create, update, delete, or cancel any event or other record."
+      }
+    },
+    "fetch": {
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false,
+        "destructiveHint": false
+      },
+      "justifications": {
+        "read_only_justification": "Retrieves the existing event document for one search result without changing any stored data.",
+        "open_world_justification": "Reads the event only from Wasup's index and does not fetch the linked source URL or access another service.",
+        "destructive_justification": "Performs no write, deletion, cancellation, or other irreversible action."
+      }
+    }
+  },
+  "test_cases": [
+    {
+      "description": "Find affordable events in a defined time window while honoring a hard exclusion.",
+      "user_prompt": "What is happening in Linz this Friday evening for under €20? Please exclude techno events.",
+      "file_attachment_urls": null,
+      "tools_triggered": "search_events",
+      "expected_output": "A linked list or table of every returned matching event with Europe/Vienna date and time, venue, and price, with no techno results.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Retrieve full provenance and occurrence details for a selected event.",
+      "user_prompt": "Find a concert in Linz next week, then show me the full details and source provenance for the first result.",
+      "file_attachment_urls": null,
+      "tools_triggered": "search_events, get_event",
+      "expected_output": "A matching concert followed by its known occurrences, event fields, confidence information, and reporting-source provenance.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Create a filtered calendar subscription URL without subscribing on the user's behalf.",
+      "user_prompt": "Give me a calendar subscription link for music events in Linz from August 1 through August 31, 2026.",
+      "file_attachment_urls": null,
+      "tools_triggered": "get_calendar_link",
+      "expected_output": "A Wasup HTTPS .ics subscription URL containing the requested category and date filters, plus a brief instruction to add it to a calendar app.",
+      "expected_output_url": "https://wasup.goedly.com/v1/feed.ics"
+    },
+    {
+      "description": "Exercise the standard keyword search contract for event discovery.",
+      "user_prompt": "Search the Linz event index for salsa.",
+      "file_attachment_urls": null,
+      "tools_triggered": "search",
+      "expected_output": "Up to ten relevant upcoming event stubs with an event id, descriptive title, and URL for each result.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Exercise the standard search-then-fetch contract and preserve estimate labels.",
+      "user_prompt": "Search for running events in Linz and fetch the full event document for the first result.",
+      "file_attachment_urls": null,
+      "tools_triggered": "search, fetch",
+      "expected_output": "Keyword search results followed by the first event's title, dates, categories, price, sources, confidence metadata, and any inferred attributes labeled as estimates.",
+      "expected_output_url": null
+    }
+  ],
+  "negative_test_cases": [
+    {
+      "description": "Do not use Wasup for events outside the Linz-area scope.",
+      "user_prompt": "What concerts are happening in Vienna tonight?",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "Explain that Wasup covers Linz and the surrounding area, then answer without invoking the app or ask whether the user wants Linz results instead.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not use the event index for unrelated local-business recommendations.",
+      "user_prompt": "Recommend a quiet Italian restaurant in Linz for dinner.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "Answer using an appropriate restaurant source or general knowledge without invoking Wasup.",
+      "expected_output_url": null
+    },
+    {
+      "description": "Do not imply that the read-only app can create or manage private events.",
+      "user_prompt": "Create a private birthday party in my calendar tomorrow and invite my contacts.",
+      "file_attachment_urls": null,
+      "tools_triggered": null,
+      "expected_output": "Do not invoke Wasup; explain that it searches public Linz events and cannot create calendar events or send invitations.",
+      "expected_output_url": null
+    }
+  ]
+}

@@ -413,6 +413,8 @@ document.querySelectorAll("[data-copy]").forEach(b =>
 /* live chat demo: real upcoming events from the index */
 const timeFmt = new Intl.DateTimeFormat("de-AT", { weekday: "short",
   hour: "2-digit", minute: "2-digit", timeZone: "Europe/Vienna" });
+const dayOnlyFmt = new Intl.DateTimeFormat("de-AT", { weekday: "short",
+  day: "numeric", month: "numeric", timeZone: "Europe/Vienna" });
 const msgs = document.getElementById("demo-msgs");
 
 function bubble(cls) {
@@ -455,8 +457,12 @@ async function demo() {
     const b = document.createElement("b");
     b.textContent = o.title;
     const meta = document.createElement("span");
-    meta.textContent = [timeFmt.format(new Date(o.starts_at)), o.venue_name]
-      .filter(Boolean).join(" · ");
+    // time_unknown: starts_at is a midnight placeholder, never show it;
+    // already-started ranges (overlap semantics) say so instead of a date
+    const start = new Date(o.starts_at);
+    const when = start < Date.now() ? "läuft bereits"
+      : o.time_unknown ? dayOnlyFmt.format(start) : timeFmt.format(start);
+    meta.textContent = [when, o.venue_name].filter(Boolean).join(" · ");
     ev.append(b, meta);
     bot.appendChild(ev);
     if (!reduced) await new Promise(r => setTimeout(r, 350));

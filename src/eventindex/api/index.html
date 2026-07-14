@@ -438,13 +438,16 @@ async function demo() {
 
   let evs = [];
   try {
-    const res = await fetch("/v1/occurrences?limit=25&from="
-      + new Date().toISOString().slice(0, 10));
-    const all = (await res.json()).occurrences || [];
-    // overlap semantics put long-running ranges first; a "what's coming
-    // up" demo prefers things that actually start in the future
-    const upcoming = all.filter(o => new Date(o.starts_at) > Date.now());
-    evs = (upcoming.length >= 3 ? upcoming : all).slice(0, 3);
+    // overlap semantics put ~400 long-running ranges first; a synthetic
+    // keyset cursor at "now" skips straight to what starts next (the
+    // cursor is the documented b64("ts|uuid") pagination format - if it
+    // ever changes, the catch below shows the static fallback)
+    const cursor = btoa(new Date().toISOString()
+      + "|00000000-0000-0000-0000-000000000000")
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const res = await fetch("/v1/occurrences?limit=3&cursor=" + cursor
+      + "&from=" + new Date().toISOString().slice(0, 10));
+    evs = (await res.json()).occurrences || [];
   } catch {}
   await new Promise(r => setTimeout(r, reduced ? 0 : 900));
   typing.remove();

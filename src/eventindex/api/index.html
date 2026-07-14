@@ -7,141 +7,363 @@
 <meta name="description" content="Alle öffentlichen Veranstaltungen in und um Linz — ein Event-Index für Menschen und KI-Assistenten. Nutzbar in ChatGPT, Claude und jedem Kalender.">
 <link rel="icon" href="/logo.png">
 <style>
-  :root { --rot: #ed2939; }
-  * { box-sizing: border-box; }
+  :root {
+    --rot: #ed2939; --rot-dunkel: #b81f2d; --tinte: #16181d;
+    --grau: #5b616e; --linie: #e9e9ec; --papier: #fffdfb;
+    --oai: #0d0d0d; --claude-bg: #f0eee6; --claude-akzent: #d97757;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html { scroll-behavior: smooth; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         margin: 0; color: #111; }
-  .flagband { height: 10px;
-         background: linear-gradient(180deg, var(--rot) 0 33%, #fff 33% 67%, var(--rot) 67% 100%);
-         border-bottom: 1px solid #eee; }
-  main { max-width: 58rem; margin: 0 auto; padding: 0 1rem 2rem; }
-  header { display: flex; gap: 1.2rem; align-items: center; margin: 2rem 0 1rem; }
-  header img { width: 96px; height: 96px; border-radius: 22%; }
-  h1 { margin: 0; font-size: 2.4rem; }
-  .sub { color: #555; margin: .2rem 0 0; font-size: 1.1rem; }
-  .facts { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1.4rem 0; }
-  .facts span { background: #fff5f5; border: 1px solid #ffd6d6; color: #8a0f1e;
-         padding: .3rem .7rem; border-radius: 999px; font-size: .95rem; }
-  h2 { color: var(--rot); border-bottom: 2px solid var(--rot);
-       padding-bottom: .2rem; margin: 2.2rem 0 .6rem; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-           gap: 1rem; }
-  .card { border: 1px solid #eee; border-top: 4px solid var(--rot);
-          border-radius: 8px; padding: .2rem 1.1rem .9rem; }
-  .card h3 { margin: .8rem 0 .3rem; }
-  .card ol { margin: .4rem 0; padding-left: 1.2rem; }
-  .card li { margin: .3rem 0; }
-  code { background: #f6f6f6; padding: .1rem .35rem; border-radius: 4px;
-         font-size: .92em; word-break: break-all; }
-  .note { color: #666; font-size: .9rem; }
-  a { color: #1a5bb0; }
-  .cta { display: inline-block; background: var(--rot); color: #fff;
-         text-decoration: none; padding: .55rem 1.1rem; border-radius: 6px;
-         font-weight: 600; margin: .4rem .4rem .4rem 0; }
-  .cta.ghost { background: #fff; color: var(--rot); border: 2px solid var(--rot); }
-  footer { border-top: 1px solid #eee; margin-top: 2.5rem; padding: 1rem 0;
-           color: #666; font-size: .9rem; }
+         color: var(--tinte); background: var(--papier); line-height: 1.55;
+         overflow-x: hidden; }
+  a { color: inherit; }
+  code { font-size: .92em; }
+
+  /* ---- flag band + nav ---- */
+  .flagband { height: 8px; background:
+    linear-gradient(180deg, var(--rot) 0 33%, #fff 33% 67%, var(--rot) 67% 100%); }
+  nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center;
+        gap: 1.4rem; padding: .6rem clamp(1rem, 4vw, 3rem);
+        background: rgba(255, 253, 251, .82); backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--linie); }
+  nav .brand { display: flex; align-items: center; gap: .55rem;
+        font-weight: 800; font-size: 1.15rem; text-decoration: none; }
+  nav .brand img { width: 34px; height: 34px; border-radius: 26%; }
+  nav .links { display: flex; gap: 1.1rem; margin-left: auto; font-size: .95rem; }
+  nav .links a { text-decoration: none; color: var(--grau); }
+  nav .links a:hover { color: var(--tinte); }
+  nav .go { background: var(--rot); color: #fff; text-decoration: none;
+        padding: .45rem 1rem; border-radius: 999px; font-weight: 700;
+        font-size: .95rem; transition: transform .15s, background .15s; }
+  nav .go:hover { background: var(--rot-dunkel); transform: translateY(-1px); }
+  @media (max-width: 720px) { nav .links { display: none; } }
+
+  /* ---- hero ---- */
+  .hero { position: relative; max-width: 72rem; margin: 0 auto;
+          padding: clamp(2.5rem, 7vh, 5rem) clamp(1rem, 4vw, 3rem) 2rem;
+          display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+          gap: clamp(1.5rem, 4vw, 3.5rem); align-items: center; }
+  @media (max-width: 860px) { .hero { grid-template-columns: 1fr; } }
+  .glow { position: absolute; inset: 0; z-index: -1; overflow: visible;
+          pointer-events: none; }
+  .glow::before { content: ""; position: absolute; width: 34rem; height: 34rem;
+          left: -10rem; top: -12rem; border-radius: 50%; filter: blur(60px);
+          background: radial-gradient(circle, rgba(237,41,57,.14), transparent 65%); }
+  .glow::after { content: ""; position: absolute; width: 30rem; height: 30rem;
+          right: -12rem; bottom: -14rem; border-radius: 50%; filter: blur(60px);
+          background: radial-gradient(circle, rgba(237,41,57,.10), transparent 65%); }
+  .drift { position: absolute; z-index: -1; font-size: 1.7rem; opacity: .18;
+          animation: drift 14s ease-in-out infinite; }
+  @keyframes drift {
+    0%, 100% { transform: translate(0, 0) rotate(-6deg); }
+    50% { transform: translate(14px, -22px) rotate(8deg); } }
+
+  .hero h1 { font-size: clamp(2.5rem, 6vw, 4.2rem); line-height: 1.05;
+          font-weight: 850; letter-spacing: -.02em; }
+  .hero h1 em { font-style: normal; background:
+          linear-gradient(100deg, var(--rot), #ff6b5e);
+          -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero .sub { margin-top: 1rem; font-size: clamp(1.05rem, 2vw, 1.25rem);
+          color: var(--grau); max-width: 34rem; }
+  .ctas { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1.6rem; }
+  .btn { display: inline-flex; align-items: center; gap: .55rem;
+          padding: .7rem 1.25rem; border-radius: 12px; font-weight: 700;
+          font-size: 1rem; text-decoration: none; border: 1px solid transparent;
+          transition: transform .15s, box-shadow .15s; }
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 22px rgba(22,24,29,.14); }
+  .btn svg { width: 20px; height: 20px; flex: none; }
+  .btn.oai { background: var(--oai); color: #fff; }
+  .btn.claude { background: var(--claude-bg); color: #191919;
+          border-color: #ddd6c8; }
+  .btn.claude svg { fill: var(--claude-akzent); }
+  .btn.plain { background: #fff; border-color: var(--linie); color: var(--tinte); }
+
+  /* hero entrance */
+  .hero .stage > * { opacity: 0; transform: translateY(14px);
+          animation: rise .6s cubic-bezier(.2,.7,.3,1) forwards; }
+  .hero .stage > *:nth-child(2) { animation-delay: .1s; }
+  .hero .stage > *:nth-child(3) { animation-delay: .2s; }
+  .hero .stage > *:nth-child(4) { animation-delay: .3s; }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+
+  /* ---- live chat demo ---- */
+  .demo { background: #fff; border: 1px solid var(--linie); border-radius: 18px;
+          box-shadow: 0 24px 60px -24px rgba(22,24,29,.25); overflow: hidden;
+          opacity: 0; transform: translateY(14px) scale(.98);
+          animation: rise .7s .25s cubic-bezier(.2,.7,.3,1) forwards; }
+  .demo header { display: flex; align-items: center; gap: .5rem;
+          padding: .6rem .9rem; border-bottom: 1px solid var(--linie);
+          font-size: .85rem; color: var(--grau); }
+  .demo header .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .demo header .live { margin-left: auto; color: #16833f; font-weight: 600; }
+  .demo header .live::before { content: "●"; margin-right: .3rem;
+          animation: blink 1.6s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .demo .msgs { padding: 1rem; display: flex; flex-direction: column;
+          gap: .7rem; min-height: 15rem; }
+  .bubble { max-width: 88%; padding: .6rem .85rem; border-radius: 14px;
+          font-size: .93rem; }
+  .bubble.user { align-self: flex-end; background: var(--rot); color: #fff;
+          border-bottom-right-radius: 4px; }
+  .bubble.bot { align-self: flex-start; background: #f4f4f6;
+          border-bottom-left-radius: 4px; }
+  .bubble.bot .ev { display: block; padding: .25rem 0; }
+  .bubble.bot .ev + .ev { border-top: 1px solid var(--linie); }
+  .bubble.bot .ev b { display: block; }
+  .bubble.bot .ev span { color: var(--grau); font-size: .86em; }
+  .typing span { display: inline-block; width: 6px; height: 6px; margin: 0 1.5px;
+          border-radius: 50%; background: #b6b9c2;
+          animation: bounce 1.2s infinite; }
+  .typing span:nth-child(2) { animation-delay: .15s; }
+  .typing span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 30% { transform: translateY(-5px); } }
+
+  /* ---- counters ---- */
+  .counters { max-width: 72rem; margin: 0 auto; display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+          gap: .8rem; padding: 1.5rem clamp(1rem, 4vw, 3rem) 0; }
+  .counter { background: #fff; border: 1px solid var(--linie);
+          border-radius: 14px; padding: .9rem 1rem; text-align: center; }
+  .counter b { display: block; font-size: 1.7rem; font-weight: 850;
+          color: var(--rot); font-variant-numeric: tabular-nums; }
+  .counter span { color: var(--grau); font-size: .88rem; }
+
+  /* ---- sections ---- */
+  section { max-width: 72rem; margin: 0 auto;
+          padding: clamp(2.5rem, 7vh, 4.5rem) clamp(1rem, 4vw, 3rem) 0; }
+  .kicker { color: var(--rot); font-weight: 800; text-transform: uppercase;
+          letter-spacing: .12em; font-size: .8rem; }
+  section h2 { font-size: clamp(1.7rem, 3.5vw, 2.4rem); letter-spacing: -.01em;
+          margin: .2rem 0 1.4rem; }
+
+  .reveal { opacity: 0; transform: translateY(22px);
+          transition: opacity .6s, transform .6s cubic-bezier(.2,.7,.3,1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* ---- vendor cards ---- */
+  .use { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+          gap: 1.1rem; }
+  .vcard { border-radius: 22px; padding: 1.5rem 1.5rem 1.3rem; position: relative;
+          transition: transform .2s, box-shadow .2s; }
+  .vcard:hover { transform: translateY(-4px);
+          box-shadow: 0 20px 44px -20px rgba(22,24,29,.35); }
+  .vcard .vhead { display: flex; align-items: center; gap: .6rem;
+          font-weight: 800; font-size: 1.15rem; margin-bottom: .9rem; }
+  .vcard .vhead svg, .vcard .vhead img { width: 26px; height: 26px; flex: none; }
+  .vcard ol { padding-left: 1.25rem; display: grid; gap: .55rem; }
+  .vcard .fuss { font-size: .85rem; margin-top: .9rem; opacity: .75; }
+  .mcp { display: flex; align-items: center; gap: .5rem; margin-top: 1rem;
+          border-radius: 10px; padding: .5rem .7rem; font-family: ui-monospace,
+          SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  .mcp button { margin-left: auto; border: 0; border-radius: 7px; cursor: pointer;
+          font-weight: 700; font-size: .8rem; padding: .3rem .7rem; flex: none; }
+
+  .vcard.oai { background: var(--oai); color: #ececec; }
+  .vcard.oai .vhead svg { fill: #fff; }
+  .vcard.oai a { color: #9fd3ff; }
+  .vcard.oai .mcp { background: #1d1d1f; color: #d6f5c9; }
+  .vcard.oai .mcp button { background: #fff; color: #0d0d0d; }
+
+  .vcard.claude { background: var(--claude-bg); color: #23201a;
+          border: 1px solid #e2dccd; }
+  .vcard.claude .vhead { font-family: Georgia, "Times New Roman", serif;
+          font-weight: 700; }
+  .vcard.claude .vhead svg { fill: var(--claude-akzent); }
+  .vcard.claude .mcp { background: #fff; border: 1px solid #e2dccd;
+          color: #7a4a33; }
+  .vcard.claude .mcp button { background: var(--claude-akzent); color: #fff; }
+
+  .beispiele { margin-top: 1.2rem; color: var(--grau); }
+  .beispiele em { font-style: normal; background: #fff; border: 1px solid
+          var(--linie); border-radius: 999px; padding: .15rem .65rem;
+          white-space: nowrap; }
+
+  /* ---- principles ---- */
+  .prinzip { display: grid; grid-template-columns:
+          repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.1rem; }
+  .prinzip .p { background: #fff; border: 1px solid var(--linie);
+          border-radius: 18px; padding: 1.3rem; }
+  .prinzip .p .ico { font-size: 1.6rem; }
+  .prinzip .p h3 { margin: .5rem 0 .3rem; font-size: 1.05rem; }
+  .prinzip .p p { color: var(--grau); font-size: .95rem; }
+
+  /* ---- dev ---- */
+  .dev { background: var(--tinte); color: #e8e9ec; border-radius: 22px;
+          padding: 1.6rem clamp(1.2rem, 3vw, 2.2rem); }
+  .dev h2 { color: #fff; margin-bottom: .8rem; }
+  .dev a { color: #ffb3ab; }
+  .dev ul { padding-left: 1.2rem; display: grid; gap: .45rem; }
+  .dev code { background: #262a33; padding: .12rem .4rem; border-radius: 6px; }
+
+  /* ---- about + footer ---- */
+  .about { display: flex; gap: 1.4rem; align-items: center; }
+  .about img { width: 72px; height: 72px; border-radius: 26%; flex: none; }
+  .about p { color: var(--grau); }
+  footer { max-width: 72rem; margin: 3rem auto 0; padding: 1.2rem
+          clamp(1rem, 4vw, 3rem) 2rem; border-top: 1px solid var(--linie);
+          color: var(--grau); font-size: .9rem; }
+  footer a { color: var(--grau); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01s !important;
+          transition-duration: .01s !important; }
+    .hero .stage > *, .demo { opacity: 1; transform: none; }
+    .reveal { opacity: 1; transform: none; }
+  }
 </style>
 </head>
 <body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-openai" viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></symbol>
+    <symbol id="i-claude" viewBox="0 0 24 24"><path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.6211l3.0175.2247.7893.5221.4736.6375-.079.4857-1.2143.6193-1.6393-.3886-3.8251-.9107-1.3114-.3278h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2038-1.6575-.85-.7468-1.9246-1.6211h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246-1.4147-2.1675-1.1414-1.943-.1397.0789-.674 7.2554-.3157.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9247.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3703.0668-.6618.4007-.5889 2.3861-3.0357 1.4389-1.8821.929-1.0868-.0061-.1578h-.0546l-6.3383 4.1165-1.129.1457-.4857-.4553.0607-.7468.2307-.2429 1.9064-1.3114Z"/></symbol>
+  </defs>
+</svg>
+
 <div class="flagband"></div>
-<main>
 
-<header>
-  <img src="/logo.png" alt="Wasup Logo">
-  <div>
-    <h1>Wasup</h1>
-    <p class="sub">Was geht in Linz? Alle öffentlichen Veranstaltungen —
-    ein Index für Menschen und KI&#8209;Assistenten.</p>
+<nav>
+  <a class="brand" href="/"><img src="/logo.png" alt=""> Wasup</a>
+  <div class="links">
+    <a href="#chatgpt">ChatGPT</a>
+    <a href="#claude">Claude</a>
+    <a href="#dev">API</a>
   </div>
-</header>
+  <a class="go" href="#use">Loslegen</a>
+</nav>
 
-<div class="facts">
-  <span>13.000+ Termine</span>
-  <span>5.000+ Veranstaltungen</span>
-  <span>200+ Quellen</span>
-  <span>~25 km rund um Linz</span>
-  <span>täglich neu gecrawlt</span>
-</div>
+<div class="hero">
+  <div class="glow" aria-hidden="true"></div>
+  <span class="drift" style="left:6%; top:12%" aria-hidden="true">🎸</span>
+  <span class="drift" style="left:44%; top:6%; animation-delay:-4s" aria-hidden="true">🎭</span>
+  <span class="drift" style="left:88%; top:16%; animation-delay:-8s" aria-hidden="true">⚽️</span>
+  <span class="drift" style="left:12%; top:82%; animation-delay:-6s" aria-hidden="true">🎪</span>
+  <span class="drift" style="left:70%; top:88%; animation-delay:-10s" aria-hidden="true">💃</span>
 
-<p>Wasup sammelt Veranstaltungen direkt von den Websites der Veranstalter —
-auch die vielen kleinen, die auf keinem Portal stehen: das Konzert im
-Hinterhof, der Verein im Umland, der Stammtisch, der Ball. Dubletten werden
-zusammengeführt, Angaben mit Konfidenz bewertet. Und das Ehrlichkeitsprinzip
-gilt immer: <em>der Index behauptet nichts, was er nicht belegen kann.</em>
-Unbekanntes bleibt unbekannt statt geraten, Schätzungen und projizierte
-Wiederholungstermine sind als solche markiert.</p>
-
-<p>
-  <a class="cta" href="/calendar">Kalender ansehen</a>
-  <a class="cta ghost" href="/v1/feed.ics">.ics&#8209;Kalender abonnieren</a>
-</p>
-
-<h2>In ChatGPT verwenden</h2>
-<div class="cards">
-  <div class="card">
-    <h3>Aus dem App&#8209;Verzeichnis</h3>
-    <ol>
-      <li>In ChatGPT das App&#8209;Verzeichnis öffnen (<code>chatgpt.com/apps</code>)</li>
-      <li>Nach <strong>Wasup</strong> suchen</li>
-      <li><em>Connect</em> drücken — fertig</li>
-    </ol>
-    <p class="note">Die Einreichung läuft gerade — bis zur Freischaltung
-    funktioniert der Weg rechts.</p>
+  <div class="stage">
+    <h1>Was geht<br>wirklich in <em>Linz</em>?</h1>
+    <p class="sub">Wasup indexiert <strong>alle</strong> öffentlichen
+    Veranstaltungen in und um Linz — auch die, die auf keinem Portal stehen.
+    Und deine KI kann ihn direkt fragen.</p>
+    <div class="ctas">
+      <a class="btn oai" href="#chatgpt"><svg><use href="#i-openai"/></svg>In ChatGPT nutzen</a>
+      <a class="btn claude" href="#claude"><svg><use href="#i-claude"/></svg>In Claude nutzen</a>
+    </div>
   </div>
-  <div class="card">
-    <h3>Sofort, per Developer Mode</h3>
-    <ol>
-      <li>ChatGPT&nbsp;→ Settings&nbsp;→ <em>Apps &amp; Connectors</em>&nbsp;→
-          <em>Advanced</em>&nbsp;→ Developer Mode aktivieren</li>
-      <li><em>Create</em> wählen und als MCP&#8209;Server&#8209;URL
-          <code>https://wasup.at/mcp</code> eintragen (keine Authentifizierung)</li>
-      <li>Im Chat einfach fragen: „Was geht am Samstag in Linz?"</li>
-    </ol>
+
+  <div class="demo" aria-hidden="true">
+    <header>
+      <span class="dot" style="background:#ff5f57"></span>
+      <span class="dot" style="background:#febc2e"></span>
+      <span class="dot" style="background:#28c840"></span>
+      dein KI-Assistent
+      <span class="live">live aus dem Index</span>
+    </header>
+    <div class="msgs" id="demo-msgs"></div>
   </div>
 </div>
 
-<h2>In Claude verwenden</h2>
-<div class="cards">
-  <div class="card">
-    <h3>Als Connector</h3>
-    <ol>
-      <li>claude.ai&nbsp;→ Settings&nbsp;→ <em>Connectors</em></li>
-      <li><em>Add custom connector</em>: Name <strong>Wasup</strong>,
-          URL <code>https://wasup.at/mcp</code></li>
-      <li>Im Chat das Werkzeug&#8209;Menü öffnen und Wasup aktivieren</li>
-    </ol>
-    <p class="note">Funktioniert ab dem Free&#8209;Plan (ein eigener
-    Connector ist inklusive).</p>
-  </div>
-  <div class="card">
-    <h3>Was die KI dann kann</h3>
-    <ol>
-      <li>„Welche Konzerte gibt es nächstes Wochenende?"</li>
-      <li>„Gratis&#8209;Events mit Kindern, draußen, diese Woche"</li>
-      <li>„Bau mir ein Kalender&#8209;Abo für Salsa in Linz"</li>
-    </ol>
-  </div>
+<div class="counters">
+  <div class="counter"><b data-count="13000" data-suffix="+">0</b><span>Termine</span></div>
+  <div class="counter"><b data-count="5000" data-suffix="+">0</b><span>Veranstaltungen</span></div>
+  <div class="counter"><b data-count="200" data-suffix="+">0</b><span>Quellen</span></div>
+  <div class="counter"><b data-count="25" data-prefix="~" data-suffix="&nbsp;km">0</b><span>rund um Linz</span></div>
 </div>
 
-<h2>Für Entwickler &amp; Agenten</h2>
-<p>Lesende Zugriffe brauchen keinen API&#8209;Key (fair&#8209;use,
-Rate&#8209;Limit pro IP). Einstiegspunkte:</p>
-<ul>
-  <li>Semantik &amp; Filter&#8209;Schema: <a href="/llms.txt"><code>/llms.txt</code></a></li>
-  <li>MCP&#8209;Server (Streamable HTTP): <code>https://wasup.at/mcp</code></li>
-  <li>REST: <code>GET /v1/occurrences</code>, <code>POST /v1/query</code>,
-      <code>GET /v1/feed.ics</code> — Spezifikation unter <a href="/docs"><code>/docs</code></a></li>
-</ul>
+<section id="use">
+  <p class="kicker reveal">So einfach geht's</p>
+  <h2 class="reveal">Wasup mit deinem Assistenten verbinden</h2>
+  <div class="use">
 
-<h2>Wer steckt dahinter?</h2>
-<p>Wasup ist ein Ein&#8209;Personen&#8209;Projekt von
-<strong>Alexander Krauck</strong>, Data Scientist aus Linz. Entstanden aus
-einer einfachen Frage, auf die kein Portal eine vollständige Antwort hatte:
-<em>Was geht heute wirklich in Linz?</em> Fragen, Korrekturen oder
-Löschwünsche als Veranstalter:
-<a href="mailto:alexander.krauck@gmail.com">alexander.krauck@gmail.com</a>
-— siehe auch <a href="/support">Support</a>.</p>
+    <div class="vcard oai reveal" id="chatgpt">
+      <div class="vhead"><svg><use href="#i-openai"/></svg>ChatGPT</div>
+      <ol>
+        <li>Settings → <em>Apps&nbsp;&amp;&nbsp;Connectors</em> →
+            <em>Advanced</em> → <strong>Developer&nbsp;Mode</strong> aktivieren</li>
+        <li><em>Create</em> wählen und die MCP-URL unten eintragen
+            (keine Authentifizierung)</li>
+        <li>Fragen: <em>„Was geht am Samstag in Linz?"</em></li>
+      </ol>
+      <div class="mcp"><span>https://wasup.at/mcp</span>
+        <button data-copy="https://wasup.at/mcp">Kopieren</button></div>
+      <p class="fuss">Wasup ist im ChatGPT-App-Verzeichnis eingereicht — sobald
+      gelistet, reicht dort ein Klick auf <em>Connect</em>.</p>
+    </div>
+
+    <div class="vcard claude reveal" id="claude">
+      <div class="vhead"><svg><use href="#i-claude"/></svg>Claude</div>
+      <ol>
+        <li>claude.ai → Settings → <strong>Connectors</strong></li>
+        <li><em>Add custom connector</em>: Name <strong>Wasup</strong>,
+            dazu die MCP-URL unten</li>
+        <li>Im Chat das Werkzeug-Menü öffnen und Wasup aktivieren</li>
+      </ol>
+      <div class="mcp"><span>https://wasup.at/mcp</span>
+        <button data-copy="https://wasup.at/mcp">Kopieren</button></div>
+      <p class="fuss">Funktioniert ab dem Free-Plan — ein eigener Connector
+      ist inklusive.</p>
+    </div>
+
+  </div>
+  <p class="beispiele reveal">Dann einfach fragen: <em>„Konzerte am
+  Wochenende"</em> · <em>„gratis &amp; mit Kindern, draußen"</em> ·
+  <em>„bau mir ein Salsa-Kalender-Abo"</em></p>
+</section>
+
+<section>
+  <p class="kicker reveal">Warum Wasup</p>
+  <h2 class="reveal">Der ehrlichste Event-Index, den Linz je hatte</h2>
+  <div class="prinzip">
+    <div class="p reveal">
+      <div class="ico">🕸️</div>
+      <h3>Direkt von der Quelle</h3>
+      <p>Täglich gecrawlt von 200+ Veranstalter-Websites: das Hinterhof-Konzert,
+      der Verein im Umland, der Ball, der Stammtisch — der Long Tail, den kein
+      Portal pflegt.</p>
+    </div>
+    <div class="p reveal">
+      <div class="ico">🧩</div>
+      <h3>Dedupliziert &amp; bewertet</h3>
+      <p>Dubletten aus mehreren Quellen werden zusammengeführt, jede Angabe
+      trägt eine Konfidenz. Wiederkehrende Termine werden projiziert — und als
+      solche markiert.</p>
+    </div>
+    <div class="p reveal">
+      <div class="ico">🤝</div>
+      <h3>Ehrlich per Design</h3>
+      <p>Der Index behauptet nichts, was er nicht belegen kann: Unbekanntes
+      bleibt <em>unbekannt</em> statt geraten, Schätzungen sind klar als
+      Schätzung gekennzeichnet.</p>
+    </div>
+  </div>
+</section>
+
+<section id="dev">
+  <div class="dev reveal">
+    <h2>Für Entwickler &amp; Agenten</h2>
+    <ul>
+      <li>Semantik &amp; Filter-Schema: <a href="/llms.txt"><code>/llms.txt</code></a></li>
+      <li>MCP-Server (Streamable HTTP, kein Auth): <code>https://wasup.at/mcp</code></li>
+      <li>REST: <code>GET /v1/occurrences</code> · <code>POST /v1/query</code> ·
+          <code>GET /v1/feed.ics</code> — Spezifikation unter <a href="/docs"><code>/docs</code></a></li>
+      <li>Lesend keyless (Rate-Limit pro IP) — einfach loslegen.</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <p class="kicker reveal">Wer steckt dahinter?</p>
+  <div class="about reveal">
+    <img src="/logo.png" alt="Wasup Logo">
+    <p>Wasup ist ein Ein-Personen-Projekt von <strong>Alexander Krauck</strong>,
+    Data Scientist aus Linz — entstanden aus einer Frage, auf die kein Portal
+    eine vollständige Antwort hatte. Fragen, Korrekturen oder Löschwünsche als
+    Veranstalter: <a href="mailto:alexander.krauck@gmail.com">alexander.krauck@gmail.com</a>
+    — siehe auch <a href="/support">Support</a>.</p>
+  </div>
+</section>
 
 <footer>
   Wasup · Alexander Krauck · Linz, Österreich ·
@@ -152,6 +374,95 @@ Löschwünsche als Veranstalter:
   <a href="/llms.txt">llms.txt</a>
 </footer>
 
-</main>
+<script>
+"use strict";
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/* scroll reveal */
+const io = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+}), { threshold: .15 });
+document.querySelectorAll(".reveal").forEach(el => io.observe(el));
+
+/* animated counters */
+const cio = new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return;
+  cio.unobserve(e.target);
+  const el = e.target, target = +el.dataset.count;
+  const pre = el.dataset.prefix || "", suf = el.dataset.suffix || "";
+  const fmt = n => pre + n.toLocaleString("de-AT") + suf;
+  if (reduced) { el.innerHTML = fmt(target); return; }
+  const t0 = performance.now(), dur = 1300;
+  (function tick(t) {
+    const p = Math.min((t - t0) / dur, 1), eased = 1 - Math.pow(1 - p, 3);
+    el.innerHTML = fmt(Math.round(target * eased));
+    if (p < 1) requestAnimationFrame(tick);
+  })(t0);
+}), { threshold: .6 });
+document.querySelectorAll(".counter b").forEach(el => cio.observe(el));
+
+/* copy buttons */
+document.querySelectorAll("[data-copy]").forEach(b =>
+  b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); } catch {}
+    const old = b.textContent;
+    b.textContent = "Kopiert ✓";
+    setTimeout(() => { b.textContent = old; }, 1600);
+  }));
+
+/* live chat demo: real upcoming events from the index */
+const timeFmt = new Intl.DateTimeFormat("de-AT", { weekday: "short",
+  hour: "2-digit", minute: "2-digit", timeZone: "Europe/Vienna" });
+const msgs = document.getElementById("demo-msgs");
+
+function bubble(cls) {
+  const d = document.createElement("div");
+  d.className = "bubble " + cls;
+  msgs.appendChild(d);
+  return d;
+}
+
+async function demo() {
+  const user = bubble("user");
+  const q = "Was geht demnächst in Linz?";
+  if (reduced) { user.textContent = q; } else {
+    for (const ch of q) {
+      user.textContent += ch;
+      await new Promise(r => setTimeout(r, 34));
+    }
+  }
+  const typing = bubble("bot typing");
+  typing.innerHTML = "<span></span><span></span><span></span>";
+
+  let evs = [];
+  try {
+    const res = await fetch("/v1/occurrences?limit=3&from="
+      + new Date().toISOString().slice(0, 10));
+    evs = (await res.json()).occurrences || [];
+  } catch {}
+  await new Promise(r => setTimeout(r, reduced ? 0 : 900));
+  typing.remove();
+
+  const bot = bubble("bot");
+  if (!evs.length) {
+    bot.textContent = "Frag mich nach Konzerten, Märkten, Sport oder "
+      + "Familienprogramm — ich kenne 13.000+ Termine rund um Linz.";
+    return;
+  }
+  for (const o of evs) {
+    const ev = document.createElement("span");
+    ev.className = "ev";
+    const b = document.createElement("b");
+    b.textContent = o.title;
+    const meta = document.createElement("span");
+    meta.textContent = [timeFmt.format(new Date(o.starts_at)), o.venue_name]
+      .filter(Boolean).join(" · ");
+    ev.append(b, meta);
+    bot.appendChild(ev);
+    if (!reduced) await new Promise(r => setTimeout(r, 350));
+  }
+}
+demo();
+</script>
 </body>
 </html>

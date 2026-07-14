@@ -1,0 +1,190 @@
+- generic [active] [ref=e1]:
+  - navigation [ref=e3]:
+    - link "Wasup" [ref=e4] [cursor=pointer]:
+      - /url: /
+    - generic [ref=e5]:
+      - link "ChatGPT" [ref=e6] [cursor=pointer]:
+        - /url: "#chatgpt"
+      - link "Claude" [ref=e7] [cursor=pointer]:
+        - /url: "#claude"
+      - link "Kalender" [ref=e8] [cursor=pointer]:
+        - /url: /calendar
+      - link "API" [ref=e9] [cursor=pointer]:
+        - /url: "#dev"
+    - link "Loslegen" [ref=e10] [cursor=pointer]:
+      - /url: "#use"
+  - generic [ref=e11]:
+    - generic [ref=e12]: 🎸
+    - generic [ref=e13]: 🎭
+    - generic [ref=e14]: ⚽️
+    - generic [ref=e15]: 🎪
+    - generic [ref=e16]: 💃
+    - generic [ref=e17]:
+      - heading [level=1] [ref=e18]:
+        - text: Was gehtwirklich in
+        - emphasis [ref=e19]: Linz
+        - text: "?"
+      - paragraph [ref=e20]:
+        - text: Wasup indexiert
+        - strong [ref=e21]: alle
+        - text: öffentlichen Veranstaltungen in und um Linz — auch die, die auf keinem Portal stehen. Und deine KI kann ihn direkt fragen.
+      - generic [ref=e22]:
+        - link "In ChatGPT nutzen" [ref=e23] [cursor=pointer]:
+          - /url: "#chatgpt"
+        - link "In Claude nutzen" [ref=e26] [cursor=pointer]:
+          - /url: "#claude"
+        - link "Nur Kalender ansehen →" [ref=e29] [cursor=pointer]:
+          - /url: /calendar
+    - generic [ref=e30]:
+      - banner [ref=e31]:
+        - text: dein KI-Assistent
+        - generic [ref=e35]: ●live aus dem Index
+      - generic [ref=e36]: Wa
+  - generic [ref=e38]:
+    - generic [ref=e39]:
+      - generic [ref=e40]: 143+
+      - text: Termine
+    - generic [ref=e41]:
+      - generic [ref=e42]: 40+
+      - text: Veranstaltungen
+    - generic [ref=e43]:
+      - generic [ref=e44]: 2+
+      - text: Quellen
+    - generic [ref=e45]:
+      - generic [ref=e46]: ~0 km
+      - text: rund um Linz
+  - generic [ref=e47]:
+    - paragraph [ref=e48]: So einfach geht's
+    - heading "Wasup mit deinem Assistenten verbinden" [level=2] [ref=e49]
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - generic [ref=e52]: ChatGPT
+        - list [ref=e55]:
+          - listitem [ref=e56]:
+            - text: Settings →
+            - emphasis [ref=e57]: Apps & Connectors
+            - text: →
+            - emphasis [ref=e58]: Advanced
+            - text: →
+            - strong [ref=e59]: Developer Mode
+            - text: aktivieren
+          - listitem [ref=e60]:
+            - emphasis [ref=e61]: Create
+            - text: wählen und die MCP-URL unten eintragen (keine Authentifizierung)
+          - listitem [ref=e62]:
+            - text: "Fragen:"
+            - emphasis [ref=e63]: „Was geht am Samstag in Linz?"
+        - generic [ref=e64]:
+          - generic [ref=e65]: https://wasup.at/mcp
+          - button "Kopieren" [ref=e66] [cursor=pointer]
+        - paragraph [ref=e67]:
+          - text: Wasup ist im ChatGPT-App-Verzeichnis eingereicht — sobald gelistet, reicht dort ein Klick auf
+          - emphasis [ref=e68]: Connect
+          - text: .
+      - generic [ref=e69]:
+        - generic [ref=e70]: Claude
+        - list [ref=e73]:
+          - listitem [ref=e74]:
+            - text: claude.ai → Settings →
+            - strong [ref=e75]: Connectors
+          - listitem [ref=e76]:
+            - emphasis [ref=e77]: Add custom connector
+            - text: ": Name"
+            - strong [ref=e78]: Wasup
+            - text: ", dazu die MCP-URL unten"
+          - listitem [ref=e79]: Im Chat das Werkzeug-Menü öffnen und Wasup aktivieren
+        - generic [ref=e80]:
+          - generic [ref=e81]: https://wasup.at/mcp
+          - button "Kopieren" [ref=e82] [cursor=pointer]
+        - paragraph [ref=e83]: Funktioniert ab dem Free-Plan — ein eigener Connector ist inklusive.
+      - generic [ref=e84]:
+        - generic [ref=e85]:
+          - generic [ref=e86]: 🗓️
+          - text: Ganz ohne KI
+        - list [ref=e87]:
+          - listitem [ref=e88]:
+            - text: Den
+            - strong [ref=e89]: Kalender
+            - text: direkt im Browser durchstöbern
+          - listitem [ref=e90]:
+            - text: Oder das
+            - strong [ref=e91]: .ics-Abo
+            - text: in Apple/Google/Outlook-Kalender einhängen — aktualisiert sich von selbst
+        - generic [ref=e92]:
+          - link "Kalender öffnen" [ref=e93] [cursor=pointer]:
+            - /url: /calendar
+          - link ".ics abonnieren" [ref=e94] [cursor=pointer]:
+            - /url: /v1/feed.ics
+        - paragraph [ref=e95]: "Beispiele fürs Fragen per KI: „Konzerte am Wochenende\", „gratis & mit Kindern, draußen\", „bau mir ein Salsa-Kalender-Abo\"."
+  - generic [ref=e96]:
+    - paragraph [ref=e97]: Warum Wasup
+    - heading "Der ehrlichste Event-Index, den Linz je hatte" [level=2] [ref=e98]
+    - generic [ref=e99]:
+      - generic [ref=e100]:
+        - generic [ref=e101]: 🕸️
+        - heading "Direkt von der Quelle" [level=3] [ref=e102]
+        - paragraph [ref=e103]: "Täglich gecrawlt von 200+ Veranstalter-Websites: das Hinterhof-Konzert, der Verein im Umland, der Ball, der Stammtisch — der Long Tail, den kein Portal pflegt."
+      - generic [ref=e104]:
+        - generic [ref=e105]: 🧩
+        - heading "Dedupliziert & bewertet" [level=3] [ref=e106]
+        - paragraph [ref=e107]: Dubletten aus mehreren Quellen werden zusammengeführt, jede Angabe trägt eine Konfidenz. Wiederkehrende Termine werden projiziert — und als solche markiert.
+      - generic [ref=e108]:
+        - generic [ref=e109]: 🤝
+        - heading "Ehrlich per Design" [level=3] [ref=e110]
+        - paragraph [ref=e111]:
+          - text: "Der Index behauptet nichts, was er nicht belegen kann: Unbekanntes bleibt"
+          - emphasis [ref=e112]: unbekannt
+          - text: statt geraten, Schätzungen sind klar als Schätzung gekennzeichnet.
+  - generic [ref=e114]:
+    - heading "Für Entwickler & Agenten" [level=2] [ref=e115]
+    - list [ref=e116]:
+      - listitem [ref=e117]:
+        - text: "Semantik & Filter-Schema:"
+        - link [ref=e118] [cursor=pointer]:
+          - /url: /llms.txt
+          - code [ref=e119]: /llms.txt
+      - listitem [ref=e120]:
+        - text: "MCP-Server (Streamable HTTP, kein Auth):"
+        - code [ref=e121]: https://wasup.at/mcp
+      - listitem [ref=e122]:
+        - text: "REST:"
+        - code [ref=e123]: GET /v1/occurrences
+        - text: ·
+        - code [ref=e124]: POST /v1/query
+        - text: ·
+        - code [ref=e125]: GET /v1/feed.ics
+        - text: — Spezifikation unter
+        - link [ref=e126] [cursor=pointer]:
+          - /url: /docs
+          - code [ref=e127]: /docs
+      - listitem [ref=e128]: Lesend keyless (Rate-Limit pro IP) — einfach loslegen.
+  - generic [ref=e129]:
+    - paragraph [ref=e130]: Wer steckt dahinter?
+    - generic [ref=e131]:
+      - img "Wasup Logo" [ref=e132]
+      - paragraph [ref=e133]:
+        - text: Wasup ist ein Ein-Personen-Projekt von
+        - strong [ref=e134]: Alexander Krauck
+        - text: ", Data Scientist aus Linz — entstanden aus einer Frage, auf die kein Portal eine vollständige Antwort hatte. Fragen, Korrekturen oder Löschwünsche als Veranstalter:"
+        - link "alexander.krauck@gmail.com" [ref=e135] [cursor=pointer]:
+          - /url: mailto:alexander.krauck@gmail.com
+        - text: — siehe auch
+        - link "Support" [ref=e136] [cursor=pointer]:
+          - /url: /support
+        - text: .
+  - contentinfo [ref=e137]:
+    - text: Wasup · Alexander Krauck · Linz, Österreich ·
+    - link "Kontakt" [ref=e138] [cursor=pointer]:
+      - /url: mailto:alexander.krauck@gmail.com
+    - text: ·
+    - link "Datenschutz" [ref=e139] [cursor=pointer]:
+      - /url: /privacy
+    - text: ·
+    - link "Nutzungsbedingungen" [ref=e140] [cursor=pointer]:
+      - /url: /terms
+    - text: ·
+    - link "Support" [ref=e141] [cursor=pointer]:
+      - /url: /support
+    - text: ·
+    - link "llms.txt" [ref=e142] [cursor=pointer]:
+      - /url: /llms.txt

@@ -406,7 +406,7 @@ def get_calendar_link(
 
 _STOPWORDS = {
     "a", "an", "and", "around", "at", "events", "event", "find", "for",
-    "in", "linz", "me", "near", "of", "please", "search", "show", "the",
+    "in", "index", "linz", "me", "near", "of", "please", "search", "show", "the",
     "wasup", "what", "with", "veranstaltung", "veranstaltungen", "für",
     "im", "in", "mir", "suche", "und", "zeige",
 }
@@ -449,6 +449,34 @@ def _keyword_categories(tokens: list[str]) -> list[str] | None:
     return None
 
 
+def _keyword_row_matches(tokens: list[str], row: dict) -> bool:
+    """Require every meaningful query token; synonyms within a token are OR.
+
+    The SQL filter intentionally accepts any synonym so it can retrieve a
+    broad candidate pool.  The standard connector contract then fails closed
+    here: a query for "football lounge nights special" must not degrade into
+    arbitrary events containing only "special" after the adult result is
+    policy-filtered.
+    """
+    haystack = " ".join([
+        row.get("title") or "",
+        row.get("venue_name") or "",
+        row.get("organizer") or "",
+        " ".join(row.get("category") or []),
+    ]).casefold()
+    for token in tokens:
+        matched = False
+        for term in _SYNONYMS.get(token, (token,)):
+            compound = r"[-\s]?".join(re.escape(part) for part in term.split())
+            # word-prefix OR compound-suffix, matching the SQL semantics.
+            if re.search(rf"(?<!\w){compound}|{compound}(?!\w)", haystack):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 @mcp.tool(title="Search public Linz events by keyword", annotations=_READ_ONLY)
 def search(query: str) -> StandardSearchResponse:
     """Use this when the user wants keyword search over upcoming public
@@ -476,7 +504,10 @@ def search(query: str) -> StandardSearchResponse:
         exclude_sex_service_context=True,
         include_inferred_terms=False,
     )
-    rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
+    rows = [
+        row for row in payload["occurrences"]
+        if row["starts_at"] >= cutoff and _keyword_row_matches(tokens, row)
+    ]
     results, seen = [], set()
     for row in rows:
         semantic_key = (

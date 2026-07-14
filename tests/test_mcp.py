@@ -119,6 +119,10 @@ def test_chatgpt_connector_search_fetch_contract(client):
     results = search_result["structuredContent"]["results"]
     assert results and set(results[0]) == {"id", "title", "url"}
     assert "Salsa Social" in results[0]["title"]
+    prompt_results = _call(client, "search", {
+        "query": "Search the Linz event index for salsa",
+    })["results"]
+    assert prompt_results and "Salsa Social" in prompt_results[0]["title"]
     fetch_result = _call_result(client, "fetch", {"id": results[0]["id"]})
     assert len(fetch_result["content"]) == 1
     assert json.loads(fetch_result["content"][0]["text"]) == \
@@ -233,6 +237,15 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
         "UPDATE event SET inferred = %s WHERE id = %s",
         (Jsonb({"vibe_tags": ["run"]}), polluted_id),
     )
+    exact_phrase_id = _add_event(
+        conn, "Football Lounge Nights Special",
+        starts=NOW + timedelta(days=2), lat=48.30, lon=14.29,
+        category=["sport"],
+    )
+    filler_id = _add_event(
+        conn, "Keramik Special", starts=NOW + timedelta(days=2),
+        lat=48.30, lon=14.29, category=["culture"],
+    )
     conn.commit()
 
     results = _call(client, "search", {
@@ -246,6 +259,12 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
         any(term in result["title"].lower() for term in ("run", "lauf", "jogging"))
         for result in results
     )
+    phrase_results = _call(client, "search", {
+        "query": "football lounge nights special",
+    })["results"]
+    phrase_ids = {uuid.UUID(result["id"]) for result in phrase_results}
+    assert exact_phrase_id in phrase_ids
+    assert filler_id not in phrase_ids
 
 
 def test_search_events_places_in_window_starts_before_ongoing(conn, client):

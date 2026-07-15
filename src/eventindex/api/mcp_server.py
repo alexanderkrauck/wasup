@@ -537,6 +537,21 @@ def _rank_rows(tokens: list[str], rows: list[dict]) -> list[dict]:
     return [row for _, row in scored]
 
 
+def _stemmed_tokens(query: str) -> list[str]:
+    """Normalize the query with Postgres's German snowball dictionary:
+    stems plurals/inflections and drops German stopwords - the standard
+    tool instead of a hand-rolled vocabulary. Lexeme order is irrelevant
+    to the mean score in _rank_rows."""
+    from eventindex import db
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT tsvector_to_array(to_tsvector('german', %(q)s)) AS lex",
+            {"q": query[:200]},
+        ).fetchone()
+    return row["lex"]
+
+
 @mcp.tool(title="Search public Linz events by keyword", annotations=_READ_ONLY)
 def search(query: str) -> StandardSearchResponse:
     """Use this when the user wants keyword search over upcoming public

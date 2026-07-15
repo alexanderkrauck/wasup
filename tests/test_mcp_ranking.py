@@ -59,3 +59,14 @@ def test_ties_break_by_start_time_and_no_tokens_is_empty():
     early = _row("Salsa Abend", days=2)
     assert _rank_rows(["salsa"], [late, early]) == [early, late]
     assert _rank_rows([], [early]) == []
+
+
+def test_stemmed_tokens_use_the_german_snowball(conn):
+    from eventindex.api.mcp_server import _stemmed_tokens
+
+    tokens = _stemmed_tokens("Konzerte am Wochenende in Linz")
+    assert "konzert" in tokens      # plural stemmed
+    assert "linz" in tokens
+    assert "am" not in tokens       # German stopwords removed
+    assert "in" not in tokens
+    assert _stemmed_tokens("und für in am") == []

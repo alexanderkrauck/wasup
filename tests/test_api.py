@@ -376,7 +376,9 @@ def test_query_get_variant_for_browse_only_agents(conn, client):
 
 def test_ongoing_occurrence_is_visible_with_flag(client, conn):
     """A21: 95 running exhibitions were invisible under starts_at-only
-    windows; overlap semantics is the default since 2026-07-13."""
+    windows; an event spanning a specifically requested date must match."""
+    window_start = (NOW + timedelta(days=20)).replace(microsecond=0)
+    window_end = window_start + timedelta(hours=1)
     eid = uuid.uuid4()
     conn.execute(
         "INSERT INTO event (id, kind, title, category, confidence, status) "
@@ -385,13 +387,19 @@ def test_ongoing_occurrence_is_visible_with_flag(client, conn):
     )
     conn.execute(
         "INSERT INTO occurrence (event_id, starts_at, ends_at) VALUES (%s, %s, %s)",
-        (eid, NOW - timedelta(days=5), NOW + timedelta(days=5)),
+        (eid, window_start - timedelta(days=1), window_start + timedelta(days=1)),
     )
     conn.commit()
-    body = client.get("/v1/occurrences").json()
+    body = client.get("/v1/occurrences", params={
+        "from": window_start.isoformat(), "to": window_end.isoformat(),
+    }).json()
     row = next(o for o in body["occurrences"] if o["title"] == "Laufende Ausstellung")
     assert row["ongoing"] is True
-    body = client.post("/v1/query", json={}).json()
+    assert datetime.fromisoformat(row["starts_at"]) == window_start - timedelta(days=1)
+    assert datetime.fromisoformat(row["ends_at"]) == window_start + timedelta(days=1)
+    body = client.post("/v1/query", json={
+        "from_dt": window_start.isoformat(), "to_dt": window_end.isoformat(),
+    }).json()
     row = next(o for o in body["occurrences"] if o["title"] == "Laufende Ausstellung")
     assert row["ongoing"] is True
 

@@ -1,5 +1,7 @@
 """50-query agent-search gate (Phase 4 done-criterion a): exclusions and hard
 filters must NEVER leak into results, across realistic German/English queries.
+Date windows use the locked overlap contract: an occurrence that started before
+the window is valid only when it is still running at the window start.
 
 Marked `live`: hits the LIVE DB and spends real LLM budget (~50 mini parses,
 cents). Deselected by default; run it ALONE so the conftest test-db switch
@@ -78,11 +80,25 @@ def _dt(value):
         return None
 
 
+@pytest.fixture(scope="module")
+def live_headers():
+    """Authenticate the LLM-backed endpoint when the live DB has API keys."""
+    from eventindex import db
+
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT key FROM api_key WHERE active LIMIT 1"
+        ).fetchone()
+    return {"X-API-Key": row["key"]} if row else {}
+
+
 @pytest.mark.parametrize("query,expects_exclusion", QUERIES)
-def test_hard_filters_never_leak(query, expects_exclusion):
+def test_hard_filters_never_leak(query, expects_exclusion, live_headers):
     from eventindex.api.app import app
 
-    resp = TestClient(app).get("/v1/search", params={"q": query})
+    resp = TestClient(app).get(
+        "/v1/search", params={"q": query}, headers=live_headers
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     f = body["parsed_filters"]
@@ -108,9 +124,19 @@ def test_hard_filters_never_leak(query, expects_exclusion):
             )
         # parsed_filters are validator-normalized to tz-aware ISO strings;
         # a naive one slipping through here IS the bug, so no guard clause
-        starts = _dt(occ["starts_at"])
+        starts, ends = _dt(occ["starts_at"]), _dt(occ["ends_at"])
         window_from, window_to = _dt(f["from_dt"]), _dt(f["to_dt"])
         if starts and window_from:
-            assert starts >= window_from, f"{query!r}: {occ['title']!r} before window"
+            if occ["ongoing"]:
+                assert starts < window_from, (
+                    f"{query!r}: {occ['title']!r} falsely labeled ongoing"
+                )
+                assert ends is not None and ends >= window_from, (
+                    f"{query!r}: {occ['title']!r} ended before window"
+                )
+            else:
+                assert starts >= window_from, (
+                    f"{query!r}: {occ['title']!r} before window"
+                )
         if starts and window_to:
             assert starts <= window_to, f"{query!r}: {occ['title']!r} after window"

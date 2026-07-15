@@ -19,6 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from eventindex.api.search import FILTER_DEFAULTS, QueryBody, SearchFilters, VIENNA
+from eventindex.resolve.match import _trigrams
 
 BASE_URL = "https://wasup.at"
 _LEGACY_URL = "https://wasup.goedly.com"
@@ -493,6 +494,47 @@ def _keyword_row_matches(tokens: list[str], row: dict) -> bool:
         if not matched:
             return False
     return True
+
+
+# Fail-closed thresholds (audit B1 successor): boolean AND guaranteed that a
+# query aimed at a policy-filtered adult event could not degrade into
+# arbitrary single-word filler. Under ranked OR the mean threshold does that
+# job: one incidental exact hit among >=3 noise tokens stays below 0.35.
+_MIN_BEST_SIM = 0.45   # at least one token must be a real lexical hit
+_MIN_MEAN_SCORE = 0.35
+
+
+def _haystack_words(row: dict) -> list[str]:
+    text = " ".join(filter(None, [
+        row.get("title"), row.get("venue_name"), row.get("venue_address"),
+        row.get("organizer"), " ".join(row.get("category") or []),
+    ]))
+    return re.findall(r"[^\W\d_]+", text.lower())
+
+
+def _token_similarity(token: str, word: str) -> float:
+    if token == word:
+        return 1.0
+    if len(token) >= 4 and token in word:
+        return 0.75  # German compounds/inflections: konzert | gartenkonzert
+    ta, tb = _trigrams(token), _trigrams(word)
+    return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+
+
+def _rank_rows(tokens: list[str], rows: list[dict]) -> list[dict]:
+    """Score = mean over query tokens of the best word similarity."""
+    if not tokens:
+        return []
+    scored = []
+    for row in rows:
+        words = _haystack_words(row)
+        sims = [max((_token_similarity(t, w) for w in words), default=0.0)
+                for t in tokens]
+        score = sum(sims) / len(sims)
+        if max(sims) >= _MIN_BEST_SIM and score >= _MIN_MEAN_SCORE:
+            scored.append((score, row))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]["starts_at"]))
+    return [row for _, row in scored]
 
 
 @mcp.tool(title="Search public Linz events by keyword", annotations=_READ_ONLY)

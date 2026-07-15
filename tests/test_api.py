@@ -1,8 +1,10 @@
 """API filter semantics - the null=unknown contract and keyset pagination."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+from icalendar import Calendar
 import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
@@ -138,6 +140,60 @@ def test_feed_ics_serves_filtered_calendar(client):
     only_music = client.get("/v1/feed.ics", params={"category": "learning"})
     assert b"Unknown Location Talk" in only_music.content
     assert b"Nearby Concert" not in only_music.content
+
+
+def test_feed_all_day_dates_are_local_and_use_date_typed_exclusive_end(conn, client):
+    """DATE events must not shift back a day or mix DATE and DATE-TIME.
+
+    The stored UTC value for Vienna midnight belongs to the previous UTC
+    date.  RFC 5545 also requires an all-day DTEND to be a DATE and exclusive.
+    """
+    vienna = ZoneInfo("Europe/Vienna")
+    local_day = (datetime.now(vienna) + timedelta(days=10)).date()
+    starts = datetime.combine(local_day, time.min, tzinfo=vienna)
+    event_id = _add_event(
+        conn, "All-day Vienna Festival", starts=starts,
+        lat=48.3069, lon=14.2858, category=["art"],
+    )
+    conn.execute(
+        "UPDATE occurrence SET ends_at = %s, time_unknown = true "
+        "WHERE event_id = %s",
+        (starts + timedelta(days=2), event_id),
+    )
+    conn.commit()
+
+    resp = client.get("/v1/feed.ics", params={"category": "art"})
+    events = list(Calendar.from_ical(resp.content).walk("VEVENT"))
+    assert len(events) == 1
+    dtstart = events[0].decoded("dtstart")
+    dtend = events[0].decoded("dtend")
+    assert type(dtstart) is date
+    assert type(dtend) is date
+    assert dtstart == local_day
+    assert dtend == local_day + timedelta(days=3)
+
+
+def test_feed_can_omit_unknown_time_events_without_changing_public_default(
+    conn, client,
+):
+    event_id = _add_event(
+        conn, "Date-only Workshop", starts=NOW + timedelta(days=4),
+        lat=48.3069, lon=14.2858, category=["learning"],
+    )
+    conn.execute(
+        "UPDATE occurrence SET time_unknown = true WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+
+    default = client.get("/v1/feed.ics", params={"category": "learning"})
+    timed_only = client.get(
+        "/v1/feed.ics",
+        params={"category": "learning", "include_time_unknown": "false"},
+    )
+    assert b"Date-only Workshop" in default.content
+    assert b"Date-only Workshop" not in timed_only.content
+    assert b"Unknown Location Talk" in timed_only.content
 
 
 def test_feed_can_exclude_known_adult_context_without_dropping_unknown(conn, client):

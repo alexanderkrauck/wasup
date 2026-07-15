@@ -91,7 +91,7 @@
       "user_prompt": "Give me a calendar subscription link for music events in Linz during the next calendar month.",
       "file_attachment_urls": null,
       "tools_triggered": "get_calendar_link",
-      "expected_output": "A clickable wasup.at HTTPS .ics subscription URL containing the requested category, relative date filters, and the app's default adult-context exclusion.",
+      "expected_output": "A clickable wasup.at HTTPS .ics subscription URL containing the requested category, relative date filters, the app's default adult-context exclusion, and the timed-events-only default.",
       "expected_output_url": "https://wasup.at/v1/feed.ics"
     },
     {

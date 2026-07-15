@@ -139,6 +139,20 @@ def test_get_calendar_link_builds_ics_url(client):
     assert "/v1/feed.ics?" in out["ics_url"]
     assert "category=dance" in out["ics_url"]
     assert "exclude_sex_service_context=true" in out["ics_url"]
+    assert "include_time_unknown=false" in out["ics_url"]
+
+    with_unknown_times = _call(client, "get_calendar_link", {
+        "category": "dance", "include_time_unknown": True,
+    })
+    assert "include_time_unknown=true" in with_unknown_times["ics_url"]
+
+
+def test_get_calendar_link_rejects_an_unscoped_subscription(client):
+    body = _rpc(client, "tools/call", {
+        "name": "get_calendar_link", "arguments": {},
+    })
+    assert body["result"].get("isError") is True
+    assert "category" in body["result"]["content"][0]["text"].lower()
 
 
 def test_get_event_detail(conn, client):

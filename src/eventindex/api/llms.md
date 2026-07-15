@@ -153,7 +153,9 @@ queries are COMPOSITIONS you build at query time. Examples:
   provenance; no raw claims/evidence.
 - `GET /v1/feed.ics?...` - any filter combo as a calendar subscription;
   `exclude_sex_service_context=true` removes positively known commercial
-  sex-service contexts while retaining unknowns.
+  sex-service contexts while retaining unknowns. Set
+  `include_time_unknown=false` for a quieter timed-events-only feed; the
+  public default remains true for backward compatibility.
 - `GET /v1/changes?since=<cursor>` - delta stream over event updates.
 - `POST /v1/reports` `{occurrence_id, reason: wrong|cancelled|duplicate, note}` - flag bad data; feeds source trust.
 - `GET /v1/search?q=...` - natural-language convenience endpoint (the index
@@ -164,5 +166,6 @@ queries are COMPOSITIONS you build at query time. Examples:
   connectors. MCP policy is stricter than the general REST query: omitted or
   false sex_service_context hard-excludes known true events; only explicit
   true on search_events/get_event permits them, while standard search/fetch
-  and generated calendar links always exclude them. Point your client at
-  https://wasup.at/mcp
+  and generated calendar links always exclude them. Generated calendar links
+  require a category and omit unknown-time/all-day entries unless the user
+  explicitly asks to include them. Point your client at https://wasup.at/mcp

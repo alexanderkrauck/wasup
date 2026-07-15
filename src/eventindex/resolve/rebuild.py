@@ -800,6 +800,7 @@ def _deep_url(url: str | None) -> bool:
 
 _MAX_EVENT_SPAN = timedelta(days=14)
 _MAX_EXHIBITION_SPAN = timedelta(days=370)
+_MAX_SINGLE_TIMED_OCCURRENCE_SPAN = timedelta(hours=12)
 
 
 def _sane_end(
@@ -855,15 +856,31 @@ def _fold_pairs(cands: list[tuple[datetime, datetime | None, bool]]) -> list:
     return out
 
 
-def _claim_cands(claims: list) -> list[tuple[datetime, datetime | None, bool]]:
-    return [
-        (
-            c.starts_at,
-            _sane_end(c.starts_at, c.ends_at, c.value("category")),
-            c.has_time,
-        )
-        for c in claims
-    ]
+def _claim_cands(
+    claims: list, *, is_series: bool = False,
+) -> list[tuple[datetime, datetime | None, bool]]:
+    """Turn claims into occurrence candidates with schedule-end hygiene.
+
+    A timed performance cannot continuously run across a later performance
+    of the same series. In that exact shape, a far end is the program/run's
+    validity boundary, not the occurrence's DTEND. Standalone multi-day
+    festivals and date-only camps have no later sibling performance and keep
+    their real end.
+    """
+    starts = {c.starts_at for c in claims if c.starts_at is not None}
+    out = []
+    for c in claims:
+        ends = _sane_end(c.starts_at, c.ends_at, c.value("category"))
+        if (
+            is_series
+            and c.has_time
+            and ends is not None
+            and ends - c.starts_at > _MAX_SINGLE_TIMED_OCCURRENCE_SPAN
+            and any(c.starts_at < other < ends for other in starts)
+        ):
+            ends = None
+        out.append((c.starts_at, ends, c.has_time))
+    return out
 
 
 def _occurrences_for(
@@ -880,7 +897,7 @@ def _occurrences_for(
             (s, _sane_end(s, e),
              s.astimezone(VIENNA).timetz() != recurrence.time_t(0, 0, tzinfo=VIENNA))
             for s, e in expanded
-        ] + _claim_cands(g["claims"])
+        ] + _claim_cands(g["claims"], is_series=True)
         pairs = _fold_pairs(cands)
         rule = recurrence.compile_rrule(
             rec, pairs[0][0] if pairs else anchor
@@ -908,7 +925,9 @@ def _occurrences_for(
         except (ValueError, TypeError):
             pass
     # explicit dates: union over claims, folded per local day
-    pairs = _fold_pairs(_claim_cands(g["claims"]))
+    pairs = _fold_pairs(
+        _claim_cands(g["claims"], is_series=g["key"].startswith("series|"))
+    )
     projected: set = set()
     if g["key"].startswith("series|"):
         extra = _project_series(g, pairs)

@@ -383,11 +383,26 @@ def get_calendar_link(
     from_dt: str | None = None,
     to_dt: str | None = None,
     min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
+    include_time_unknown: Annotated[
+        bool,
+        Field(
+            description="Include date-only events whose actual start time is "
+            "unknown. Keep false unless the user explicitly asks for them."
+        ),
+    ] = False,
 ) -> CalendarLinkResponse:
     """Use this when the user wants a read-only .ics subscription URL for
     public Linz-area events. This only builds a link; it does not subscribe,
-    create calendar entries, or invite anyone. The returned feed always
-    excludes known commercial sex-service contexts while retaining unknowns."""
+    create calendar entries, or invite anyone. Ask for a category before
+    calling rather than creating an unscoped feed. The returned feed defaults
+    to timed events only and always excludes known commercial sex-service
+    contexts while retaining unknown classifications."""
+    if category is None:
+        raise ValueError(
+            "A calendar subscription requires a category so the calendar "
+            "does not silently truncate a broad all-event feed. Ask the user "
+            "which event category they want."
+        )
     params = {
         key: value
         for key, value in [
@@ -399,6 +414,9 @@ def get_calendar_link(
         if value is not None
     }
     params["exclude_sex_service_context"] = "true"
+    params["include_time_unknown"] = (
+        "true" if include_time_unknown else "false"
+    )
     return CalendarLinkResponse(
         ics_url=f"{BASE_URL}/v1/feed.ics?{urlencode(params)}"
     )

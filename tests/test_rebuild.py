@@ -681,6 +681,71 @@ def test_invalid_and_validity_spans_become_unknown_but_exhibitions_survive(conn)
     assert ends["Summer Exhibition"] is not None
 
 
+def test_series_validity_end_cannot_span_later_performances(conn):
+    """A run's final date is not one timed performance's DTEND.
+
+    This production-shaped conflict made the 6 August Pretty Woman show fill
+    nine calendar days even though later performances existed inside that
+    purported occurrence.
+    """
+    sid = _source(conn, "musical-portal", 0.8)
+    performances = (
+        ("2026-08-06T19:30:00+02:00", "2026-08-16", "bad-validity-end"),
+        ("2026-08-14T19:30:00+02:00", "2026-08-14T22:00:00+02:00", "fri"),
+        ("2026-08-15T19:30:00+02:00", "2026-08-15T22:00:00+02:00", "sat"),
+        ("2026-08-16T18:00:00+02:00", "2026-08-16T20:30:00+02:00", "sun"),
+    )
+    for starts, ends, tag in performances:
+        _claim(
+            conn, sid,
+            _concert(
+                "Pretty Woman – Das Musical", starts=starts,
+                venue="Musiktheater", ends_at=(ends, 0.9),
+                category=(["music"], 0.9),
+            ),
+            f"pretty woman|{starts[:10]}|{tag}",
+        )
+
+    rb.rebuild(conn, now=NOW)
+
+    rows = conn.execute(
+        "SELECT o.starts_at, o.ends_at FROM occurrence o "
+        "JOIN event e ON e.id = o.event_id "
+        "WHERE e.title = 'Pretty Woman – Das Musical' ORDER BY o.starts_at"
+    ).fetchall()
+    assert len(rows) == 4
+    assert rows[0]["starts_at"].astimezone(rb.VIENNA).date().isoformat() == \
+        "2026-08-06"
+    assert rows[0]["ends_at"] is None
+    assert all(
+        row["ends_at"] - row["starts_at"] == timedelta(hours=2, minutes=30)
+        for row in rows[1:]
+    )
+
+
+def test_standalone_multiday_event_keeps_its_real_end(conn):
+    sid = _source(conn, "festival-site", 0.8)
+    _claim(
+        conn, sid,
+        _concert(
+            "Linzer Krone-Fest 2026", starts="2026-08-21T18:00:00+02:00",
+            venue="Urfahrmarktgelände",
+            ends_at=("2026-08-23T16:00:00+02:00", 0.9),
+            category=(["music"], 0.9),
+        ),
+        "krone fest|2026-08-21|festival",
+    )
+
+    rb.rebuild(conn, now=NOW)
+
+    row = conn.execute(
+        "SELECT o.starts_at, o.ends_at FROM occurrence o "
+        "JOIN event e ON e.id = o.event_id "
+        "WHERE e.title = 'Linzer Krone-Fest 2026'"
+    ).fetchone()
+    assert row["ends_at"] - row["starts_at"] == timedelta(hours=46)
+
+
 def test_no_event_row_ever_lacks_occurrences(conn):
     """A3: 115 rule-bearing events had DTSTART=rebuild-time and zero
     occurrences - invisible to every API read path. Observed claim dates

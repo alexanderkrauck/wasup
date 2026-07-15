@@ -13,7 +13,7 @@ import base64
 import json
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config, db
-from eventindex.api.search import QueryBody
+from eventindex.api.search import QueryBody, VIENNA
 
 MAX_LIMIT = 200
 
@@ -436,6 +436,11 @@ def feed_ics(
         description="exclude events positively identified as taking place "
         "in a commercial sex-service context; unknown remains included",
     ),
+    include_time_unknown: bool = Query(
+        True,
+        description="include date-only events whose start time is unknown; "
+        "set false for a quieter timed-events-only calendar",
+    ),
     limit: int = Query(500, le=1000, ge=1),
 ):
     """Any filter combo as a calendar subscription (§9)."""
@@ -445,6 +450,8 @@ def feed_ics(
         from_, to, near, radius, bbox, category, min_confidence, include_terms,
         exclude_sex_service_context,
     )
+    if not include_time_unknown:
+        conditions.append("NOT o.time_unknown")
     params["limit"] = limit
     sql = f"""
         SELECT o.id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
@@ -467,11 +474,22 @@ def feed_ics(
         ev.add("summary", r["title"] + (" (unbestätigt)" if r["projected"] else ""))
         if r["time_unknown"]:
             # date-only sources: an all-day entry beats a fake midnight
-            ev.add("dtstart", r["starts_at"].date())
+            # (and must use the business timezone: Vienna midnight is still
+            # the previous date in UTC during DST).
+            local_start = r["starts_at"].astimezone(VIENNA).date()
+            ev.add("dtstart", local_start)
+            if r["ends_at"]:
+                # RFC 5545 requires DTSTART/DTEND value types to match and an
+                # all-day DTEND is exclusive. Source date ranges are inclusive.
+                local_end = r["ends_at"].astimezone(VIENNA).date()
+                ev.add("dtend", max(
+                    local_start + timedelta(days=1),
+                    local_end + timedelta(days=1),
+                ))
         else:
             ev.add("dtstart", r["starts_at"])
-        if r["ends_at"]:
-            ev.add("dtend", r["ends_at"])
+            if r["ends_at"]:
+                ev.add("dtend", r["ends_at"])
         if r["venue_name"]:
             ev.add("location", r["venue_name"])
         if r["url"]:

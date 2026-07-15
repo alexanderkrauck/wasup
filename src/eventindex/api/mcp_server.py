@@ -35,7 +35,7 @@ mcp = FastMCP(
     instructions=(
         "Find public events in Linz and roughly 25 km around it. Use "
         "search_events for structured date/category/price requests, search "
-        "and fetch for keyword retrieval, get_event after selecting a "
+        "and fetch only for name or title lookups, get_event after selecting a "
         "result, and get_calendar_link for read-only .ics subscriptions. "
         "Do not use Wasup for Vienna, restaurants, private-event creation, "
         "or invitations. Known commercial sex-service contexts are excluded "
@@ -183,6 +183,7 @@ class SearchResultStub(_Output):
 
 class StandardSearchResponse(_Output):
     results: list[SearchResultStub]
+    hint: str | None = None
 
 
 class FetchMetadata(_Output):
@@ -423,85 +424,20 @@ def get_calendar_link(
     )
 
 
-_STOPWORDS = {
-    "a", "an", "and", "around", "at", "events", "event", "find", "for",
-    "in", "index", "linz", "me", "near", "of", "please", "search", "show", "the",
-    "wasup", "what", "with", "veranstaltung", "veranstaltungen", "für",
-    "im", "in", "mir", "suche", "und", "zeige",
-}
-_SYNONYMS = {
-    "running": ("running", "run", "lauf", "jogging"),
-    "runs": ("run", "lauf", "running", "jogging"),
-    "run": ("run", "lauf", "running", "jogging"),
-    "laufen": ("lauf", "run", "running", "jogging"),
-    "lauf": ("lauf", "run", "running", "jogging"),
-    "concert": ("concert", "konzert"),
-    "concerts": ("concert", "konzert"),
-    "konzerte": ("konzert", "concert"),
-    "dancing": ("dancing", "dance", "tanz"),
-    "dance": ("dance", "dancing", "tanz"),
-    "tanzen": ("tanz", "dance", "dancing"),
-}
-
-
-def _keyword_tokens(query: str) -> list[str]:
-    return [
-        token for token in re.findall(r"[^\W\d_]+", query.lower())
-        if len(token) >= 3 and token not in _STOPWORDS
-    ]
-
-
-def _keyword_terms(tokens: list[str]) -> list[str]:
-    terms: list[str] = []
-    for token in tokens:
-        for term in _SYNONYMS.get(token, (token,)):
-            if term not in terms:
-                terms.append(term)
-    return terms
-
-
-def _keyword_categories(tokens: list[str]) -> list[str] | None:
-    if set(tokens) & {"running", "runs", "run", "laufen", "lauf"}:
-        return ["sport"]
-    if set(tokens) & {"concert", "concerts", "konzert", "konzerte"}:
-        return ["music"]
-    return None
-
-
-def _keyword_row_matches(tokens: list[str], row: dict) -> bool:
-    """Require every meaningful query token; synonyms within a token are OR.
-
-    The SQL filter intentionally accepts any synonym so it can retrieve a
-    broad candidate pool.  The standard connector contract then fails closed
-    here: a query for "football lounge nights special" must not degrade into
-    arbitrary events containing only "special" after the adult result is
-    policy-filtered.
-    """
-    haystack = " ".join([
-        row.get("title") or "",
-        row.get("venue_name") or "",
-        row.get("organizer") or "",
-        " ".join(row.get("category") or []),
-    ]).casefold()
-    for token in tokens:
-        matched = False
-        for term in _SYNONYMS.get(token, (token,)):
-            compound = r"[-\s]?".join(re.escape(part) for part in term.split())
-            # word-prefix OR compound-suffix, matching the SQL semantics.
-            if re.search(rf"(?<!\w){compound}|{compound}(?!\w)", haystack):
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
-
-
 # Fail-closed thresholds (audit B1 successor): boolean AND guaranteed that a
 # query aimed at a policy-filtered adult event could not degrade into
 # arbitrary single-word filler. Under ranked OR the mean threshold does that
 # job: one incidental exact hit among >=3 noise tokens stays below 0.35.
 _MIN_BEST_SIM = 0.45   # at least one token must be a real lexical hit
 _MIN_MEAN_SCORE = 0.35
+
+_SEARCH_HINT = (
+    "No lexical match. This tool only matches words against event titles, "
+    "venues, and organizers. Translate the request into structured filters "
+    "and call search_events instead, e.g. filters={\"from_dt\": \"<ISO "
+    "datetime>\", \"to_dt\": \"<ISO datetime>\", \"include_terms\": "
+    "[\"konzert\"]}."
+)
 
 
 def _haystack_words(row: dict) -> list[str]:
@@ -554,23 +490,26 @@ def _stemmed_tokens(query: str) -> list[str]:
 
 @mcp.tool(title="Search public Linz events by keyword", annotations=_READ_ONLY)
 def search(query: str) -> StandardSearchResponse:
-    """Use this when the user wants keyword search over upcoming public
-    Linz-area events or a client requires the standard search/fetch contract.
-    Use search_events for structured dates, categories, prices, or exclusions.
-    Do not use for other cities, restaurants, private events, or invitations.
-    Known commercial sex-service events and past-start occurrences are always
-    excluded; fewer than ten results is preferable to irrelevant filler."""
+    """Use this when the user gives an exact event title, venue, or
+    organizer name (fuzzy lexical lookup), or a client requires the
+    standard search/fetch contract. You are the translation engine:
+    convert natural-language requests into structured filters instead
+    of forwarding them here.
+    BAD:  search(query="Konzerte am Wochenende in Linz")
+    GOOD: search_events(filters={"from_dt": ..., "to_dt": ...,
+          "include_terms": ["konzert"]}) for dates, categories, prices.
+    GOOD: search(query="Posthof") - name lookup is what this tool is for.
+    Do not use for other cities, restaurants, private events, or
+    invitations. Known commercial sex-service events and past-start
+    occurrences are always excluded; fewer than ten results is preferable
+    to irrelevant filler."""
     from eventindex.api import app as api
 
     cutoff = datetime.now(VIENNA)
-    tokens = _keyword_tokens(query)
-    filters = SearchFilters(**(
-        FILTER_DEFAULTS | {
-            "from_dt": cutoff.isoformat(),
-            "categories": _keyword_categories(tokens),
-            "include_terms": _keyword_terms(tokens),
-        }
-    ))
+    tokens = _stemmed_tokens(query)
+    if not tokens:
+        return StandardSearchResponse(results=[], hint=_SEARCH_HINT)
+    filters = SearchFilters(**(FILTER_DEFAULTS | {"from_dt": cutoff.isoformat()}))
     payload = api._run_filters(
         filters,
         limit=2000,
@@ -579,12 +518,9 @@ def search(query: str) -> StandardSearchResponse:
         exclude_sex_service_context=True,
         include_inferred_terms=False,
     )
-    rows = [
-        row for row in payload["occurrences"]
-        if row["starts_at"] >= cutoff and _keyword_row_matches(tokens, row)
-    ]
+    rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
     results, seen = [], set()
-    for row in rows:
+    for row in _rank_rows(tokens, rows):
         semantic_key = (
             re.sub(r"\W+", "", row["title"].casefold()),
             (row.get("venue_name") or "").casefold(),
@@ -593,15 +529,18 @@ def search(query: str) -> StandardSearchResponse:
             continue
         seen.add(semantic_key)
         local = row["starts_at"].astimezone(VIENNA)
+        when = f"{local:%a %Y-%m-%d}"
+        when += " (time unknown)" if row["time_unknown"] else f" {local:%H:%M}"
         venue = f" @ {row['venue_name']}" if row.get("venue_name") else ""
         results.append(SearchResultStub(
             id=str(row["event_id"]),
-            title=f"{row['title']} ({local:%a %Y-%m-%d %H:%M}{venue})",
+            title=f"{row['title']} ({when}{venue})",
             url=_event_url(row["event_id"]),
         ))
         if len(results) >= 10:
             break
-    return StandardSearchResponse(results=results)
+    return StandardSearchResponse(
+        results=results, hint=None if results else _SEARCH_HINT)
 
 
 def _format_estimates(estimates: EventEstimates) -> str | None:

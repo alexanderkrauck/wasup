@@ -25,8 +25,13 @@ def _row(title, *, days=1.0, venue_address=None, category=None):
 
 def test_token_similarity_tiers():
     assert _token_similarity("konzert", "konzert") == 1.0
-    # German compound: stemmed token embedded in a longer word
+    # German head-final compound (+ inflection): the token ends the word
     assert _token_similarity("konzert", "gartenkonzert") == 0.75
+    assert _token_similarity("konzert", "gartenkonzerte") == 0.75
+    # a leading morpheme is a modifier, not the subject: it must stay
+    # below the compound-head tier (a Wochentagsmesse is not a Woche)
+    assert _token_similarity("wochen", "wochentagsmesse") < 0.45
+    assert _token_similarity("wochen", "wochenplan") < 0.75
     # short tokens never containment-match ("run" is inside "brunnen")
     assert _token_similarity("run", "brunnen") < 0.45
     # trigram fallback survives an inflection the stemmer missed
@@ -59,6 +64,23 @@ def test_ties_break_by_start_time_and_no_tokens_is_empty():
     early = _row("Salsa Abend", days=2)
     assert _rank_rows(["salsa"], [late, early]) == [early, late]
     assert _rank_rows([], [early]) == []
+
+
+def test_dead_minority_tokens_are_dropped():
+    # temporal words ("wochenend") match nothing anywhere; they must not
+    # veto or dilute the real subject token
+    konzert = _row("Gartenkonzert")
+    other = _row("Keramikmarkt")
+    assert _rank_rows(["konzert", "wochenend"], [other, konzert]) == [konzert]
+
+
+def test_common_location_tokens_are_downweighted():
+    # "linz" hits nearly every venue address; alone it must not pull a row
+    # into the results (real-data spot check: church services topped a
+    # concert query purely on address hits) - IDF makes it near-worthless
+    rows = [_row(f"Angebot {i}", venue_address="4020 Linz") for i in range(24)]
+    konzert = _row("Gartenkonzert", venue_address="4020 Linz")
+    assert _rank_rows(["konzert", "linz"], rows + [konzert]) == [konzert]
 
 
 def test_stemmed_tokens_use_the_german_snowball(conn):

@@ -7,6 +7,7 @@ ChatGPT-specific safety, relevance, response-shaping, and standard
 """
 
 import json
+import math
 import re
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -424,12 +425,9 @@ def get_calendar_link(
     )
 
 
-# Fail-closed thresholds (audit B1 successor): boolean AND guaranteed that a
-# query aimed at a policy-filtered adult event could not degrade into
-# arbitrary single-word filler. Under ranked OR the mean threshold does that
-# job: one incidental exact hit among >=3 noise tokens stays below 0.35.
-_MIN_BEST_SIM = 0.45   # at least one token must be a real lexical hit
-_MIN_MEAN_SCORE = 0.35
+_MIN_BEST_SIM = 0.45       # what counts as a real lexical hit
+_TOP_EVIDENCE_SHARE = 0.6  # a qualifying hit must carry near-top query weight
+_KEEP_SHARE = 0.5          # keep rows within half of the best row's score
 
 _SEARCH_HINT = (
     "No lexical match. This tool only matches words against event titles, "
@@ -451,24 +449,61 @@ def _haystack_words(row: dict) -> list[str]:
 def _token_similarity(token: str, word: str) -> float:
     if token == word:
         return 1.0
-    if len(token) >= 4 and token in word:
-        return 0.75  # German compounds/inflections: konzert | gartenkonzert
+    if len(token) >= 4:
+        # German compounds are head-final: suffix-anchored containment means
+        # a Gartenkonzert(e) IS a konzert, while a Wochentagsmesse is a
+        # Messe, not a Woche(nende). <=3 trailing chars covers inflections.
+        idx = word.rfind(token)
+        if idx >= 0 and len(word) - idx - len(token) <= 3:
+            return 0.75
     ta, tb = _trigrams(token), _trigrams(word)
     return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
 
 
 def _rank_rows(tokens: list[str], rows: list[dict]) -> list[dict]:
-    """Score = mean over query tokens of the best word similarity."""
+    """Rank rows by IDF-weighted lexical similarity, fail-closed three ways.
+
+    1. Tokens no row matches are dead vocabulary ("wochenend" on a corpus
+       without weekend titles): dropped from scoring rather than allowed to
+       veto. But when MOST tokens are dead the corpus lacks the query's
+       subject - possibly because policy filtering hid the only real match -
+       and the surviving incidental token must not resurrect filler.
+    2. A row qualifies only through a hit on a token carrying near-top
+       rarity weight: "linz" sits in a fifth of all addresses, so it ranks
+       but never qualifies a row on its own (real-data spot check: church
+       services at "OK Linz" topped a concert query purely on venue hits).
+    3. Relevance is relative: rows below half the best row's score are
+       dropped instead of backfilling behind a strong match. An unmatched
+       rare token dilutes every row equally, so no absolute floor is safe.
+    """
     if not tokens:
         return []
+    sims_by_row = [
+        [max((_token_similarity(t, w) for w in _haystack_words(row)),
+             default=0.0)
+         for t in tokens]
+        for row in rows
+    ]
+    pool = len(rows)
+    df = [sum(sims[i] >= _MIN_BEST_SIM for sims in sims_by_row)
+          for i in range(len(tokens))]
+    live = [i for i in range(len(tokens)) if df[i] > 0]
+    if len(live) * 2 < len(tokens):
+        return []
+    weight = {i: math.log((pool + 1) / (df[i] + 1)) + 1 for i in live}
+    min_gate_weight = _TOP_EVIDENCE_SHARE * max(weight.values())
+    total = sum(weight.values())
     scored = []
-    for row in rows:
-        words = _haystack_words(row)
-        sims = [max((_token_similarity(t, w) for w in words), default=0.0)
-                for t in tokens]
-        score = sum(sims) / len(sims)
-        if max(sims) >= _MIN_BEST_SIM and score >= _MIN_MEAN_SCORE:
-            scored.append((score, row))
+    for row, sims in zip(rows, sims_by_row):
+        if not any(sims[i] >= _MIN_BEST_SIM and weight[i] >= min_gate_weight
+                   for i in live):
+            continue
+        score = sum(weight[i] * sims[i] for i in live) / total
+        scored.append((score, row))
+    if not scored:
+        return []
+    best = max(score for score, _ in scored)
+    scored = [(s, r) for s, r in scored if s >= _KEEP_SHARE * best]
     scored.sort(key=lambda pair: (-pair[0], pair[1]["starts_at"]))
     return [row for _, row in scored]
 

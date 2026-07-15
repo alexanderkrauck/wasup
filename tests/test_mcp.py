@@ -348,6 +348,48 @@ def test_event_detail_never_returns_raw_claim_payload(conn, client):
     assert "SECRET PRIVATE ADDRESS" not in json.dumps(public_detail)
 
 
+def test_search_handles_natural_german_queries(conn, client):
+    konzert_id = _add_event(conn, "Gartenkonzert der Stadtkapelle",
+                            starts=NOW + timedelta(days=2), category=["music"])
+    markt_id = _add_event(conn, "Keramikmarkt am Hauptplatz",
+                          starts=NOW + timedelta(days=2), category=["culture"])
+    venue_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO venue (id, name, address) VALUES (%s, %s, %s)",
+        (venue_id, "Donaupark", "Untere Donaulände 7, 4020 Linz"),
+    )
+    conn.execute("UPDATE event SET venue_id = %s WHERE id IN (%s, %s)",
+                 (venue_id, konzert_id, markt_id))
+    conn.commit()
+
+    results = _call(client, "search", {
+        "query": "Konzerte am Wochenende in Linz",
+    })["results"]
+    ids = [uuid.UUID(result["id"]) for result in results]
+    assert ids[0] == konzert_id  # plural + compound + location all absorbed
+
+
+def test_search_returns_hint_when_nothing_matches(client):
+    out = _call(client, "search", {"query": "Quantenknödelfestival übermorgen"})
+    assert out["results"] == []
+    assert "search_events" in out["hint"]
+
+
+def test_search_labels_unknown_times_instead_of_midnight(conn, client):
+    event_id = _add_event(conn, "Sommerfest im Park",
+                          starts=NOW + timedelta(days=2), category=["culture"])
+    conn.execute(
+        "UPDATE occurrence SET time_unknown = true WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+    results = _call(client, "search", {"query": "Sommerfest"})["results"]
+    title = next(r["title"] for r in results
+                 if uuid.UUID(r["id"]) == event_id)
+    assert "(time unknown)" in title
+    assert "00:00" not in title
+
+
 def test_submission_artifact_has_exact_stable_case_contract():
     submission = json.loads(
         (Path(__file__).parents[1] / "chatgpt-app-submission.json").read_text()

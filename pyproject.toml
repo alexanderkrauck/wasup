@@ -24,7 +24,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pillow>=12.3.0",
+    "pytest>=8",
+]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not live'"

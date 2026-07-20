@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1920" viewBox="0 0 1920 1920">
+  <rect width="1920" height="1920" fill="#090909"/>
+  <rect x="420" y="0" width="1080" height="18" fill="#c8102e"/>
+  <rect x="420" y="18" width="1080" height="10" fill="#ffffff"/>
+  <rect x="420" y="28" width="1080" height="18" fill="#c8102e"/>
+  <text x="540" y="650" fill="#c8102e" font-family="Arial, sans-serif" font-size="34" font-weight="700">PLATFORM SETUP • WEB</text>
+  <text x="540" y="775" fill="#ffffff" font-family="Arial, sans-serif" font-size="78" font-weight="700">Installed in ChatGPT</text>
+  <text x="540" y="870" fill="#ffffff" font-family="Arial, sans-serif" font-size="78" font-weight="700">Plugins</text>
+  <text x="540" y="1010" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">The same production connector is available</text>
+  <text x="540" y="1070" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">from ChatGPT on the web.</text>
+  <rect x="540" y="1190" width="840" height="2" fill="#333333"/>
+  <text x="540" y="1280" fill="#888888" font-family="Arial, sans-serif" font-size="32">Next: installed plugin and a live provenance result</text>
+</svg>

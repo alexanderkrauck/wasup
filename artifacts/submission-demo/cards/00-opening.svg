@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="1920" viewBox="0 0 1920 1920">
+  <rect width="1920" height="1920" fill="#090909"/>
+  <rect x="420" y="0" width="1080" height="18" fill="#c8102e"/>
+  <rect x="420" y="18" width="1080" height="10" fill="#ffffff"/>
+  <rect x="420" y="28" width="1080" height="18" fill="#c8102e"/>
+  <image x="760" y="330" width="400" height="400" href="file:///Users/alexanderkrauck/Coding/eventindex/assets/wasup-logo.png" xlink:href="file:///Users/alexanderkrauck/Coding/eventindex/assets/wasup-logo.png"/>
+  <text x="960" y="865" fill="#ffffff" font-family="Arial, sans-serif" font-size="112" font-weight="700" text-anchor="middle">wasup</text>
+  <text x="960" y="975" fill="#d8d8d8" font-family="Arial, sans-serif" font-size="52" font-weight="600" text-anchor="middle">ChatGPT App submission demo</text>
+  <text x="960" y="1070" fill="#a8a8a8" font-family="Arial, sans-serif" font-size="36" text-anchor="middle">Five positive test cases on production data</text>
+  <text x="960" y="1140" fill="#a8a8a8" font-family="Arial, sans-serif" font-size="36" text-anchor="middle">ChatGPT web + iOS • 15 July 2026</text>
+  <rect x="650" y="1260" width="620" height="74" rx="37" fill="#241116" stroke="#c8102e" stroke-width="2"/>
+  <text x="960" y="1309" fill="#ffffff" font-family="Arial, sans-serif" font-size="31" font-weight="600" text-anchor="middle">READ-ONLY EVENT DISCOVERY</text>
+</svg>

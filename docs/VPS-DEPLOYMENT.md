@@ -100,8 +100,9 @@ under user `eventindex` at /opt/eventindex, cloned from GitHub. systemd:
 eventindex-api (127.0.0.1:8400), eventindex-worker, timers for
 schedule/digest/discover (Europe/Vienna OnCalendar). No public exposure
 until domain+Caddy: access via `ssh -L 8400:localhost:8400 netcup`.
-Deploy = `cd /opt/eventindex && git pull && systemctl restart
-eventindex-api eventindex-worker eventindex-worker2 eventindex-worker3`.
+Deploy = `cd /opt/eventindex && git pull && uv sync && systemctl restart
+eventindex-api eventindex-worker eventindex-worker2 eventindex-worker3`
+(`uv sync` since 2026-07-20: pypdf).
 
 **THREE worker units exist** (worker2/worker3 were added undocumented at
 some point; discovered 2026-07-13 when a deploy restarted only

@@ -48,8 +48,8 @@ That last trigger is the important one. **"We might need it later" is always Cla
 
 Explicitly FORBIDDEN in v1, even as stubs, interfaces, or "preparation" (HURDLES §H7.2 - each has a re-entry trigger, none has fired):
 - socials scraping (Instagram/Facebook/Telegram)
-- vision/PDF extraction path
-- tier-D agentic crawls
+- ~~vision/PDF extraction path~~ — re-entry trigger FIRED 2026-07-20 (Alexander: human-parity extraction is THE requirement; anything a human can extract from a non-login, non-video source, the system extracts). In scope: PDF text tier, poster/screenshot vision tier, both through the one validated payload path.
+- ~~tier-D agentic crawls~~ — re-entry trigger FIRED 2026-07-20 (same requirement): the extractor agent is the ladder's last rung — escalation-only (self-heal, low-yield, degraded cadence, parity audit, agentic-mode sources), budget-ringed, never the default crawl path.
 - ~~demographics/gender/fullness *inference*~~ — re-entry trigger FIRED 2026-07-06 (Alexander: agent search needs rich inferred attributes). In scope per H5: priors + explicit-text-evidence only, confidence-capped, labeled estimates.
 - takedown self-service endpoint (manual email suffices; the suppression heuristics of §9b ARE in scope)
 - ~~any frontend~~ — re-entry trigger FIRED 2026-07-09 (Alexander: visualization page). In scope: exactly one dependency-free HTML calendar page over the public read API (`GET /`). Still forbidden: frameworks, SPA, build step, any second page without a new trigger.

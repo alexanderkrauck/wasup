@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1920" height="1920" viewBox="0 0 1920 1920">
+  <rect width="1920" height="1920" fill="#090909"/>
+  <rect x="420" y="0" width="1080" height="18" fill="#c8102e"/>
+  <rect x="420" y="18" width="1080" height="10" fill="#ffffff"/>
+  <rect x="420" y="28" width="1080" height="18" fill="#c8102e"/>
+  <image x="820" y="245" width="280" height="280" href="file:///Users/alexanderkrauck/Coding/eventindex/assets/wasup-logo.png" xlink:href="file:///Users/alexanderkrauck/Coding/eventindex/assets/wasup-logo.png"/>
+  <text x="540" y="700" fill="#ffffff" font-family="Arial, sans-serif" font-size="82" font-weight="700">Tools demonstrated</text>
+  <text x="540" y="825" fill="#ffffff" font-family="Menlo, monospace" font-size="36">search_events • get_event</text>
+  <text x="540" y="895" fill="#ffffff" font-family="Menlo, monospace" font-size="36">get_calendar_link • search • fetch</text>
+  <rect x="540" y="1010" width="840" height="2" fill="#333333"/>
+  <text x="540" y="1110" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">Read-only • no account required</text>
+  <text x="540" y="1175" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">Live public event data with provenance</text>
+  <text x="540" y="1325" fill="#c8102e" font-family="Menlo, monospace" font-size="40">https://wasup.at/mcp</text>
+</svg>

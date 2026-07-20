@@ -1,0 +1,21 @@
+wasup.at, wasup.goedly.com {
+	handle /.well-known/openai-apps-challenge {
+		header Cache-Control "no-store"
+		header Content-Type "text/plain; charset=utf-8"
+		respond "fvSJLRXuT5BVWxznbGO0w4gsSufWD1INcEWzwUn_BzU" 200
+	}
+
+	handle /demo-chatgpt.mp4 {
+		root * /var/www/wasup
+		header Cache-Control "public, max-age=3600"
+		file_server
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8400
+	}
+}
+
+www.wasup.at {
+	redir https://wasup.at{uri} permanent
+}

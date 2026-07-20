@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1920" viewBox="0 0 1920 1920">
+  <rect width="1920" height="1920" fill="#090909"/>
+  <rect x="420" y="0" width="1080" height="18" fill="#c8102e"/>
+  <rect x="420" y="18" width="1080" height="10" fill="#ffffff"/>
+  <rect x="420" y="28" width="1080" height="18" fill="#c8102e"/>
+  <text x="540" y="630" fill="#c8102e" font-family="Arial, sans-serif" font-size="34" font-weight="700">3 / 5 • CALENDAR SUBSCRIPTION</text>
+  <text x="540" y="765" fill="#ffffff" font-family="Arial, sans-serif" font-size="82" font-weight="700">Music events for</text>
+  <text x="540" y="860" fill="#ffffff" font-family="Arial, sans-serif" font-size="82" font-weight="700">the next week</text>
+  <rect x="540" y="965" width="840" height="104" rx="18" fill="#181818" stroke="#353535" stroke-width="2"/>
+  <text x="585" y="1033" fill="#ffffff" font-family="Menlo, monospace" font-size="40">get_calendar_link</text>
+  <text x="540" y="1175" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">A filtered, read-only .ics link</text>
+  <text x="540" y="1235" fill="#b8b8b8" font-family="Arial, sans-serif" font-size="38">opens directly in Apple Calendar.</text>
+</svg>

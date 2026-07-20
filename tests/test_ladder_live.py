@@ -112,6 +112,7 @@ def _source(conn, url, name, **cols):
         tuple(Jsonb(v) if isinstance(v, (dict, list)) else v
               for v in fields.values()),
     ).fetchone()
+    conn.commit()  # the spend ledger writes on its own connection
     return dict(row) | {"lat": None, "lon": None}
 
 

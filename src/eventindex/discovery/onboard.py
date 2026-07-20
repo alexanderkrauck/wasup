@@ -396,25 +396,39 @@ def _zero_items_hint(recipe: Recipe, sample_titles: list[str]) -> str:
 
 def _accept_events(args, source, result: "OnboardResult") -> str:
     """Validate an emit_events batch through the ONE payload path (schema ->
-    to_payloads -> sanity gates) and collect what survives. The agent gets an
-    honest count back, never silent acceptance."""
+    to_payloads -> sanity gates) and collect what survives. Lenient on tool-
+    call ergonomics (models omit null fields; live 2026-07-20: four emits
+    burned on 'Field required'), strict on content: each event validates
+    individually so one malformed entry never rejects the batch."""
     from pydantic import ValidationError as VErr
 
     from eventindex.extract import sanity_filter
-    from eventindex.extract.llm_text import LLMExtraction, to_payloads
+    from eventindex.extract.llm_text import LLMEvent, LLMExtraction, to_payloads
     from eventindex.fetch.recipe import _coerce_list
 
-    try:
-        extraction = LLMExtraction.model_validate(
-            {"events": _coerce_list(args.get("events") or [])})
-    except VErr as e:
-        return f"emit_events schema invalid:\n{str(e)[:800]}"
-    payloads = sanity_filter(to_payloads(extraction), source)
+    raw = _coerce_list(args.get("events") or [])
+    if not isinstance(raw, list):
+        return "emit_events schema invalid: events must be an array"
+    blank = {name: None for name in LLMEvent.model_fields}
+    valid, errors = [], []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            errors.append("not an object")
+            continue
+        try:
+            valid.append(LLMEvent.model_validate(blank | entry))
+        except VErr as e:
+            errors.append(f"{entry.get('title', '?')}: "
+                          + "; ".join(err["msg"] for err in e.errors()[:2]))
+    payloads = sanity_filter(to_payloads(LLMExtraction(events=valid)), source)
     result.payloads += payloads
-    total = len(extraction.events)
-    return (f"accepted {len(payloads)}/{total} events "
-            f"({total - len(payloads)} dropped: past date, placeholder title, "
-            f"or non-event). Total collected this session: {len(result.payloads)}.")
+    report = (f"accepted {len(payloads)}/{len(raw)} events "
+              f"({len(valid) - len(payloads)} dropped by sanity gates: past "
+              f"date, placeholder title, or non-event). Total collected this "
+              f"session: {len(result.payloads)}.")
+    if errors:
+        report += " Schema-invalid entries: " + " | ".join(errors[:3])[:400]
+    return report
 
 
 def _spent_on_job(tx, job_id) -> float:
@@ -679,6 +693,12 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
                 "event's detail page is fetched on real crawls. Emit again."
             )
     required_horizon = _required_horizon(min_horizon_days, site_horizon_days)
+    if (expected_events and validation.ok
+            and validation.items >= expected_events):
+        # the recipe demonstrably reaches EVERYTHING the agent saw: depth is
+        # proven, whatever horizon number was (mis)reported (live 2026-07-20:
+        # a correct 3-event recipe was rejected against a hallucinated 395d)
+        required_horizon = 0
     if required_horizon and validation.ok:
         # median, not max: one long-running exhibition on page 1 must not
         # impersonate depth
@@ -893,21 +913,34 @@ def _execute(name, args, browser: Browser, source, tx, job_id,
         if name == "emit_events" and result is not None:
             return _accept_events(args, source, result)
         if name == "read_screenshot":
+            from eventindex.extract import sanity_filter
             from eventindex.extract.vision import extract_image
 
             payloads = extract_image(tx, browser.screenshot(), "image/png",
                                      source, job_id=job_id)
+            payloads = sanity_filter(payloads, source)
             if not payloads:
                 return ("screenshot read: no events legible in the rendered "
                         "page (empty, decorative, or unreadable)")
+            # already validated through the one payload path: collect them
+            # directly - a session must not fail because the model never
+            # echoed what vision read (live 2026-07-20: poster read
+            # perfectly, agent wandered until exhaustion)
+            known = {(p["title"]["value"], p["starts_at"]["value"])
+                     for p in result.payloads} if result else set()
+            fresh = [p for p in payloads
+                     if (p["title"]["value"], p["starts_at"]["value"]) not in known]
+            if result is not None:
+                result.payloads += fresh
             lines = [
                 f"- {p['title']['value']} | starts {p['starts_at']['value']}"
                 + (f" | {p['venue_name']['value']}" if "venue_name" in p else "")
                 for p in payloads
             ]
-            return ("screenshot read - events legible in the rendered page "
-                    "(verify and submit the correct ones via emit_events):\n"
-                    + "\n".join(lines))
+            return (f"screenshot read: {len(fresh)} new events extracted and "
+                    "COLLECTED automatically (no emit_events needed for "
+                    "these; use emit_events only for corrections or events "
+                    "the screenshot missed):\n" + "\n".join(lines))
         if name == "emit_recipe":
             try:
                 recipe = Recipe.model_validate(args["recipe"])

@@ -36,11 +36,15 @@ def test_emit_events_validates_and_collects():
 
 
 def test_emit_events_rejects_garbage_without_raising():
+    # one malformed entry never rejects the batch; models omitting null
+    # fields is tolerated (live 2026-07-20: four emits burned on that)
     result = onboard.OnboardResult()
     obs = onboard._accept_events(
-        {"events": [{"title": 42}]}, {"id": None, "name": "X"}, result)
-    assert "schema invalid" in obs
-    assert result.payloads == []
+        {"events": [{"title": 42}, _event(title="Gutes Konzert")]},
+        {"id": None, "name": "X"}, result)
+    assert "accepted 1/2" in obs
+    assert "Schema-invalid entries" in obs
+    assert [p["title"]["value"] for p in result.payloads] == ["Gutes Konzert"]
 
 
 def test_vision_extract_builds_data_url_and_payloads(conn, monkeypatch):

@@ -156,6 +156,22 @@ def _update_source_stats(tx, job, source, payloads: list, method: str) -> None:
     )
 
 
+AGENT_COOLDOWN_DAYS = 7  # escalation heuristics never storm the agent
+
+
+def _agent_cooldown_over(hint: dict) -> bool:
+    from datetime import datetime, timedelta, timezone
+
+    last = hint.get("last_agent_extract")
+    if not last:
+        return True
+    try:
+        ts = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - ts > timedelta(days=AGENT_COOLDOWN_DAYS)
+
+
 def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     """Recipe-driven crawl (§5b) with the self-healing contract: validation
     failure OR >80% yield drop vs EMA, twice in a row -> degraded + re-onboard."""
@@ -174,10 +190,18 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     healthy = validation.ok and not yield_dropped
     hint = source["extraction_hint"] or {}
     degraded_count = 0 if healthy else hint.get("degraded_count", 0) + 1
+    # completeness heuristic: a recipe can be formally healthy yet reach a
+    # fraction of what the agent SAW on the site (poster/PDF halves, capped
+    # windows). Two consecutive shortfalls send the agent, cooldown-limited.
+    expected = hint.get("expected_events") or 0
+    low_yield = (healthy and expected >= 8
+                 and len(payloads) < 0.25 * expected)
+    low_yield_count = hint.get("low_yield_count", 0) + 1 if low_yield else 0
     tx.execute(
         "UPDATE source SET extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
-        "|| jsonb_build_object('degraded_count', %s::int) WHERE id = %s",
-        (degraded_count, source["id"]),
+        "|| jsonb_build_object('degraded_count', %s::int, "
+        "'low_yield_count', %s::int) WHERE id = %s",
+        (degraded_count, low_yield_count, source["id"]),
     )
 
     _insert_claims(tx, source, crawl_id, payloads)
@@ -194,10 +218,19 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
 
     jobs = []
     if degraded_count >= 2:
+        # the agent both extracts (index never dark) and repairs the recipe
         tx.execute("UPDATE source SET status = 'degraded' WHERE id = %s", (source["id"],))
-        jobs.append({"kind": "onboard", "payload": {
+        jobs.append({"kind": "agent_extract", "payload": {
             "source_id": str(source["id"]),
             "reason": f"self-heal: {'; '.join(validation.reasons)[:300]}",
+        }})
+    elif low_yield_count >= 2 and _agent_cooldown_over(hint):
+        jobs.append({"kind": "agent_extract", "payload": {
+            "source_id": str(source["id"]),
+            "reason": (f"completeness: recipe extracts {len(payloads)} events "
+                       f"but you estimated ~{expected} on this site - find "
+                       "and extract what the recipe misses (posters? PDFs? "
+                       "deeper pages?)"),
         }})
     if payloads:
         pending = tx.execute(
@@ -314,6 +347,11 @@ def agent_extract(job: dict, tx) -> list[dict]:
     if result.payloads:
         _insert_claims(tx, source, crawl_id, result.payloads)
         _update_source_stats(tx, job, source, result.payloads, "agent")
+    else:
+        # the scheduler keys on last_crawled; an empty agent run must not
+        # look like "never tried" and re-enqueue every tick
+        tx.execute("UPDATE source SET last_crawled = now() WHERE id = %s",
+                   (source["id"],))
 
     hint = {"last_agent_extract":
             datetime.now(timezone.utc).isoformat(timespec="seconds"),

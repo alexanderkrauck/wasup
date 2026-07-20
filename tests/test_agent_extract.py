@@ -193,3 +193,55 @@ def test_recipe_image_selector_extracts_and_caches(conn, monkeypatch):
                               fetch_page=lambda url: html)
     assert calls["vision"] == 1
     assert payloads2 == []
+
+
+def _recipe_source(conn, hint):
+    from psycopg.types.json import Jsonb
+
+    recipe = {"entry_urls": ["https://x.at/events"],
+              "pagination": {"type": "none"}, "version": 1}
+    return conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, recipe, yield_ema, "
+        "extraction_hint) VALUES ('X', 'https://x.at', 'website', 3, 0.5, "
+        "%s, 4, %s) RETURNING id",
+        (Jsonb(recipe), Jsonb(hint)),
+    ).fetchone()["id"]
+
+
+def test_low_yield_recipe_escalates_to_agent_after_two_strikes(conn, monkeypatch):
+    from eventindex.extract import field
+    from eventindex.fetch.recipe import ValidationResult
+
+    few = [{"title": field("Einzelkonzert", 0.8),
+            "starts_at": field(FUTURE, 0.8)}] * 3
+    monkeypatch.setattr(
+        handlers, "run_recipe",
+        lambda recipe, source, tx, job_id=None: (
+            few, ValidationResult(ok=True, items=3, reasons=[], pages=1)),
+    )
+    sid = _recipe_source(conn, {"expected_events": 20, "low_yield_count": 1})
+    job = {"id": uuid.uuid4(), "attempts": 1, "payload": {"source_id": str(sid)}}
+    new_jobs = handlers.crawl(job, conn)
+    kinds = {j["kind"] for j in new_jobs}
+    assert "agent_extract" in kinds
+    reason = next(j for j in new_jobs if j["kind"] == "agent_extract")
+    assert "completeness" in reason["payload"]["reason"]
+
+
+def test_low_yield_escalation_respects_cooldown(conn, monkeypatch):
+    from eventindex.extract import field
+    from eventindex.fetch.recipe import ValidationResult
+
+    few = [{"title": field("Einzelkonzert", 0.8),
+            "starts_at": field(FUTURE, 0.8)}] * 3
+    monkeypatch.setattr(
+        handlers, "run_recipe",
+        lambda recipe, source, tx, job_id=None: (
+            few, ValidationResult(ok=True, items=3, reasons=[], pages=1)),
+    )
+    recent = NOW.isoformat(timespec="seconds")
+    sid = _recipe_source(conn, {"expected_events": 20, "low_yield_count": 1,
+                                "last_agent_extract": recent})
+    job = {"id": uuid.uuid4(), "attempts": 1, "payload": {"source_id": str(sid)}}
+    new_jobs = handlers.crawl(job, conn)
+    assert all(j["kind"] != "agent_extract" for j in new_jobs)

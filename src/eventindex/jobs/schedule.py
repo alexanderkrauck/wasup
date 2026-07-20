@@ -121,10 +121,35 @@ def escalate_broken(conn) -> int:
             conn.execute(
                 "UPDATE source SET status = 'degraded' WHERE id = %s", (r["id"],)
             )
-            enqueue(conn, "onboard", {
+            enqueue(conn, "agent_extract", {
                 "source_id": str(r["id"]),
                 "reason": f"self-heal: last {BROKEN_STREAK} crawls all errored",
             })
+    return len(rows)
+
+
+def enqueue_agentic(conn) -> int:
+    """Sources no recipe can express (mode=agentic) are crawled BY the agent
+    at their normal cadence; the per-source monthly budget is the governor -
+    an expensive source parks itself, visibly, instead of silently rotting."""
+    rows = conn.execute(
+        """
+        SELECT s.id FROM source s
+        WHERE s.status = 'active'
+          AND s.extraction_hint->>'mode' = 'agentic'
+          AND (s.last_crawled IS NULL
+               OR now() > s.last_crawled + s.crawl_interval)
+          AND NOT EXISTS (
+              SELECT 1 FROM jobs j
+              WHERE j.kind = 'agent_extract'
+                AND j.status IN ('pending', 'running')
+                AND j.payload->>'source_id' = s.id::text
+          )
+        """
+    ).fetchall()
+    with conn.transaction():
+        for r in rows:
+            enqueue(conn, "agent_extract", {"source_id": str(r["id"])})
     return len(rows)
 
 
@@ -247,6 +272,9 @@ def schedule(conn) -> int:
         print(f"escalated {broken} persistently erroring sources to re-onboarding")
     if enqueue_nightly_qa(conn):
         print("enqueued the daily qa_check sample")
+    agentic = enqueue_agentic(conn)
+    if agentic:
+        print(f"enqueued {agentic} agentic-mode extraction sessions")
     fixed = enqueue_timefix(conn)
     if fixed:
         print(f"enqueued {fixed} timefix detail fetches (date-only events)")
@@ -276,7 +304,8 @@ def schedule(conn) -> int:
                  / greatest(s.cost_ema, 0.001) AS priority
         FROM source s
         LEFT JOIN uniqueness u ON u.source_id = s.id
-        WHERE (
+        WHERE coalesce(s.extraction_hint->>'mode', '') != 'agentic'
+        AND (
             (
                 s.status = 'active' AND (
                     s.last_crawled IS NULL

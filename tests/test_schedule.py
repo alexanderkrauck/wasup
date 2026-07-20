@@ -88,9 +88,11 @@ def test_persistently_erroring_source_escalates_once(conn):
         "SELECT status FROM source WHERE id = %s", (sick,)
     ).fetchone()["status"]
     assert status == "degraded"
-    onboard = conn.execute("SELECT payload FROM jobs WHERE kind = 'onboard'").fetchone()
-    assert onboard["payload"]["source_id"] == str(sick)
-    assert "self-heal" in onboard["payload"]["reason"]
+    repair = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'agent_extract'"
+    ).fetchone()
+    assert repair["payload"]["source_id"] == str(sick)
+    assert "self-heal" in repair["payload"]["reason"]
     assert escalate_broken(conn) == 0  # degraded sources are out of the loop
 
 
@@ -213,3 +215,28 @@ def test_timefix_covers_locationless_events_with_deep_urls(conn):
         "SELECT payload->>'event_id' AS e FROM jobs WHERE kind='timefix'"
     ).fetchone()["e"] == str(eid)
     assert enqueue_timefix(conn) == 0  # 30d re-fetch budget respected
+
+
+def test_agentic_sources_get_agent_sessions_not_crawls(conn):
+    from eventindex.jobs.schedule import enqueue_agentic, schedule
+
+    sid = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, extraction_hint) "
+        "VALUES ('Poster Cafe', 'https://pc.at', 'website', 3, 0.5, "
+        "'{\"mode\": \"agentic\"}') RETURNING id"
+    ).fetchone()["id"]
+    conn.commit()
+
+    assert enqueue_agentic(conn) == 1
+    conn.commit()
+    jobs = conn.execute("SELECT kind, payload FROM jobs").fetchall()
+    assert [j["kind"] for j in jobs] == ["agent_extract"]
+    # a pending session blocks a duplicate, and the crawl path skips agentic
+    assert enqueue_agentic(conn) == 0
+    schedule(conn)
+    conn.commit()
+    crawls = conn.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'crawl' "
+        "AND payload->>'source_id' = %s", (str(sid),)
+    ).fetchall()
+    assert crawls == []

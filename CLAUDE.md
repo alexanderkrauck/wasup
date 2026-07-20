@@ -43,6 +43,7 @@ That last trigger is the important one. **"We might need it later" is always Cla
 - **No auth framework.** API keys in a table, checked in one middleware function.
 - **Every pipeline stage is a pure function** `(payload, tx) -> rows to insert / jobs to enqueue`. No in-memory state, no singletons holding data, no background threads beyond the worker loop.
 - **Delete code instead of flagging it off.** Git remembers.
+- **No regex for content interpretation (Alexander, 2026-07-20: "regex = bad").** Any judgment about what text *means* — weekday words, cadence phrases, announcement-vs-event, non-event patterns — goes to a cheap LLM call with a pydantic schema, cached by content key (the adjudication/text_recurrence pattern). Semantic regexes are vocabulary whack-a-mole: the German-only weekday regex missed "Wednesday Tempo" the day after it shipped. Mechanical string handling (URL parsing, selector `@attr` splitting) is tolerated; every new regex is suspect by default.
 
 ## Scope fence (v1)
 

@@ -6,9 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from eventindex.extract import is_non_event, sanity_filter
-from eventindex.resolve.rebuild import (Claim, _recurrence_of,
-                                        _reconcile_titled_weekday,
-                                        _title_weekday)
+from eventindex.resolve.rebuild import Claim, _recurrence_of
 
 VIENNA = ZoneInfo("Europe/Vienna")
 
@@ -31,46 +29,38 @@ _REC = {"freq": "daily", "weekday": None, "week_of_month": None,
         "as_stated": "täglich in Christkönig"}
 
 
-def test_weekday_titled_daily_rule_coerces_to_weekly():
-    # the live defect: Freitag-titled mass + 'täglich' group description
-    friday = datetime(2026, 7, 17, 8, 0, tzinfo=VIENNA)  # a Friday
+def test_recurrence_of_keeps_rules_for_the_verifier():
+    # weekdays are not special (Alexander 2026-07-20): no vocabulary gate
+    # here - rule-vs-event coherence is the H1.1 verifier's judgment
+    friday = datetime(2026, 7, 17, 8, 0, tzinfo=VIENNA)
     c = _claim("Wochentagsmesse (Eucharistiefeier) - Freitag", friday, _REC)
     rec = _recurrence_of(c)
-    assert rec is not None
-    assert rec.freq == "weekly"
-    assert rec.weekday == "FR"
+    assert rec is not None and rec.freq == "daily"
 
 
-def test_weekday_titled_daily_rule_fails_closed_on_anchor_mismatch():
-    tuesday = datetime(2026, 7, 14, 8, 0, tzinfo=VIENNA)
-    c = _claim("Wochentagsmesse - Freitag", tuesday, _REC)
-    assert _recurrence_of(c) is None
+def test_verifier_judges_rule_against_event_context(monkeypatch):
+    from types import SimpleNamespace
 
+    from eventindex.resolve import recurrence as rec_mod
 
-def test_contradicting_weekly_rule_fails_closed():
+    seen = {}
+
+    def fake_complete(tx, prompt, schema, **kw):
+        seen["prompt"] = prompt
+        return SimpleNamespace(consistent=False)
+
+    monkeypatch.setattr("eventindex.llm.complete", fake_complete)
+    rec = rec_mod.Recurrence.model_validate(_REC)
     friday = datetime(2026, 7, 17, 8, 0, tzinfo=VIENNA)
-    rec = _REC | {"freq": "weekly", "weekday": "TU",
-                  "as_stated": "jeden Dienstag"}
-    c = _claim("Gebet am Freitag", friday, rec)
-    assert _recurrence_of(c) is None
-
-
-def test_title_weekday_detection_bounds():
-    assert _title_weekday("Brunch am Sonntag") == "SU"
-    # compounds stay unmatched: a named one-off must not be coerced
-    assert _title_weekday("Sonntagsbrunch im Hof") is None
-    assert _title_weekday("Wochentagsmesse - Freitag") == "FR"
-    assert _title_weekday("Konzert am Montag oder Dienstag") is None  # two
-    assert _title_weekday("Freitagskonzert") is None  # compound, no boundary
-    assert _title_weekday("Sommerfest") is None
-
-
-def test_untitled_rules_pass_through_unchanged():
-    friday = datetime(2026, 7, 17, 19, 0, tzinfo=VIENNA)
-    rec = _REC | {"as_stated": "täglich geöffnet"}
-    c = _claim("Sommerkino im Hof", friday, rec)
-    out = _recurrence_of(c)
-    assert out is not None and out.freq == "daily"
+    tuesday = datetime(2026, 7, 21, 8, 0, tzinfo=VIENNA)
+    ok = rec_mod.verify(None, rec, [tuesday, friday],
+                        title="Wochentagsmesse (Eucharistiefeier) - Freitag",
+                        anchor=friday)
+    assert ok is False
+    # the verdict weighs the event itself, not only as_stated
+    assert "Wochentagsmesse (Eucharistiefeier) - Freitag" in seen["prompt"]
+    assert "Friday" in seen["prompt"]      # the anchor, weekday spelled out
+    assert "Tuesday" in seen["prompt"]     # the contradicting expansion
 
 
 def test_announcements_are_non_events():

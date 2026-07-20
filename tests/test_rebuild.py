@@ -256,7 +256,7 @@ def test_cached_text_recurrence_makes_a_series_without_llm(conn):
 
     sid = _source(conn, "aggregator", 0.9)
     desc = "Salsa Social - jeden Dienstag um 19:00 im Club X"
-    key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    key = hashlib.md5(f"textrec2|Salsa Social|{desc}".encode()).hexdigest()
     rec = {
         "freq": "weekly", "weekday": "TU", "week_of_month": None, "interval": 1,
         "time": "19:00", "duration_minutes": None, "except_holidays": [],
@@ -510,7 +510,7 @@ def test_text_recurrence_verified_at_birth(conn, monkeypatch):
     events, occs = _canon(conn)
     assert events[0]["kind"] == "one_off"  # not a wrong-weekday series
     assert len(occs) == 1                  # observed date only
-    key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    key = hashlib.md5(f"textrec2|Wednesday Tempo|{desc}".encode()).hexdigest()
     cached = conn.execute(
         "SELECT recurrence FROM text_recurrence WHERE content_key = %s", (key,)
     ).fetchone()

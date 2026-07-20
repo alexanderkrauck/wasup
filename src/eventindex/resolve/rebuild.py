@@ -223,54 +223,11 @@ def _recurrence_of(c: Claim) -> Recurrence | None:
         # The schema also cannot represent "daily except Tue/Sat"; expanding
         # that as all seven days is knowingly wrong, so it fails closed too.
         return None
-    return _reconcile_titled_weekday(rec, c)
-
-
-def _title_weekday(title: str) -> str | None:
-    """The single weekday a title names ('Wochentagsmesse - Freitag',
-    'Sonntagsbrunch'), or None when there is none or several. Full German
-    weekday words only - abbreviations ('So.') collide with real words."""
-    found = {m.group(1).lower()
-             for m in _TITLE_WEEKDAY_RE.finditer(title or "")}
-    if len(found) == 1:
-        return _TITLE_WD_CODE[found.pop()]
-    return None
-
-
-def _reconcile_titled_weekday(rec: Recurrence | None,
-                              c: Claim) -> Recurrence | None:
-    """Red team 2026-07-20: a Freitag-titled parish mass carried freq=daily
-    ('täglich in Christkönig' describes the WHOLE weekday-mass group on the
-    page) and served Tuesday occurrences under a Friday title. The rule's
-    consistency check compares against as_stated, which never sees the
-    title - this deterministic gate does. A weekday-titled series is that
-    weekday's series: daily coerces to weekly on it (when the claim's own
-    date agrees), a contradicting weekly rule fails closed."""
-    if rec is None:
-        return None
-    titled = _title_weekday(c.title)
-    if titled is None or rec.freq in ("once", "irregular"):
-        return rec
-    claim_wd = (_WD_CODES[c.starts_at.astimezone(VIENNA).weekday()]
-                if c.starts_at else None)
-    if rec.freq == "daily":
-        if claim_wd == titled:
-            return rec.model_copy(update={"freq": "weekly", "weekday": titled})
-        return None  # title and anchor disagree: no basis to expand anything
-    if rec.weekday is None and claim_wd == titled:
-        return rec.model_copy(update={"weekday": titled})
-    if rec.weekday is not None and rec.weekday != titled:
-        return None  # rule contradicts the titled weekday: fail closed
+    # NOTE (2026-07-20, Alexander: "weekdays are not special", "regex = bad"):
+    # rule-vs-event coherence is judged by the H1.1 verifier with full event
+    # context (title + anchor), never by vocabulary heuristics here. The
+    # _DAILY_CADENCE_RE gate above is migration debt toward that same call.
     return rec
-
-
-_TITLE_WEEKDAY_RE = re.compile(
-    r"\b(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag)e?s?\b",
-    re.IGNORECASE,
-)
-_TITLE_WD_CODE = {"montag": "MO", "dienstag": "TU", "mittwoch": "WE",
-                  "donnerstag": "TH", "freitag": "FR", "samstag": "SA",
-                  "sonntag": "SU"}
 
 
 _DAILY_CADENCE_RE = re.compile(
@@ -333,7 +290,11 @@ def _text_recurrence(tx, c: Claim) -> Recurrence | None:
     desc = c.value("description")
     if not desc or not _TEXT_REC_RE.search(desc):
         return None
-    content_key = hashlib.md5(f"textrec|{desc}".encode()).hexdigest()
+    # v2 key (2026-07-20): the verdict now depends on the claim's title and
+    # anchor, so a shared umbrella description must not share verdicts
+    # across the group's members
+    content_key = hashlib.md5(
+        f"textrec2|{c.title}|{desc}".encode()).hexdigest()
     cached = tx.execute(
         "SELECT recurrence FROM text_recurrence WHERE content_key = %s",
         (content_key,),
@@ -365,6 +326,7 @@ def _text_recurrence(tx, c: Claim) -> Recurrence | None:
         pairs = recurrence.expand(rec, holidays, anchor=c.starts_at)
         try:
             ok = recurrence.verify(tx, rec, [p[0] for p in pairs],
+                                   title=c.title, anchor=c.starts_at,
                                    source_id=c.source_id)
         except BudgetExceeded:
             raise
@@ -780,10 +742,13 @@ def _event_confidence(claims: list[Claim]) -> float:
     return 1 - p_none
 
 
-def _verified(tx, key: str, rec: Recurrence, occs: list[datetime]) -> bool:
-    """H1.1 verify-call, cached so rebuilds stay free."""
+def _verified(tx, key: str, rec: Recurrence, occs: list[datetime],
+              title: str = "", anchor: datetime | None = None) -> bool:
+    """H1.1 verify-call, cached so rebuilds stay free. verify2 key
+    (2026-07-20): verdicts now weigh the event's own title/anchor, so the
+    old as_stated-only verdicts must not be reused."""
     check_key = hashlib.md5(
-        f"verify|{key}|{rec.as_stated}".encode()
+        f"verify2|{key}|{title}|{rec.as_stated}".encode()
     ).hexdigest()
     cached = tx.execute(
         "SELECT same_event FROM adjudication WHERE pair_key = %s", (check_key,)
@@ -791,7 +756,7 @@ def _verified(tx, key: str, rec: Recurrence, occs: list[datetime]) -> bool:
     if cached is not None:
         return cached["same_event"]
     try:
-        ok = recurrence.verify(tx, rec, occs)
+        ok = recurrence.verify(tx, rec, occs, title=title, anchor=anchor)
     except BudgetExceeded:
         raise  # no verdicts without money - park the rebuild
     except Exception:
@@ -949,7 +914,9 @@ def _occurrences_for(
         rule = recurrence.compile_rrule(
             rec, pairs[0][0] if pairs else anchor
         )
-        tentative = not _verified(tx, g["key"], rec, [p[0] for p in pairs])
+        rep = g["claims"][0]
+        tentative = not _verified(tx, g["key"], rec, [p[0] for p in pairs],
+                                  title=rep.title, anchor=rep.starts_at)
         return pairs, tentative, str(rule) if rule else None, set()
     if g["rrule_raw"]:
         from dateutil.rrule import rrulestr

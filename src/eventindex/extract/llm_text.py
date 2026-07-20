@@ -41,7 +41,10 @@ Do not invent times, prices, or venues - omit unknown fields (null).
 - category: one of {categories}, or null.
 - confidence: your certainty (0-1) that this is a real upcoming event with correct date.
 - recurrence: ONLY if the text describes a repeating pattern ("jeden Dienstag", \
-"wöchentlich", a course timetable row). Copy the exact wording into as_stated. \
+"wöchentlich", a course timetable row) FOR THIS SPECIFIC event. Page-level or \
+group wording (a site-wide "täglich geöffnet", an umbrella "täglich" over a \
+list of per-weekday entries) is NOT this event's schedule - omit recurrence \
+then. Copy the exact wording into as_stated. \
 For a repeating event, starts_at = the first upcoming occurrence. \
 "außer Ferien"/"nicht in den Schulferien" -> except_holidays=["school_holidays"]. \
 One-off events: recurrence=null.

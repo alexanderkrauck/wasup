@@ -172,9 +172,18 @@ class ConsistencyCheck(BaseModel):
     consistent: bool
 
 
-def verify(tx, rec: Recurrence, occurrences: list[datetime], **llm_kwargs) -> bool:
+def verify(tx, rec: Recurrence, occurrences: list[datetime],
+           title: str = "", anchor: datetime | None = None,
+           **llm_kwargs) -> bool:
     """H1.1: checking is easier than extracting - a mini model compares the
-    verbatim wording against the first compiled dates."""
+    verbatim wording against the first compiled dates.
+
+    title/anchor (2026-07-20, Alexander: weekdays are not special): the rule
+    must describe THIS event, and the event's own evidence - its title, its
+    one known real date - is part of that judgment. A page-level 'täglich'
+    umbrella stamped onto the Friday member of a weekday-mass group passed
+    the old as_stated-only check and served Tuesday masses under a Friday
+    title. One general LLM judgment, no vocabulary heuristics."""
     from eventindex import llm
 
     if not occurrences:
@@ -182,11 +191,22 @@ def verify(tx, rec: Recurrence, occurrences: list[datetime], **llm_kwargs) -> bo
     sample = ", ".join(
         o.astimezone(VIENNA).strftime("%A %Y-%m-%d %H:%M") for o in occurrences[:4]
     )
+    context = ""
+    if title:
+        context += f'The event is titled: "{title}"\n'
+    if anchor is not None:
+        context += ("Its one known real occurrence: "
+                    f"{anchor.astimezone(VIENNA):%A %Y-%m-%d %H:%M}\n")
     prompt = (
         f'A recurring event was described as (German): "{rec.as_stated}"\n'
-        f"The compiled first occurrences are: {sample}\n"
-        "Are the compiled occurrences consistent with the description? "
-        "Check weekday, time and frequency."
+        + context +
+        f"The compiled occurrences from that description are: {sample}\n"
+        "Are the compiled occurrences consistent with EVERYTHING above - the "
+        "description AND the event's own title and known occurrence? Check "
+        "weekday, time and frequency. A description that plainly refers to a "
+        "whole venue or group of events (e.g. a site-wide 'täglich') rather "
+        "than this specific event's schedule, or occurrences on days the "
+        "title contradicts, are NOT consistent."
     )
     # exceptions bubble: the caller must distinguish "LLM said inconsistent"
     # (a verdict, cacheable) from "call failed" (transient, must NOT cache)

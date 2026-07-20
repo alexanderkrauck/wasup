@@ -111,9 +111,12 @@ def complete(
     system: str | None = None,
     source_id: UUID | None = None,
     job_id: UUID | None = None,
+    images: list[str] | None = None,
 ) -> S:
     """One structured LLM call: budget-checked, schema-validated, ledgered.
 
+    images: data URLs attached to the user turn (vision path, fence fired
+    2026-07-20) - the model must be multimodal (config.MODEL_VISION).
     Retries once with the validation error appended, then raises.
     """
     check_budget(tx, source_id=source_id)
@@ -121,7 +124,13 @@ def complete(
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    if images:
+        messages.append({"role": "user", "content": (
+            [{"type": "text", "text": prompt}]
+            + [{"type": "image_url", "image_url": {"url": u}} for u in images]
+        )})
+    else:
+        messages.append({"role": "user", "content": prompt})
 
     last_error: ValidationError | None = None
     for _ in range(2):

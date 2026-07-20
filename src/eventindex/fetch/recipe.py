@@ -105,6 +105,12 @@ class Recipe(BaseModel):
     )
     follow_detail: bool = False
     detail_url_selector: str | None = Field(None, description="CSS for the detail link")
+    image_selector: str | None = Field(
+        None,
+        description="CSS for <img> elements that ARE the events (posters/"
+        "flyers/program images). Only when event data exists as images the "
+        "text extractors cannot see; each new image costs one vision call.",
+    )
     stop_conditions: list[Literal["date_older_than_now", "all_fingerprints_seen"]] = []
     validation: Validation = Validation()
 
@@ -279,6 +285,7 @@ def run_recipe(
     job_id=None,
     fetch_page: Callable[[str], bytes | None] | None = None,
     now: datetime | None = None,
+    record_image_cache: bool = True,
 ) -> tuple[list[dict], ValidationResult]:
     """Execute a recipe -> (claim payloads, validation result).
 
@@ -310,10 +317,15 @@ def run_recipe(
         page_cap = min(max(recipe.pagination.max_pages, len(urls)), MAX_PAGES_HARD)
     detail_budget = MAX_DETAIL_FETCHES  # per CRAWL, as the §cost-governance caps promise
     try:
-        payloads, truncated, pages = _crawl_pages(
+        payloads, truncated, pages, image_urls = _crawl_pages(
             recipe, source, tx, job_id, fetch_page, queue, visited, page_cap,
             detail_budget, seen_fps, now, cascade_extract, parse_dt,
         )
+        if image_urls:
+            payloads += _vision_payloads(
+                image_urls, source, tx, job_id,
+                record_cache=record_image_cache,
+            )
     finally:
         if owns_fetcher and (close := getattr(fetch_page, "close", None)):
             close()
@@ -337,10 +349,11 @@ def run_recipe(
 
 def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                  page_cap, detail_budget, seen_fps, now, cascade_extract,
-                 parse_dt) -> tuple[list[dict], str | None, int]:
+                 parse_dt) -> tuple[list[dict], str | None, int, list[str]]:
     payloads: list[dict] = []
     truncated: str | None = None
     pages = 0
+    image_urls: list[str] = []
     seen_streak = 0  # all_fingerprints_seen needs sustained evidence
     while queue and pages < page_cap:
         url = queue.pop(0)
@@ -367,6 +380,10 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                 _, page_payloads = cascade_extract(
                     source, _FakeResult(html, url), tx, job_id=job_id
                 )
+            if recipe.image_selector:
+                for src in _page_image_urls(recipe, html, url):
+                    if src not in image_urls:
+                        image_urls.append(src)
 
             if recipe.follow_detail:
                 for durl in detail_urls(recipe, html, url)[:detail_budget]:
@@ -422,7 +439,71 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
         # URLs (date windows, calendar months) were never fetched
         truncated = truncated or (
             f"page cap {page_cap} hit with {len(queue)} queued urls unfetched")
-    return payloads, truncated, pages
+    return payloads, truncated, pages, image_urls
+
+
+# ------------------------------------------------- vision (fence 2026-07-20)
+
+MAX_NEW_IMAGES_PER_CRAWL = 5  # cost ring: each new image is one vision call
+IMAGE_CACHE_CAP = 50
+
+
+def _page_image_urls(recipe: Recipe, html: bytes, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    urls = []
+    for img in soup.select(recipe.image_selector)[:20]:
+        src = img.get("src") or img.get("data-src")
+        if src and not src.startswith("data:"):
+            urls.append(urljoin(base_url, src))
+    return urls
+
+
+def _vision_payloads(image_urls: list[str], source: dict, tx, job_id,
+                     record_cache: bool = True) -> list[dict]:
+    """Fetch poster images and vision-extract the ones not seen before.
+    The sha cache makes a daily crawl of an unchanged poster free; birth
+    validation passes record_cache=False so its sightings never rob the
+    first real crawl of its claims."""
+    import hashlib
+    import time
+
+    import httpx
+
+    from eventindex.extract.vision import MAX_IMAGE_BYTES, extract_image
+
+    seen = dict(((source.get("extraction_hint") or {}).get("image_seen") or {}))
+    payloads, processed = [], 0
+    for url in image_urls:
+        if processed >= MAX_NEW_IMAGES_PER_CRAWL:
+            break
+        try:
+            time.sleep(config.CRAWL_DELAY_S)
+            resp = httpx.get(url, timeout=30, follow_redirects=True,
+                             headers={"User-Agent": config.USER_AGENT})
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            log.warning("poster fetch failed %s: %s", url, e)
+            continue
+        if len(resp.content) > MAX_IMAGE_BYTES:
+            continue
+        sha = hashlib.sha256(resp.content).hexdigest()
+        if sha in seen:
+            continue
+        processed += 1
+        mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+        payloads += extract_image(tx, resp.content, mime, source, job_id=job_id)
+        seen[sha] = 1
+    if record_cache and processed:
+        from psycopg.types.json import Jsonb
+
+        capped = dict(list(seen.items())[-IMAGE_CACHE_CAP:])
+        tx.execute(
+            "UPDATE source SET extraction_hint = coalesce(extraction_hint, "
+            "'{}'::jsonb) || jsonb_build_object('image_seen', %s::jsonb) "
+            "WHERE id = %s",
+            (Jsonb(capped), source["id"]),
+        )
+    return payloads
 
 
 class _FakeResult:

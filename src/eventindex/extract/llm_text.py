@@ -81,8 +81,6 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from eventindex.extract import field
-
     if len(text.strip()) < 100:
         return []  # JS shell or empty page; headless rendering is phase 3
 
@@ -95,6 +93,13 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
         tx, prompt, LLMExtraction,
         source_id=source["id"], job_id=job_id,
     )
+    return to_payloads(result)
+
+
+def to_payloads(result: LLMExtraction) -> list[dict]:
+    """LLMExtraction -> claim payloads: shared by the text, vision, and
+    agent emit_events paths so validation/confidence rules exist once."""
+    from eventindex.extract import field
 
     payloads = []
     for ev in result.events:

@@ -41,6 +41,9 @@ MODEL_MID = "minimax/minimax-m3"            # $0.30/$1.20, 1M ctx, text+image+vi
 # onboarding attempt on gate-heavy sites needs it - mid wall-clocked 4x on a
 # row-capped JSF portal while satisfying coverage+horizon+window constraints
 MODEL_FRONTIER = "z-ai/glm-5.2"
+# vision/PDF fence fired 2026-07-20 (Alexander: human-parity extraction is
+# the requirement): mid is multimodal, so posters/screenshots ride on it.
+MODEL_VISION = MODEL_MID
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 

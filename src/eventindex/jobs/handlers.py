@@ -268,15 +268,96 @@ def onboard(job: dict, tx) -> list[dict]:
     reason = job["payload"].get("reason")
     min_horizon = (config.RECIPE_MIN_HORIZON_DAYS
                    if reason and "completeness" in reason else None)
-    recipe = onboard_source(tx, source, job["id"], model,
+    result = onboard_source(tx, source, job["id"], model,
                             task_reason=reason, min_horizon_days=min_horizon)
+    _store_recipe(tx, source, result)
+    return [{"kind": "crawl", "payload": {"source_id": str(source["id"])}}]
+
+
+def _store_recipe(tx, source, result) -> None:
+    """A validated recipe returns the source to rung 1: active, health reset,
+    agentic mode cleared, the agent's own yield estimate kept as the
+    low-yield yardstick."""
+    hint = {"degraded_count": 0}
+    if result.expected_events:
+        hint["expected_events"] = result.expected_events
     tx.execute(
         "UPDATE source SET recipe = %s, recipe_version = recipe_version + 1, "
-        "status = 'active', extraction_hint = coalesce(extraction_hint,'{}'::jsonb) "
-        "|| '{\"degraded_count\": 0}'::jsonb WHERE id = %s",
-        (Jsonb(recipe.model_dump()), source["id"]),
+        "status = 'active', extraction_hint = "
+        "(coalesce(extraction_hint,'{}'::jsonb) - 'mode') || %s::jsonb "
+        "WHERE id = %s",
+        (Jsonb(result.recipe.model_dump()), Jsonb(hint), source["id"]),
     )
-    return [{"kind": "crawl", "payload": {"source_id": str(source["id"])}}]
+
+
+def agent_extract(job: dict, tx) -> list[dict]:
+    """Tier-D extraction rung (fence fired 2026-07-20, Alexander: human-parity
+    is the requirement): the agent extracts claims directly, so the index
+    never goes dark while a recipe is broken - and repairs the recipe when a
+    stable one exists. Sources no recipe can express stay in agentic mode,
+    governed by their monthly budget."""
+    from datetime import datetime, timezone
+
+    from eventindex.discovery.onboard import onboard_source
+
+    source = tx.execute(
+        "SELECT *, ST_Y(geo) AS lat, ST_X(geo) AS lon FROM source WHERE id = %s",
+        (job["payload"]["source_id"],),
+    ).fetchone()
+    # vision-capable from the first attempt; frontier on the last
+    model = (config.MODEL_VISION if job["attempts"] <= 2
+             else config.MODEL_FRONTIER)
+    result = onboard_source(tx, source, job["id"], model,
+                            task_reason=job["payload"].get("reason"),
+                            mode="extract")
+    crawl_id = uuid.uuid4()
+    if result.payloads:
+        _insert_claims(tx, source, crawl_id, result.payloads)
+        _update_source_stats(tx, job, source, result.payloads, "agent")
+
+    hint = {"last_agent_extract":
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "agent_yield": len(result.payloads)}
+    if result.expected_events:
+        hint["expected_events"] = result.expected_events
+    tx.execute(
+        "UPDATE source SET extraction_hint = coalesce(extraction_hint, "
+        "'{}'::jsonb) || %s::jsonb WHERE id = %s",
+        (Jsonb(hint), source["id"]),
+    )
+    if result.summary:
+        prior = (source["extraction_hint"] or {}).get("onboard_notes") or []
+        tx.execute(
+            "UPDATE source SET extraction_hint = extraction_hint || "
+            "jsonb_build_object('onboard_notes', %s::jsonb) WHERE id = %s",
+            (Jsonb(([result.summary] + prior)[:3]), source["id"]),
+        )
+
+    if result.recipe is not None:
+        _store_recipe(tx, source, result)
+    elif result.payloads:
+        # no expressible recipe: the agent IS this source's extractor now
+        tx.execute(
+            "UPDATE source SET status = 'active', extraction_hint = "
+            "extraction_hint || '{\"mode\": \"agentic\"}'::jsonb WHERE id = %s",
+            (source["id"],),
+        )
+    _log_crawl(
+        tx, crawl_id, job, source["id"], "ok",
+        events_found=len(result.payloads),
+        detail="method=agent" + (" +recipe" if result.recipe else "")
+               + (f" | {result.summary[:150]}" if result.summary else ""),
+    )
+    jobs = []
+    if result.recipe is not None:
+        jobs.append({"kind": "crawl", "payload": {"source_id": str(source["id"])}})
+    if result.payloads:
+        pending = tx.execute(
+            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+        ).fetchone()
+        if not pending:
+            jobs.append({"kind": "resolve", "payload": {}})
+    return jobs
 
 
 def probe(job: dict, tx) -> list[dict]:
@@ -521,6 +602,6 @@ def timefix(job: dict, tx) -> list[dict]:
 
 HANDLERS = {
     "crawl": crawl, "resolve": resolve, "enrich": enrich,
-    "onboard": onboard, "probe": probe, "discover": discover,
-    "qa_check": qa_check, "timefix": timefix,
+    "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
+    "discover": discover, "qa_check": qa_check, "timefix": timefix,
 }

@@ -66,7 +66,8 @@ Method:
    data API there. A public JSON endpoint that returns the events (navigate
    to it to verify!) is the BEST possible recipe - entry_urls=[that URL],
    render='http', pagination none/url_param. Prefer it over scraping the
-   rendered page.
+   rendered page. A direct PDF program link (Monatsprogramm/Spielplan .pdf)
+   is likewise a valid entry_url - the interpreter extracts PDF text.
 2. Classify pagination by LOOKING at the page and links: numbered pages
    (url_param with {n} template), a "weiter/next" link with a real href
    (next_link), a next/paginator control that swaps the list IN PLACE via

@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from dateutil import parser as dateparser
 
 from eventindex import config
-from eventindex.extract import ics, json_api, jsonld, linztermine, llm_text, rss
+from eventindex.extract import ics, json_api, jsonld, linztermine, llm_text, pdf, rss
 
 VIENNA = ZoneInfo(config.TIMEZONE)
 
@@ -217,6 +217,13 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
     if "json" in ct or result.content.lstrip()[:1] in (b"{", b"["):
         if claims := json_api.parse(result.content):
             return "json_api", sanity_filter(claims, source)
+
+    if pdf.is_pdf(result.content, ct):
+        # text-layer PDFs feed the LLM tier; a scanned PDF yields no text
+        # and returns empty here - the agent's vision path is its ladder rung
+        claims = llm_text.extract(tx, pdf.to_text(result.content), source,
+                                  job_id=job_id)
+        return "pdf", sanity_filter(claims, source)
 
     if kind == "api":
         # the only v1 API source is the linztermine XML export; a second API

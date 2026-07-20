@@ -74,3 +74,42 @@ def test_explicit_concert_start_beats_box_office_time():
     assert parse_dt(payload["starts_at"]["value"]) == datetime(
         2026, 7, 20, 20, 0, tzinfo=VIENNA,
     )
+
+
+def test_pdf_fixture_text_extraction():
+    from eventindex.extract import pdf
+
+    content = (FIXTURES / "programm.pdf").read_bytes()
+    assert pdf.is_pdf(content)
+    assert pdf.is_pdf(b"junk", "application/pdf")
+    assert not pdf.is_pdf(b"<html>", "text/html")
+    text = pdf.to_text(content)
+    assert "Sommerkonzert im Pfarrsaal" in text
+    assert "07.08.2030" in text
+    # malformed bytes must never raise
+    assert pdf.to_text(b"%PDF-1.4 garbage") == ""
+
+
+def test_cascade_routes_pdf_to_llm_tier(conn, monkeypatch):
+    from eventindex.extract import extract, field, llm_text
+
+    seen = {}
+
+    def fake_llm(tx, text, source, job_id=None):
+        seen["text"] = text
+        return [{"title": field("Sommerkonzert im Pfarrsaal", 0.8),
+                 "starts_at": field("2030-08-07T19:30", 0.8)}]
+
+    monkeypatch.setattr(llm_text, "extract", fake_llm)
+
+    class R:
+        content = (FIXTURES / "programm.pdf").read_bytes()
+        content_type = "application/pdf"
+        url = "https://pfarre.example/programm.pdf"
+
+    source = {"id": None, "kind": "website", "name": "Pfarre St. Anton",
+              "lat": None, "lon": None}
+    method, payloads = extract(source, R(), conn)
+    assert method == "pdf"
+    assert "Sommerkonzert" in seen["text"]
+    assert payloads[0]["title"]["value"] == "Sommerkonzert im Pfarrsaal"

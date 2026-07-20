@@ -71,3 +71,16 @@ def test_announcements_are_non_events():
     # a dated celebration stays an event (German compound keeps the boundary)
     assert not is_non_event("Wiedereröffnungsfeier mit Livemusik")
     assert not is_non_event("Sommerkonzert der Stadtkapelle")
+
+
+def test_internal_source_url_never_becomes_canonical():
+    from types import SimpleNamespace
+
+    from eventindex.resolve.rebuild import _fallback_source_url
+
+    qa = SimpleNamespace(source_url="internal://qa-verifier")
+    real = SimpleNamespace(source_url="https://pfarre.at/termine")
+    # the QA verifier's trust makes it rep - its url must not ship
+    assert _fallback_source_url([qa, real], qa) == "https://pfarre.at/termine"
+    assert _fallback_source_url([real, qa], real) == "https://pfarre.at/termine"
+    assert _fallback_source_url([qa], qa) is None

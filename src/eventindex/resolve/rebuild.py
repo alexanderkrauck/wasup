@@ -742,6 +742,17 @@ def _event_confidence(claims: list[Claim]) -> float:
     return 1 - p_none
 
 
+def _fallback_source_url(claims: list, rep) -> str | None:
+    """The representative claim's source URL, unless that source is
+    internal (red team 2026-07-20: the QA verifier's trust 0.9 made it
+    'rep' on 29 events and internal://qa-verifier shipped as their
+    canonical URL). Internal sources never publish URLs."""
+    if not rep.source_url.startswith("internal://"):
+        return rep.source_url
+    return next((c.source_url for c in claims
+                 if not c.source_url.startswith("internal://")), None)
+
+
 def _verified(tx, key: str, rec: Recurrence, occs: list[datetime],
               title: str = "", anchor: datetime | None = None) -> bool:
     """H1.1 verify-call, cached so rebuilds stay free. verify2 key
@@ -1033,7 +1044,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             # a bare-domain url asserts a detail link that isn't one (49% of
             # events shipped the source homepage, audit A7): any claim's
             # deep link beats the merged/fallback homepage
-            url = values.get("url") or rep.source_url
+            url = values.get("url") or _fallback_source_url(g["claims"], rep)
             if url and not _deep_url(url):
                 url = next(
                     (u for c in g["claims"]

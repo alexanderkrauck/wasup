@@ -175,3 +175,27 @@ def test_detail_claims_kept_for_time_or_missing_venue():
     # on-the-hour starts are real times, not midnight placeholders
     assert handlers._detail_claims_worth_keeping(
         [{"starts_at": {"value": "2030-01-01T20:00"}}], needs_venue=False)
+
+
+def test_failed_agent_session_notes_survive_the_rollback(conn, monkeypatch):
+    from eventindex.discovery.onboard import OnboardFailed
+
+    sid = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, extraction_hint) "
+        "VALUES ('X', 'https://x.at', 'website', 3, 0.5, "
+        "'{\"onboard_notes\": [\"older note\"]}') RETURNING id"
+    ).fetchone()["id"]
+
+    def failing_onboard(job, tx):
+        raise OnboardFailed("exhausted", notes="use the nexudus json api")
+
+    monkeypatch.setitem(handlers.HANDLERS, "onboard", failing_onboard)
+    with conn.transaction():
+        enqueue(conn, "onboard", {"source_id": str(sid)})
+    run_job(conn, claim_next(conn))
+
+    notes = conn.execute(
+        "SELECT extraction_hint->'onboard_notes' AS n FROM source WHERE id = %s",
+        (sid,),
+    ).fetchone()["n"]
+    assert notes == ["use the nexudus json api", "older note"]

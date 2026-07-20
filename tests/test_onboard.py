@@ -274,3 +274,45 @@ def test_venue_gate_bounces_locationless_recipes(conn, monkeypatch):
         bare, ValidationResult(ok=True, items=6, reasons=[])))
     _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None)
     assert error is None
+
+
+def test_failure_notes_distill_checkpoint_emit_and_apis():
+    session = onboard.Session()
+    session.record("navigate", {"url": "https://x.at"}, "shell")
+    session.record("value_checkpoint", {},
+                   "expected=17 success=True | Nexudus JSON API returns all events")
+    session.record("emit_recipe", {},
+                   "SELF-VALIDATION FAILED: interpreter validation failed: items 0")
+    browser = onboard.Browser()
+    browser._api_calls = {"https://x.spaces.nexudus.com/api/public/events": 200}
+    notes = onboard._failure_notes(session, browser)
+    assert "Nexudus JSON API" in notes
+    assert "items 0" in notes
+    assert "api/public/events" in notes
+
+
+def test_prior_notes_enter_the_prompt_and_failures_carry_notes(monkeypatch):
+    prompts = {}
+
+    def fake_chat(tx, messages, **kw):
+        prompts["user"] = messages[1]["content"]
+        return SimpleNamespace(content="", tool_calls=None)
+
+    monkeypatch.setattr(onboard.llm, "chat", fake_chat)
+    monkeypatch.setattr(onboard.config, "ONBOARD_MAX_TURNS", 2)
+    monkeypatch.setattr(onboard, "_http_text_len", lambda url: 5000)
+    monkeypatch.setattr(onboard, "_spent_on_job", lambda tx, job_id: 0.0)
+    source = {"id": None, "url": "https://x.at", "name": "X", "recipe": None,
+              "recipe_version": 0,
+              "extraction_hint": {"onboard_notes": ["use the nexudus json api"],
+                                  "probe_score": 1.0}}
+    try:
+        onboard.onboard_source(None, source, None, "mini")
+        raised = None
+    except onboard.OnboardFailed as e:
+        raised = e
+    assert raised is not None
+    assert "PREVIOUS ATTEMPTS LEARNED" in prompts["user"]
+    assert "use the nexudus json api" in prompts["user"]
+    # the raw notes key must not double-inject through Known hints
+    assert '"onboard_notes"' not in prompts["user"]

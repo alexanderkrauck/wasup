@@ -57,6 +57,32 @@ def claim_next(conn) -> dict | None:
         ).fetchone()
 
 
+def _persist_agent_notes(conn, job: dict, exc: Exception) -> None:
+    """A failed agent session's learnings (OnboardFailed.notes) must survive
+    its rolled-back handler tx - same pattern as the error crawl_log. The
+    next attempt's prompt starts from them instead of re-deriving the site."""
+    from psycopg.types.json import Jsonb
+
+    notes = getattr(exc, "notes", "")
+    source_id = job.get("payload", {}).get("source_id")
+    if not notes or not source_id:
+        return
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT extraction_hint->'onboard_notes' AS notes FROM source "
+            "WHERE id = %s", (source_id,),
+        ).fetchone()
+        if row is None:
+            return
+        merged = ([notes[:500]] + (row["notes"] or []))[:3]
+        conn.execute(
+            "UPDATE source SET extraction_hint = coalesce(extraction_hint, "
+            "'{}'::jsonb) || jsonb_build_object('onboard_notes', %s::jsonb) "
+            "WHERE id = %s",
+            (Jsonb(merged), source_id),
+        )
+
+
 def run_job(conn, job: dict) -> None:
     try:
         with conn.transaction():
@@ -68,7 +94,7 @@ def run_job(conn, job: dict) -> None:
                 (job["id"],),
             )
         log.info("job %s (%s) done, enqueued %d", job["id"], job["kind"], len(new_jobs))
-    except Exception:
+    except Exception as exc:
         error = traceback.format_exc(limit=20)
         if "BudgetExceeded: global daily cap" in error:
             # the daily envelope is spent - system condition, not job failure:
@@ -112,6 +138,7 @@ def run_job(conn, job: dict) -> None:
                 )
             log.warning("credits empty - job %s paused 1h, worker exiting", job["id"])
             raise SystemExit(0)
+        _persist_agent_notes(conn, job, exc)
         with conn.transaction():
             if job["attempts"] >= config.JOB_MAX_ATTEMPTS:
                 conn.execute(

@@ -24,6 +24,37 @@ log = logging.getLogger("eventindex.onboard")
 
 READ_CAP = 8_000  # chars of page text/DOM per observation
 
+
+class OnboardFailed(RuntimeError):
+    """Session failure carrying what the agent learned: the worker persists
+    .notes to extraction_hint OUTSIDE the aborted handler tx, so the next
+    attempt starts warm instead of re-deriving the site's nature (factory300:
+    the 'Nexudus JSON API' diagnosis lived only in a one-shot job payload and
+    the self-heal re-onboard exhausted itself rediscovering it)."""
+
+    def __init__(self, message: str, notes: str = ""):
+        super().__init__(message)
+        self.notes = notes
+
+
+def _failure_notes(session: "Session", browser: "Browser") -> str:
+    """Distill the session into one reusable line: the freshest yield
+    checkpoint, the last self-validation verdict, and the API endpoints the
+    page revealed - exactly what a cold retry cannot see."""
+    parts = []
+    for turn in reversed(session.turns):
+        if turn["action"] == "value_checkpoint":
+            parts.append(f"checkpoint: {turn['observation'][:200]}")
+            break
+    for turn in reversed(session.turns):
+        if turn["action"] == "emit_recipe":
+            parts.append(f"last emit: {turn['observation'][:250]}")
+            break
+    if browser._api_calls:
+        parts.append("api endpoints seen: "
+                     + ", ".join(list(browser._api_calls)[-5:]))
+    return " | ".join(parts)
+
 _SYSTEM = """You are a crawler-onboarding agent for a Linz (Austria) event index.
 Goal: explore the given website with the browser tools and emit ONE declarative
 crawl recipe that a dumb interpreter can run repeatedly to harvest the site's
@@ -631,7 +662,8 @@ def onboard_source(tx, source: dict, job_id, model: str,
     browser, session = Browser(), Session()
     started = time.monotonic()
     spent_before = _spent_on_job(tx, job_id)  # retries share a job id
-    hint = (source.get("extraction_hint") or {})
+    hint = dict(source.get("extraction_hint") or {})
+    prior_notes = hint.pop("onboard_notes", None) or []
     reason = ""
     messages: list[dict] = [
         {"role": "system", "content": _SYSTEM},
@@ -643,6 +675,8 @@ def onboard_source(tx, source: dict, job_id, model: str,
             + f"Plain-HTTP fetch of that URL yields {_http_text_len(source['url'])} "
             "chars of visible text (under ~200 means JS shell -> render='headless').\n"
             f"Known hints: {json.dumps(hint)[:500]}\n"
+            + ("PREVIOUS ATTEMPTS LEARNED (start from this, do not re-derive):\n"
+               + "".join(f"- {n}\n" for n in prior_notes[:3]) if prior_notes else "")
             + (f"Previous recipe (version {source['recipe_version']}) broke; reason: "
                f"{json.dumps(source['recipe'])[:800]}" if source.get("recipe") else "")},
     ]
@@ -713,9 +747,14 @@ def onboard_source(tx, source: dict, job_id, model: str,
         path = session.dump(source["id"], outcome)
         log.info("onboarding %s: %s (trajectory %s)", source["name"], outcome, path)
     if outcome == "gave_up":
-        raise RuntimeError(f"agent gave up: {reason[:300]}")
+        raise OnboardFailed(
+            f"agent gave up: {reason[:300]}",
+            notes=" | ".join(filter(None, [f"gave up: {reason[:200]}",
+                                           _failure_notes(session, browser)])),
+        )
     if recipe_result is None:
-        raise RuntimeError(f"onboarding ended without recipe ({outcome})")
+        raise OnboardFailed(f"onboarding ended without recipe ({outcome})",
+                            notes=_failure_notes(session, browser))
     return recipe_result
 
 

@@ -240,3 +240,41 @@ def test_agentic_sources_get_agent_sessions_not_crawls(conn):
         "AND payload->>'source_id' = %s", (str(sid),)
     ).fetchall()
     assert crawls == []
+
+
+def test_degraded_sources_retry_weekly_then_park_dormant(conn):
+    from psycopg.types.json import Jsonb
+
+    from eventindex.jobs.schedule import SELFHEAL_MAX_ATTEMPTS, retry_degraded
+
+    fresh = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, status) VALUES "
+        "('Broken', 'https://b.at', 'website', 3, 0.5, 'degraded') RETURNING id"
+    ).fetchone()["id"]
+    spent = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, status, "
+        "extraction_hint) VALUES ('Hopeless', 'https://h.at', 'website', 3, "
+        "0.5, 'degraded', %s) RETURNING id",
+        (Jsonb({"selfheal_attempts": SELFHEAL_MAX_ATTEMPTS}),),
+    ).fetchone()["id"]
+    conn.commit()
+
+    assert retry_degraded(conn) == 1
+    conn.commit()
+    job = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'agent_extract'"
+    ).fetchone()
+    assert job["payload"]["source_id"] == str(fresh)
+    assert "degraded retry cadence" in job["payload"]["reason"]
+    tries = conn.execute(
+        "SELECT extraction_hint->>'selfheal_attempts' AS t FROM source "
+        "WHERE id = %s", (fresh,)
+    ).fetchone()["t"]
+    assert tries == "1"
+    # attempts exhausted -> dormant (the monthly pulse stays its way back)
+    hopeless = conn.execute(
+        "SELECT status FROM source WHERE id = %s", (spent,)
+    ).fetchone()["status"]
+    assert hopeless == "dormant"
+    # the pending repair job blocks a duplicate on the next tick
+    assert retry_degraded(conn) == 0

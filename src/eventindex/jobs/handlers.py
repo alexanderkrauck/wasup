@@ -311,7 +311,7 @@ def _store_recipe(tx, source, result) -> None:
     """A validated recipe returns the source to rung 1: active, health reset,
     agentic mode cleared, the agent's own yield estimate kept as the
     low-yield yardstick."""
-    hint = {"degraded_count": 0}
+    hint = {"degraded_count": 0, "selfheal_attempts": 0}
     if result.expected_events:
         hint["expected_events"] = result.expected_events
     tx.execute(
@@ -355,7 +355,8 @@ def agent_extract(job: dict, tx) -> list[dict]:
 
     hint = {"last_agent_extract":
             datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "agent_yield": len(result.payloads)}
+            "agent_yield": len(result.payloads),
+            "selfheal_attempts": 0}
     if result.expected_events:
         hint["expected_events"] = result.expected_events
     tx.execute(

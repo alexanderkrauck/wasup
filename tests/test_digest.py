@@ -78,3 +78,30 @@ def test_day_curve_anomaly_flags_capped_feed_signature():
     # low-volume weekdays never alert (median gate)
     quiet = [{"day": date(2026, 7, 13), "n": 2}, {"day": date(2026, 7, 20), "n": 0}]
     assert day_curve_anomalies(quiet) == []
+
+
+def test_credit_outage_and_low_balance_scream():
+    stats = _stats(NOW) | {
+        "credit_parked": {"n": 41, "resume": NOW + timedelta(hours=1)},
+        "openrouter_balance_usd": 3.5,
+    }
+    text = render(stats, NOW)
+    assert "LLM CREDITS EMPTY: 41 jobs paused" in text
+    assert "OPENROUTER BALANCE LOW: $3.50" in text
+
+
+def test_healthy_balance_stays_quiet():
+    stats = _stats(NOW) | {
+        "credit_parked": {"n": 0, "resume": None},
+        "openrouter_balance_usd": 80.0,
+    }
+    text = render(stats, NOW)
+    assert "CREDITS EMPTY" not in text
+    assert "BALANCE LOW" not in text
+
+
+def test_fetch_blocked_suspects_render():
+    stats = _stats(NOW) | {"fetch_blocked": [{"name": "Stadionwelt"}]}
+    text = render(stats, NOW)
+    assert "FETCH-BLOCKED SUSPECTS" in text
+    assert "Stadionwelt" in text

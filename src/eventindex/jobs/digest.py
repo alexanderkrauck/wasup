@@ -61,7 +61,31 @@ def gather_stats(conn) -> dict:
         "AND o.starts_at BETWEEN now() AND now() + interval '28 days' "
         "GROUP BY 1 ORDER BY 1"
     ).fetchall()
+    # credit outage froze the pipeline silently for 4 days (2026-07-16..19):
+    # parked jobs + the account balance are now first-class digest signals
+    credit_parked = conn.execute(
+        "SELECT count(*) AS n, max(run_after) AS resume FROM jobs "
+        "WHERE status = 'pending' AND last_error = 'credits empty' "
+        "AND run_after > now()"
+    ).fetchone()
+    fetch_blocked = conn.execute(
+        """
+        SELECT s.name FROM source s
+        WHERE s.status IN ('active', 'degraded') AND 3 = (
+            SELECT count(*) FROM (
+                SELECT cl.status, cl.detail FROM crawl_log cl
+                WHERE cl.source_id = s.id
+                ORDER BY cl.started_at DESC LIMIT 3
+            ) recent
+            WHERE recent.status = 'error' AND recent.detail ~* %s
+        )
+        """,
+        (r"403|429|turnstile|captcha|cloudflare|just a moment",),
+    ).fetchall()
     return {
+        "credit_parked": credit_parked,
+        "openrouter_balance_usd": openrouter_balance(),
+        "fetch_blocked": fetch_blocked,
         "crawls": crawls,
         "spend": spend,
         "failed_jobs": failed_jobs,
@@ -72,6 +96,23 @@ def gather_stats(conn) -> dict:
         "budget_parked": budget_parked,
         "day_curve": day_curve,
     }
+
+
+def openrouter_balance() -> float | None:
+    """Remaining USD credits; None when unknown (no key, network, schema)."""
+    import httpx
+
+    if not config.OPENROUTER_API_KEY:
+        return None
+    try:
+        resp = httpx.get(
+            "https://openrouter.ai/api/v1/credits", timeout=10,
+            headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}"},
+        )
+        data = resp.json()["data"]
+        return float(data["total_credits"]) - float(data["total_usage"])
+    except Exception:
+        return None
 
 
 def day_curve_anomalies(day_curve: list[dict]) -> list[str]:
@@ -105,6 +146,34 @@ def render(stats: dict, now: datetime) -> str:
             "!" * 60,
             "",
         ]
+
+    parked = stats.get("credit_parked") or {}
+    if parked.get("n"):
+        lines += [
+            "!" * 60,
+            f"!! LLM CREDITS EMPTY: {parked['n']} jobs paused (resume attempt "
+            f"{parked['resume']:%Y-%m-%d %H:%M}). TOP UP OPENROUTER.",
+            "!" * 60,
+            "",
+        ]
+    balance = stats.get("openrouter_balance_usd")
+    if balance is not None and balance < config.CREDITS_WARN_USD:
+        lines += [
+            "!" * 60,
+            f"!! OPENROUTER BALANCE LOW: ${balance:.2f} left "
+            f"(warn threshold ${config.CREDITS_WARN_USD:.0f}) - top up before "
+            "the pipeline freezes.",
+            "!" * 60,
+            "",
+        ]
+
+    if stats.get("fetch_blocked"):
+        lines += ["!" * 60,
+                  "!! FETCH-BLOCKED SUSPECTS (anti-bot walls: human-visible, "
+                  "bot-refused)"]
+        for r in stats["fetch_blocked"]:
+            lines.append(f"!!  {r['name']}")
+        lines += ["!" * 60, ""]
 
     if stats.get("limits_hit") or stats.get("budget_parked"):
         lines += ["!" * 60,

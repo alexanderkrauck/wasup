@@ -128,6 +128,57 @@ def escalate_broken(conn) -> int:
     return len(rows)
 
 
+SELFHEAL_RETRY_DAYS = 7
+SELFHEAL_MAX_ATTEMPTS = 4
+
+
+def retry_degraded(conn) -> int:
+    """Degraded is a state, not a grave (Alexander 2026-07-20): a source
+    whose repair failed gets the agent again on a weekly cadence, warm-started
+    from its persisted notes. After SELFHEAL_MAX_ATTEMPTS it parks dormant -
+    the monthly pulse crawl remains its way back, so nothing is ever final."""
+    rows = conn.execute(
+        """
+        SELECT s.id, s.name,
+               coalesce((s.extraction_hint->>'selfheal_attempts')::int, 0) AS tries
+        FROM source s
+        WHERE s.status = 'degraded'
+          AND NOT EXISTS (
+              SELECT 1 FROM jobs j
+              WHERE j.kind IN ('agent_extract', 'onboard')
+                AND j.payload->>'source_id' = s.id::text
+                AND (j.status IN ('pending', 'running')
+                     OR coalesce(j.finished_at, j.created_at)
+                        > now() - %(days)s * interval '1 day')
+          )
+        """,
+        {"days": SELFHEAL_RETRY_DAYS},
+    ).fetchall()
+    retried = 0
+    for r in rows:
+        with conn.transaction():
+            if r["tries"] >= SELFHEAL_MAX_ATTEMPTS:
+                conn.execute(
+                    "UPDATE source SET status = 'dormant' WHERE id = %s",
+                    (r["id"],),
+                )
+                continue
+            conn.execute(
+                "UPDATE source SET extraction_hint = coalesce(extraction_hint,"
+                "'{}'::jsonb) || jsonb_build_object('selfheal_attempts', %s::int) "
+                "WHERE id = %s",
+                (r["tries"] + 1, r["id"]),
+            )
+            enqueue(conn, "agent_extract", {
+                "source_id": str(r["id"]),
+                "reason": (f"degraded retry cadence (attempt {r['tries'] + 1}/"
+                           f"{SELFHEAL_MAX_ATTEMPTS}): extract what you can "
+                           "and repair the recipe if possible"),
+            })
+            retried += 1
+    return retried
+
+
 def enqueue_agentic(conn) -> int:
     """Sources no recipe can express (mode=agentic) are crawled BY the agent
     at their normal cadence; the per-source monthly budget is the governor -
@@ -275,6 +326,9 @@ def schedule(conn) -> int:
     agentic = enqueue_agentic(conn)
     if agentic:
         print(f"enqueued {agentic} agentic-mode extraction sessions")
+    retried = retry_degraded(conn)
+    if retried:
+        print(f"enqueued {retried} degraded-source repair sessions")
     fixed = enqueue_timefix(conn)
     if fixed:
         print(f"enqueued {fixed} timefix detail fetches (date-only events)")

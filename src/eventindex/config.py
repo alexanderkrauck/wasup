@@ -103,6 +103,7 @@ QA_TRUST_ALPHA = 0.1  # trust <- (1-a)*trust + a*accuracy per check
 # Digest
 DIGEST_DIR = VAR_DIR / "digests"
 DEAD_MAN_HOURS = 48
+CREDITS_WARN_USD = 15.0  # 4 silent days on an empty balance (2026-07-16..19)
 
 TIMEZONE = "Europe/Vienna"
 

@@ -100,6 +100,11 @@ PROBE_REJECT_TTL_DAYS = 90
 QA_NIGHTLY_SAMPLE = 20
 QA_TRUST_ALPHA = 0.1  # trust <- (1-a)*trust + a*accuracy per check
 
+# Human-parity audit (2026-07-20): weekly agent re-extraction of sampled
+# recipe sources; the requirement is a watched number, not a one-time claim
+PARITY_SAMPLE = 3           # sources per weekly audit (~EUR 1/week ceiling)
+PARITY_MIN_COVERAGE = 0.7   # below this, misses feed the source's notes
+
 # Digest
 DIGEST_DIR = VAR_DIR / "digests"
 DEAD_MAN_HOURS = 48

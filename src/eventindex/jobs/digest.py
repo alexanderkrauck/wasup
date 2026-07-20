@@ -31,6 +31,12 @@ def gather_stats(conn) -> dict:
         "SELECT detail FROM crawl_log WHERE detail LIKE 'qa:%' "
         "AND started_at >= now() - interval '24 hours' ORDER BY started_at"
     ).fetchall()
+    parity = conn.execute(
+        "SELECT s.name, cl.detail FROM crawl_log cl "
+        "LEFT JOIN source s ON s.id = cl.source_id "
+        "WHERE cl.detail LIKE 'parity%%' "
+        "AND cl.started_at >= now() - interval '7 days' ORDER BY cl.started_at"
+    ).fetchall()
     # productive sources that hit a hard limit: events were demonstrably
     # left behind (page/state caps) or the source is parked on budget -
     # either way the index is silently incomplete without a loud flag
@@ -91,6 +97,7 @@ def gather_stats(conn) -> dict:
         "failed_jobs": failed_jobs,
         "last_success": last_success,
         "qa": qa,
+        "parity": parity,
         "limits_hit": limits_hit,
         "degraded_productive": degraded_productive,
         "budget_parked": budget_parked,
@@ -228,6 +235,14 @@ def render(stats: dict, now: datetime) -> str:
             lines.append(f"  {r['detail']}")
     else:
         lines.append("  none - QA loop did not run")
+
+    lines.append("human-parity audit (7d):")
+    if stats.get("parity"):
+        for r in stats["parity"]:
+            name = f"{r['name']}: " if r.get("name") else ""
+            lines.append(f"  {name}{r['detail']}")
+    else:
+        lines.append("  none - parity audit did not run this week")
 
     return "\n".join(lines) + "\n"
 

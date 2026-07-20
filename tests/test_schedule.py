@@ -278,3 +278,15 @@ def test_degraded_sources_retry_weekly_then_park_dormant(conn):
     assert hopeless == "dormant"
     # the pending repair job blocks a duplicate on the next tick
     assert retry_degraded(conn) == 0
+
+
+def test_weekly_parity_audit_enqueues_once(conn):
+    from eventindex.jobs.schedule import enqueue_weekly_parity
+
+    assert enqueue_weekly_parity(conn) is True
+    conn.commit()
+    assert enqueue_weekly_parity(conn) is False
+    jobs = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'parity_audit'"
+    ).fetchall()
+    assert len(jobs) == 1

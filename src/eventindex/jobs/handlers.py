@@ -563,6 +563,83 @@ def qa_check(job: dict, tx) -> list[dict]:
     return [{"kind": "resolve", "payload": {}}] if counts["cancelled"] else []
 
 
+def parity_audit(job: dict, tx) -> list[dict]:
+    """Weekly human-parity check (Alexander 2026-07-20: the requirement is a
+    number that is watched, not a claim made once): the agent independently
+    extracts a sample of recipe-crawled sources; its finds become claims (the
+    index converges immediately), the coverage ratio lands in crawl_log for
+    the digest, and misses feed the source's notes."""
+    from eventindex.discovery.onboard import OnboardFailed, onboard_source
+
+    sample = job["payload"].get("sample", config.PARITY_SAMPLE)
+    sources = tx.execute(
+        "SELECT *, ST_Y(geo) AS lat, ST_X(geo) AS lon FROM source "
+        "WHERE status = 'active' AND recipe IS NOT NULL AND yield_ema >= 3 "
+        "ORDER BY random() LIMIT %s",
+        (sample,),
+    ).fetchall()
+    audited = 0
+    for source in sources:
+        try:
+            result = onboard_source(
+                tx, source, job["id"], config.MODEL_VISION,
+                task_reason=("parity audit: extract every upcoming event this "
+                             "site publishes so it can be compared against "
+                             "what the cheap crawler already found"),
+                mode="extract",
+            )
+        except OnboardFailed as e:
+            _log_crawl(tx, uuid.uuid4(), job, source["id"], "error",
+                       detail=f"parity: session failed: {str(e)[:200]}")
+            continue
+        audited += 1
+        known = {
+            r["fingerprint"] for r in tx.execute(
+                "SELECT DISTINCT fingerprint FROM event_claim "
+                "WHERE source_id = %s", (source["id"],),
+            )
+        }
+        missing_titles, hits = [], 0
+        for p in result.payloads:
+            starts = parse_dt(p["starts_at"]["value"])
+            fp = fingerprint(p["title"]["value"], starts,
+                             lat=source["lat"], lon=source["lon"])
+            if fp in known:
+                hits += 1
+            else:
+                missing_titles.append(p["title"]["value"])
+        coverage = hits / len(result.payloads) if result.payloads else 1.0
+        crawl_id = uuid.uuid4()
+        if result.payloads:
+            _insert_claims(tx, source, crawl_id, result.payloads)
+        _log_crawl(
+            tx, crawl_id, job, source["id"], "ok",
+            events_found=len(result.payloads),
+            detail=(f"parity: agent={len(result.payloads)} known={hits} "
+                    f"coverage={coverage:.2f}"
+                    + (f" missing={missing_titles[:3]}" if missing_titles else "")),
+        )
+        if coverage < config.PARITY_MIN_COVERAGE and missing_titles:
+            prior = (source["extraction_hint"] or {}).get("onboard_notes") or []
+            note = ("parity audit found events the recipe misses: "
+                    + ", ".join(missing_titles[:5]))[:500]
+            tx.execute(
+                "UPDATE source SET extraction_hint = coalesce(extraction_hint,"
+                "'{}'::jsonb) || jsonb_build_object('onboard_notes', %s::jsonb) "
+                "WHERE id = %s",
+                (Jsonb(([note] + prior)[:3]), source["id"]),
+            )
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, detail) "
+        "VALUES (%s, now(), 'ok', %s)",
+        (job["id"], f"parity_audit: {audited}/{len(sources)} sources audited"),
+    )
+    pending = tx.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+    ).fetchone()
+    return [] if pending or not audited else [{"kind": "resolve", "payload": {}}]
+
+
 def discover(job: dict, tx) -> list[dict]:
     from eventindex.discovery.sweep import discover as run_sweep
 
@@ -643,4 +720,5 @@ HANDLERS = {
     "crawl": crawl, "resolve": resolve, "enrich": enrich,
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
     "discover": discover, "qa_check": qa_check, "timefix": timefix,
+    "parity_audit": parity_audit,
 }

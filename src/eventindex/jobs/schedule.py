@@ -221,6 +221,23 @@ def enqueue_nightly_qa(conn) -> bool:
     return True
 
 
+def enqueue_weekly_parity(conn) -> bool:
+    """One parity_audit per ISO week (2026-07-20): human-parity extraction
+    is enforced by measurement, forever, not asserted once."""
+    from eventindex import config
+
+    exists = conn.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'parity_audit' AND created_at >= "
+        "date_trunc('week', now() AT TIME ZONE %s) AT TIME ZONE %s",
+        (config.TIMEZONE, config.TIMEZONE),
+    ).fetchone()
+    if exists:
+        return False
+    with conn.transaction():
+        enqueue(conn, "parity_audit", {"sample": config.PARITY_SAMPLE})
+    return True
+
+
 TIMEFIX_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
 
 
@@ -329,6 +346,8 @@ def schedule(conn) -> int:
     retried = retry_degraded(conn)
     if retried:
         print(f"enqueued {retried} degraded-source repair sessions")
+    if enqueue_weekly_parity(conn):
+        print("enqueued the weekly human-parity audit")
     fixed = enqueue_timefix(conn)
     if fixed:
         print(f"enqueued {fixed} timefix detail fetches (date-only events)")

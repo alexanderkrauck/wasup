@@ -245,3 +245,62 @@ def test_low_yield_escalation_respects_cooldown(conn, monkeypatch):
     job = {"id": uuid.uuid4(), "attempts": 1, "payload": {"source_id": str(sid)}}
     new_jobs = handlers.crawl(job, conn)
     assert all(j["kind"] != "agent_extract" for j in new_jobs)
+
+
+def test_parity_audit_measures_coverage_and_feeds_notes(conn, monkeypatch):
+    from psycopg.types.json import Jsonb
+
+    from eventindex.extract import field
+    from eventindex.resolve.fingerprint import fingerprint
+
+    recipe = {"entry_urls": ["https://v.at/events"],
+              "pagination": {"type": "none"}, "version": 1}
+    sid = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, yield_ema, recipe) "
+        "VALUES ('Vereinsheim', 'https://v.at', 'website', 3, 0.5, 10, %s) "
+        "RETURNING id",
+        (Jsonb(recipe),),
+    ).fetchone()["id"]
+    # the recipe already knows one of the two events the agent will find
+    known_fp = fingerprint("Bekanntes Konzert",
+                           datetime.fromisoformat(FUTURE).astimezone(timezone.utc),
+                           lat=None, lon=None)
+    conn.execute(
+        "INSERT INTO event_claim (source_id, fingerprint, payload) "
+        "VALUES (%s, %s, %s)",
+        (sid, known_fp, Jsonb({"title": {"value": "Bekanntes Konzert",
+                                         "confidence": 0.8},
+                               "starts_at": {"value": FUTURE,
+                                             "confidence": 0.8}})),
+    )
+    payloads = [
+        {"title": field("Bekanntes Konzert", 0.8), "starts_at": field(FUTURE, 0.8)},
+        {"title": field("Poster-Geheimtipp", 0.8), "starts_at": field(FUTURE, 0.8)},
+    ]
+    import eventindex.discovery.onboard as onboard_mod
+
+    def fake(tx, source, job_id, model, task_reason=None,
+             min_horizon_days=None, mode="recipe"):
+        assert mode == "extract" and "parity audit" in task_reason
+        return onboard.OnboardResult(payloads=payloads)
+
+    monkeypatch.setattr(onboard_mod, "onboard_source", fake)
+    job = {"id": uuid.uuid4(), "attempts": 1, "payload": {"sample": 3}}
+    new_jobs = handlers.parity_audit(job, conn)
+
+    log = conn.execute(
+        "SELECT detail FROM crawl_log WHERE source_id = %s "
+        "AND detail LIKE 'parity%%'", (sid,)
+    ).fetchone()["detail"]
+    assert "agent=2 known=1 coverage=0.50" in log
+    assert "Poster-Geheimtipp" in log
+    notes = conn.execute(
+        "SELECT extraction_hint->'onboard_notes' AS n FROM source WHERE id = %s",
+        (sid,),
+    ).fetchone()["n"]
+    assert "Poster-Geheimtipp" in notes[0]
+    claims = conn.execute(
+        "SELECT count(*) AS n FROM event_claim WHERE source_id = %s", (sid,)
+    ).fetchone()["n"]
+    assert claims == 3  # the agent's finds are claims: index converges now
+    assert {j["kind"] for j in new_jobs} == {"resolve"}

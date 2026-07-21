@@ -34,6 +34,10 @@ date ("bis 12.10.") when stated - the RANGE, never an arbitrary day mid-run.
 OmdtU/DF yourself - keep exactly what the page shows).
 - starts_at/ends_at: ISO 8601. If no time given, use the date alone (YYYY-MM-DD). \
 Do not invent times, prices, or venues - omit unknown fields (null).
+- A bare validity range on a recurring offer ("12.07. - 08.09.2026", \
+"bis 16.08.") is NOT an occurrence: never use a range boundary as starts_at. \
+Emit such a listing only if a concrete date, weekday or schedule is stated \
+(then use recurrence with starts_at = the first stated occurrence).
 - organizer: the organizing club/company/person if the text names one.
 - booking_url: a ticket/registration link if one appears as literal text.
 - registration_required: true for "Anmeldung erforderlich/erbeten", false for \

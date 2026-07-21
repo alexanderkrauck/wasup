@@ -6,6 +6,8 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
 11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
+16. **event.lang column** - null on all 6,104 events (red team 2026-07-21): fill it (one field in the extraction schema, ~free) or drop the column? One word: fill / drop.
+17. **Enrichment-based field completion** - 4 of 6 audited price gaps were stated on the page (once even inside our own stored description). Extending the enrichment schema with stated_price/venue extraction re-enriches the corpus (~EUR 1-2, SCHEMA_VERSION bump). OK to spend once the OpenRouter balance is topped up? y/n.
 
 ## Answered
 

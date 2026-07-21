@@ -5,9 +5,26 @@ every page state must be harvested before the next click."""
 
 from pathlib import Path
 
-from eventindex.fetch.headless import render_states
+from eventindex.fetch.headless import render_page, render_states
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "paginator.html").as_uri()
+SESSION_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "session_filter.html"
+).as_uri()
+
+
+def test_render_page_replays_ordered_public_setup_clicks():
+    html = render_page(
+        SESSION_FIXTURE,
+        setup_clicks=["#open-region", "#region-north"],
+    )
+    assert html is not None
+    assert b"Regionaler Termin" in html
+    assert b'<div id="scope">Region Nord</div>' in html
+
+
+def test_render_page_fails_closed_when_setup_control_disappears():
+    assert render_page(SESSION_FIXTURE, setup_clicks=["#missing-region"]) is None
 
 
 def test_render_states_harvests_every_page_and_stops_on_disabled():

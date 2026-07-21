@@ -248,6 +248,8 @@ Rule: **humans write zero per-site crawlers.** There are exactly two hand-built 
   "version": 3,
   "entry_urls": ["https://www.wko.at/ooe/veranstaltungen?page={n}"],
   "render": "http",                      // http | headless
+  "setup_clicks": [],                     // optional ordered public region/topic controls;
+                                           // non-empty forces headless and runs before pagination
   "pagination": {                        // pagination is a small closed set:
     "type": "url_param",                 // url_param | next_link | load_more_click |
     "param": "page", "start": 1,        // infinite_scroll | calendar_nav | date_range_param |
@@ -274,9 +276,10 @@ The interpreter understands ~8 pagination types, which cover ~95% of the web (nu
 When discovery registers a new source, an agent session (browser tools + LLM) runs once:
 
 1. Load the site, locate the event/course/termine listing (it already has the probe hint from discovery).
-2. Classify pagination by interacting: click "weiter", scroll, flip the calendar month - observe URL/DOM changes.
-3. Propose `field_selectors` by diffing 3-5 item nodes; if the DOM is too messy/unstable, omit them (extraction falls back to LLM-on-page-text - costs more per crawl but always works).
-4. Emit the recipe, then **immediately validate it**: the interpreter executes it fresh; extracted events are checked against what the agent saw. Pass → recipe goes live. Fail → one retry, then flag for the manual-review queue.
+2. Establish any public region/topic state the listing requires and record the exact ordered control selectors in `setup_clicks` (login and personalized state remain out of bounds).
+3. Classify pagination by interacting: click "weiter", scroll, flip the calendar month - observe URL/DOM changes.
+4. Propose `field_selectors` by diffing 3-5 item nodes; if the DOM is too messy/unstable, omit them (extraction falls back to LLM-on-page-text - costs more per crawl but always works).
+5. Emit the recipe, then **immediately validate it**: the interpreter executes it fresh; extracted events are checked against what the agent saw. Pass → recipe goes live. Fail → one retry, then flag for the manual-review queue.
 
 Cost: one agent session (~cents) per source, once. WKO, VHS, Diözese, meinbezirk, a gym's course table - all just recipes, no code.
 

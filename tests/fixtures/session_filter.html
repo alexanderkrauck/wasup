@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Session-filtered calendar</title></head>
+<body>
+  <div id="consent" style="display:none;position:fixed;inset:0;z-index:99;background:white">
+    <p>Diese Seite verwendet Cookies</p>
+    <button onclick="document.querySelector('#consent').remove()">Alle ablehnen</button>
+  </div>
+  <button id="open-region" onclick="document.querySelector('#regions').hidden=false">
+    Region wählen
+  </button>
+  <div id="regions" hidden>
+    <button id="region-north" onclick="chooseRegion()">Region Nord</button>
+  </div>
+  <div id="scope">Ganzes Land</div>
+  <div id="events"><h3>Nationaler Termin</h3></div>
+  <script>
+    setTimeout(() => document.querySelector('#consent').style.display = 'block', 1800);
+    function chooseRegion() {
+      sessionStorage.setItem('region', 'north');
+      document.querySelector('#scope').textContent = 'Region Nord';
+      document.querySelector('#events').innerHTML = '<h3>Regionaler Termin</h3>';
+    }
+    if (sessionStorage.getItem('region') === 'north') chooseRegion();
+  </script>
+</body>
+</html>

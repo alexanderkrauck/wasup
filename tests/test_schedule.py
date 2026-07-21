@@ -280,6 +280,33 @@ def test_degraded_sources_retry_weekly_then_park_dormant(conn):
     assert retry_degraded(conn) == 0
 
 
+def test_legacy_onboarding_does_not_delay_first_agent_recovery(conn):
+    """The recovery ladder supersedes legacy onboarding failures: only a
+    recent attempt by the same agent_extract mechanism starts its cooldown."""
+    from eventindex.jobs.schedule import retry_degraded
+
+    legacy = _source(conn, "legacy-failure", "now()", status="degraded")
+    current = _source(conn, "current-failure", "now()", status="degraded")
+    conn.execute(
+        "INSERT INTO jobs (kind, payload, status, finished_at) VALUES "
+        "('onboard', %s, 'failed', now())",
+        (Jsonb({"source_id": str(legacy)}),),
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload, status, finished_at) VALUES "
+        "('agent_extract', %s, 'failed', now())",
+        (Jsonb({"source_id": str(current)}),),
+    )
+    conn.commit()
+
+    assert retry_degraded(conn) == 1
+    repair = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'agent_extract' "
+        "AND status = 'pending'"
+    ).fetchone()
+    assert repair["payload"]["source_id"] == str(legacy)
+
+
 def test_weekly_parity_audit_enqueues_once(conn):
     from eventindex.jobs.schedule import enqueue_weekly_parity
 

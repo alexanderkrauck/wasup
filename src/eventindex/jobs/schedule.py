@@ -138,8 +138,10 @@ SELFHEAL_PER_TICK = 5  # 98 degraded sources enqueued 47 agent sessions in
 def retry_degraded(conn) -> int:
     """Degraded is a state, not a grave (Alexander 2026-07-20): a source
     whose repair failed gets the agent again on a weekly cadence, warm-started
-    from its persisted notes. After SELFHEAL_MAX_ATTEMPTS it parks dormant -
-    the monthly pulse crawl remains its way back, so nothing is ever final."""
+    from its persisted notes. Legacy onboarding history does not consume the
+    newer agent-extraction mechanism's first attempt. After
+    SELFHEAL_MAX_ATTEMPTS it parks dormant - the monthly pulse crawl remains
+    its way back, so nothing is ever final."""
     rows = conn.execute(
         """
         SELECT s.id, s.name,
@@ -150,9 +152,15 @@ def retry_degraded(conn) -> int:
               SELECT 1 FROM jobs j
               WHERE j.kind IN ('agent_extract', 'onboard')
                 AND j.payload->>'source_id' = s.id::text
-                AND (j.status IN ('pending', 'running')
-                     OR coalesce(j.finished_at, j.created_at)
-                        > now() - %(days)s * interval '1 day')
+                AND j.status IN ('pending', 'running')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM jobs j
+              WHERE j.kind = 'agent_extract'
+                AND j.payload->>'source_id' = s.id::text
+                AND j.status IN ('done', 'failed')
+                AND coalesce(j.finished_at, j.created_at)
+                    > now() - %(days)s * interval '1 day'
           )
         ORDER BY s.yield_ema DESC NULLS LAST
         LIMIT %(cap)s

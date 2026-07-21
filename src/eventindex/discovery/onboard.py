@@ -90,6 +90,12 @@ Method:
    pagination type next_click clicks through every window - use this when a
    date-filtered listing still paginates in-page. A recipe that only ever
    sees the first page of each window misses most of the site.
+   Some listings require a PUBLIC region or topic choice before the right
+   events appear. Click the controls in a fresh page and verify the visible
+   listing changed to the intended scope, then put their exact stable CSS
+   selectors in setup_clicks, in order. The interpreter replays them once
+   after page load and before pagination. Never use setup_clicks for login,
+   account, or personalized controls.
 3. Propose field_selectors ONLY if 3+ item nodes share a stable structure
    (check with read_dom). If the DOM is messy, OMIT field_selectors entirely -
    the interpreter then uses LLM extraction, which always works. Selectors are
@@ -137,6 +143,9 @@ Method:
 1. navigate to the entry URL and find every upcoming event/course/Termin the
    site publishes, however far ahead. Watch the API RESPONSES list: a JSON
    endpoint that returns the events is the best path - navigate to it.
+   If the relevant listing requires public region/topic controls, click and
+   verify them, then include their ordered exact selectors in setup_clicks
+   when you emit a recipe. Never use login or personalized state.
 2. Where event data is only visible as rendered pixels (posters, flyers,
    canvas), call read_screenshot - it OCR-extracts the current viewport.
 3. Submit events with emit_events (multiple calls fine; each is validated:
@@ -277,28 +286,20 @@ class Browser:
         return (f"URL: {page.url}\nTITLE: {page.title()}{delta}\n\nVISIBLE TEXT:\n{text}\n\n"
                 f"EVENT-ISH LINKS:\n" + "\n".join(eventish) + api)
 
-    @property
-    def COOKIE_SELECTORS(self):
-        from eventindex.fetch.headless import COOKIE_SELECTORS
-
-        return COOKIE_SELECTORS
-
     def navigate(self, url: str) -> str:
+        from eventindex.fetch.headless import _dismiss_cookies
+
         page = self._ensure()
         page.goto(url, timeout=25_000, wait_until="domcontentloaded")
         page.wait_for_timeout(1200)
-        try:  # cookie walls hide everything from inner_text
-            banner = page.query_selector(self.COOKIE_SELECTORS)
-            if banner and banner.is_visible():
-                banner.click()
-                page.wait_for_timeout(600)
-        except Exception:
-            pass
+        _dismiss_cookies(page)  # cookie walls hide text and swallow clicks
         if len(page.inner_text("body")) < 300:  # slow SPA: give it a chance
             page.wait_for_timeout(3000)
         return self.observe()
 
     def click(self, selector: str) -> str:
+        from eventindex.fetch.headless import _click_with_cookie_retry
+
         page = self._ensure()
         el = page.query_selector(selector)
         if el is None:
@@ -307,7 +308,7 @@ class Browser:
         # name the EXACT control that worked, and agents kept emitting
         # lookalike selectors of decorative paginators (prod, 2026-07-11)
         identity = el.evaluate("e => e.cloneNode(false).outerHTML")[:300]
-        el.click()
+        _click_with_cookie_retry(page, el)
         page.wait_for_timeout(1200)
         return f"CLICKED ELEMENT: {identity}\n" + self.observe()
 
@@ -504,7 +505,10 @@ def _probe_url_deepest_html(recipe: Recipe, url: str) -> tuple[bytes | None, str
     if p.type == "next_click":
         from eventindex.fetch.headless import render_states
 
-        result = render_states(url, p.next_selector, max_states=depth)
+        result = render_states(
+            url, p.next_selector, max_states=depth,
+            setup_clicks=recipe.setup_clicks,
+        )
         return (result[0][-1] if result and result[0] else None), url
     if p.type in ("load_more_click", "infinite_scroll"):
         from eventindex.fetch.headless import render_page
@@ -514,13 +518,14 @@ def _probe_url_deepest_html(recipe: Recipe, url: str) -> tuple[bytes | None, str
             url,
             click_selector=p.click_selector if p.type == "load_more_click" else None,
             scroll=p.type == "infinite_scroll",
+            setup_clicks=recipe.setup_clicks,
         ), url
 
     def _get(u: str) -> bytes | None:
         if recipe.render == "headless":
             from eventindex.fetch.headless import render_page
 
-            return render_page(u)
+            return render_page(u, setup_clicks=recipe.setup_clicks)
         try:
             resp = httpx.get(u, headers={"User-Agent": config.USER_AGENT},
                              timeout=25, follow_redirects=True)

@@ -19,20 +19,59 @@ _browser = None
 # cookie walls hide content and can swallow paginator clicks; the onboarding
 # agent dismisses them, so the crawler that executes its recipe must too
 COOKIE_SELECTORS = (
-    ".cc_btn_accept_all, #onetrust-accept-btn-handler, "
-    "[class*='cookie'] button, [id*='cookie'] [class*='accept'], "
-    "button[class*='accept'], a[class*='cc_btn']"
+    "#onetrust-reject-all-handler",
+    "button:has-text('Alle ablehnen')",
+    "button:has-text('Nur notwendige')",
+    "button:has-text('Reject all')",
+    "button:has-text('Necessary only')",
+    ".cc_btn_accept_all",
+    "#onetrust-accept-btn-handler",
+    "[class*='cookie'] button",
+    "[id*='cookie'] [class*='accept']",
+    "button[class*='accept']",
+    "a[class*='cc_btn']",
 )
 
 
 def _dismiss_cookies(page) -> None:
+    for selector in COOKIE_SELECTORS:
+        try:
+            banner = page.query_selector(selector)
+            if banner and banner.is_visible():
+                banner.click()
+                page.wait_for_timeout(600)
+                return
+        except Exception:
+            continue
+
+
+def _click_with_cookie_retry(page, control) -> None:
+    """Click a control, handling consent overlays that appear after load."""
     try:
-        banner = page.query_selector(COOKIE_SELECTORS)
-        if banner and banner.is_visible():
-            banner.click()
-            page.wait_for_timeout(600)
+        control.click(timeout=4_000)
     except Exception:
-        pass
+        _dismiss_cookies(page)
+        control.click(timeout=4_000)
+
+
+def _apply_setup_clicks(page, selectors: list[str]) -> bool:
+    """Replay a recipe's public listing controls in order.
+
+    A missing/hidden control fails closed: continuing would crawl a broader
+    default scope while claiming the requested session-filtered scope worked.
+    """
+    for selector in selectors:
+        try:
+            page.wait_for_selector(selector, state="visible", timeout=4_000)
+            control = page.query_selector(selector)
+            if control is None or not control.is_visible():
+                raise RuntimeError("control is not visible")
+            _click_with_cookie_retry(page, control)
+            page.wait_for_timeout(1_200)
+        except Exception as e:
+            log.warning("headless setup click failed selector=%r: %s", selector, e)
+            return False
+    return True
 
 
 def _get_browser():
@@ -49,6 +88,7 @@ def render_page(
     url: str,
     click_selector: str | None = None,
     scroll: bool = False,
+    setup_clicks: list[str] | None = None,
 ) -> bytes | None:
     """Render a page; optionally exhaust a load-more button or infinite
     scroll (bounded), then return the final DOM HTML."""
@@ -59,13 +99,15 @@ def render_page(
         page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
         _dismiss_cookies(page)
+        if setup_clicks and not _apply_setup_clicks(page, setup_clicks):
+            return None
 
         if click_selector:
             for _ in range(MAX_CLICKS):
                 button = page.query_selector(click_selector)
                 if button is None or not button.is_visible():
                     break
-                button.click()
+                _click_with_cookie_retry(page, button)
                 page.wait_for_timeout(1200)
         elif scroll:
             last_height = 0
@@ -97,7 +139,8 @@ _NEXT_EXHAUSTED_JS = """e =>
 
 
 def render_states(
-    url: str, next_selector: str | None, max_states: int
+    url: str, next_selector: str | None, max_states: int,
+    setup_clicks: list[str] | None = None,
 ) -> tuple[list[bytes], str] | None:
     """next_click pagination: harvest EVERY page state - unlike load-more
     (accumulating DOM, final snapshot suffices), a JSF/PrimeFaces-style
@@ -116,6 +159,8 @@ def render_states(
         page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
         page.wait_for_timeout(1500)
         _dismiss_cookies(page)
+        if setup_clicks and not _apply_setup_clicks(page, setup_clicks):
+            return None
 
         states = [page.content()]
         reason = "exhausted"
@@ -144,7 +189,7 @@ def render_states(
             if len(states) >= max_states:
                 reason = "cap"  # limit hit with pages still ahead
                 break
-            button.click()
+            _click_with_cookie_retry(page, button)
             page.wait_for_timeout(1200)
             content = page.content()
             if content == states[-1]:  # slow AJAX? one more chance

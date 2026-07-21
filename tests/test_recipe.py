@@ -191,6 +191,43 @@ def test_interactive_pagination_coerces_headless_render():
     assert r.render == "headless"
 
 
+def test_setup_clicks_coerce_headless_and_unwrap_llm_array_shape():
+    r = _recipe(
+        render="http",
+        setup_clicks={"item": ["#open-region", "[data-region='north']"]},
+        pagination=Pagination(type="none"),
+    )
+    assert r.render == "headless"
+    assert r.setup_clicks == ["#open-region", "[data-region='north']"]
+
+
+def test_default_browser_fetcher_skips_listing_setup_on_detail_pages(monkeypatch):
+    from eventindex import config
+    from eventindex.fetch import headless
+    from eventindex.fetch.recipe import _default_fetcher
+
+    calls = []
+
+    def fake_render(url, click_selector=None, scroll=False, setup_clicks=None):
+        calls.append((url, setup_clicks))
+        return b"<html></html>"
+
+    monkeypatch.setattr(config, "CRAWL_DELAY_S", 0)
+    monkeypatch.setattr(headless, "render_page", fake_render)
+    r = _recipe(
+        setup_clicks=["#open-region", "[data-region='north']"],
+        pagination=Pagination(type="none"),
+    )
+    fetch = _default_fetcher(r)
+    fetch("https://x.at/events")
+    fetch.detail("https://x.at/events/42")
+
+    assert calls == [
+        ("https://x.at/events", r.setup_clicks),
+        ("https://x.at/events/42", None),
+    ]
+
+
 def test_next_click_states_are_harvested_per_page(conn):
     """A next_click fetch returns one HTML per page STATE (a replacing
     paginator destroys earlier pages); every state must be extracted."""

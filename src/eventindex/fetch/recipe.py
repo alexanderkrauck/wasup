@@ -96,6 +96,12 @@ class Recipe(BaseModel):
         "for every pagination type. Plain URL list is the universal fallback (H3.3)."
     )
     render: Literal["http", "headless"] = "http"
+    setup_clicks: list[str] = Field(
+        default_factory=list,
+        description="ordered CSS selectors to click on each listing page "
+        "before pagination (public region/topic controls that establish "
+        "browser session state; never login flows)",
+    )
     pagination: Pagination
     item_scope: str | None = Field(None, description="CSS narrowing what the extractor sees")
     field_selectors: dict[str, str] | None = Field(
@@ -114,13 +120,17 @@ class Recipe(BaseModel):
     stop_conditions: list[Literal["date_older_than_now", "all_fingerprints_seen"]] = []
     validation: Validation = Validation()
 
-    _lists = field_validator("entry_urls", "stop_conditions", mode="before")(_coerce_list)
+    _lists = field_validator(
+        "entry_urls", "setup_clicks", "stop_conditions", mode="before"
+    )(_coerce_list)
 
     @model_validator(mode="after")
     def _interactive_needs_headless(self):
         # clicking/scrolling only exists in a browser; an agent that forgets
         # render='headless' must not produce a recipe that silently no-ops
-        if self.pagination.type in ("next_click", "load_more_click", "infinite_scroll"):
+        if (self.setup_clicks or self.pagination.type in (
+            "next_click", "load_more_click", "infinite_scroll"
+        )):
             self.render = "headless"
         return self
 
@@ -400,7 +410,12 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                         continue
                     visited.add(durl)
                     detail_budget -= 1
-                    dhtml = fetch_page(durl)
+                    # setup_clicks belong to listing entry pages. Replaying
+                    # them on an event detail page would look for controls
+                    # that correctly do not exist there, so default browser
+                    # fetchers expose a plain detail-page path.
+                    detail_fetch = getattr(fetch_page, "detail", fetch_page)
+                    dhtml = detail_fetch(durl)
                     if dhtml is None:
                         continue
                     _, detail_payloads = cascade_extract(
@@ -532,13 +547,18 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
     if recipe.render == "headless":
         from eventindex.fetch.headless import render_page, render_states
 
+        def fetch_detail_headless(url: str) -> bytes | None:
+            time.sleep(config.CRAWL_DELAY_S)
+            return render_page(url)
+
         if recipe.pagination.type == "next_click":
             max_states = min(recipe.pagination.max_pages, MAX_PAGES_HARD)
 
             def fetch_next_click(url: str) -> list[bytes] | None:
                 time.sleep(config.CRAWL_DELAY_S)
                 result = render_states(
-                    url, recipe.pagination.next_selector, max_states=max_states
+                    url, recipe.pagination.next_selector, max_states=max_states,
+                    setup_clicks=recipe.setup_clicks,
                 )
                 if result is None:
                     return None
@@ -555,6 +575,7 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
 
             fetch_next_click.truncated = None
             fetch_next_click.pagination_noop = None
+            fetch_next_click.detail = fetch_detail_headless
             return fetch_next_click
 
         def fetch_headless(url: str) -> bytes | None:
@@ -564,8 +585,10 @@ def _default_fetcher(recipe: Recipe) -> Callable[[str], bytes | None]:
                 click_selector=recipe.pagination.click_selector
                 if recipe.pagination.type == "load_more_click" else None,
                 scroll=recipe.pagination.type == "infinite_scroll",
+                setup_clicks=recipe.setup_clicks,
             )
 
+        fetch_headless.detail = fetch_detail_headless
         return fetch_headless
 
     client = httpx.Client(

@@ -198,7 +198,9 @@ def is_placeholder_title(title: str, source_name: str) -> bool:
     if not words:
         return True
     source_words = set(normalize_title(source_name).split())
-    meaningful = words - _GENERIC_TITLE_WORDS - source_words
+    # digits survive normalization now; a year is not meaning ("Programm 2026")
+    meaningful = {w for w in words if not w.isdigit()} \
+        - _GENERIC_TITLE_WORDS - source_words
     return not meaningful
 
 

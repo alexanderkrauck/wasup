@@ -434,8 +434,9 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         blocks[("v", day, _venue_key(c))][c.fingerprint].append(c)
         # word-level: "Klassik am Dom 2026 - Erwin Schrott" must block with
         # "Erwin Schrott" - any shared informative word on the same day
+        # (years are shared by everything and inform nothing)
         for word in set(normalize_title(c.title).split()):
-            if len(word) > 3:
+            if len(word) > 3 and not word.isdigit():
                 blocks[("t", day, word)][c.fingerprint].append(c)
         by_fp[c.fingerprint].append(c)
 
@@ -478,7 +479,8 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         groups[key] = {
             "key": key, "claims": cs, "recurrence": None, "rrule_raw": None,
         }
-    return _merge_shared_fingerprints(list(groups.values()))
+    out = _merge_shared_fingerprints(list(groups.values()))
+    return _adjudicate_groups(tx, out, venue_notes)
 
 
 def _merge_shared_fingerprints(groups: list[dict]) -> list[dict]:
@@ -511,6 +513,150 @@ def _merge_shared_fingerprints(groups: list[dict]) -> list[dict]:
         m["rrule_raw"] = m["rrule_raw"] or g["rrule_raw"]
         m["keys"].append(g["key"])
 
+    out = []
+    for m in merged.values():
+        series_keys = sorted(k for k in m["keys"] if k.startswith("series|"))
+        m["key"] = series_keys[0] if series_keys else min(m["keys"])
+        seen: set = set()
+        m["claims"] = [c for c in m["claims"] if not (c.id in seen or seen.add(c.id))]
+        out.append(m)
+    return out
+
+
+# ------------------------------------------------- group-level adjudication
+# Red team 2026-07-21: series identity was an exact string key and pass 3
+# only compared same-day one-offs, so a title word-order flip, an
+# "Ausstellung:" prefix, a typo or a venue-resolution flap duplicated a
+# whole recurring event with NO adjudicator ever seeing the pair (Kastner
+# exhibition x4, one club evening x7; ~8-10% of the corpus redundant).
+# Candidate generation stays mechanical (token containment / trigram
+# similarity - allowed); the same-series judgment is one cached LLM call.
+
+MAX_GROUP_BLOCK = 15
+GROUP_DATE_WINDOW_DAYS = 60
+
+
+def _group_profile(g: dict) -> dict:
+    rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
+    ntitle = normalize_title(rep.title)
+    return {
+        "rep": rep,
+        "ntitle": ntitle,
+        "tokens": {t for t in ntitle.split() if len(t) > 3 and not t.isdigit()},
+        "venues": {c.venue_id for c in g["claims"] if c.venue_id},
+        "days": {c.starts_at.astimezone(VIENNA).date() for c in g["claims"]},
+    }
+
+
+def _group_pair_candidate(a: dict, b: dict) -> bool:
+    """Mechanical compatibility only - the judgment is the adjudicator's."""
+    if not a["tokens"] or not b["tokens"]:
+        return False
+    inter = len(a["tokens"] & b["tokens"])
+    containment = inter / min(len(a["tokens"]), len(b["tokens"]))
+    if containment < 0.8 and match.title_similarity(a["ntitle"], b["ntitle"]) < 0.55:
+        return False
+    if a["venues"] and b["venues"] and not (a["venues"] & b["venues"]):
+        # two distinct RESOLVED venues: only near-identical titles may ask
+        # the adjudicator (venue-table fragmentation, Brucknerhaus foyer x5)
+        if containment < 1.0:
+            return False
+    if len(a["days"]) < 3 and len(b["days"]) < 3:
+        # two short runs (Caligula 21.09 vs 27.09): require date proximity,
+        # or same-titled annual editions would meet across seasons
+        gap = min(
+            abs((da - db).days) for da in a["days"] for db in b["days"]
+        )
+        if gap > GROUP_DATE_WINDOW_DAYS:
+            return False
+    return True
+
+
+def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
+    ka = f'{a["ntitle"]}|{"|".join(sorted(map(str, a["venues"])))}'
+    kb = f'{b["ntitle"]}|{"|".join(sorted(map(str, b["venues"])))}'
+    if ka == kb:
+        return True  # identical profile: same identity by construction
+    lo, hi = sorted((ka, kb))
+    pair_key = hashlib.md5(f"groups|{lo}||{hi}".encode()).hexdigest()
+    cached = tx.execute(
+        "SELECT same_event FROM adjudication WHERE pair_key = %s", (pair_key,)
+    ).fetchone()
+    if cached is not None:
+        return cached["same_event"]
+
+    def fmt(p: dict) -> str:
+        rep = p["rep"]
+        days = ", ".join(d.isoformat() for d in sorted(p["days"])[:5])
+        desc = " ".join((rep.value("description") or "").split())[:150]
+        return (f"'{rep.title}', Ort: {rep.value('venue_name') or 'unbekannt'}, "
+                f"Quelle: {rep.source_name}, Termine: {days}"
+                f"{', mehr' if len(p['days']) > 5 else ''}, "
+                f"Beschreibung: {desc or '-'}")
+
+    prompt = (
+        "Two event listings from Linz sources, each possibly covering "
+        "several dates of a series/run/exhibition:\n"
+        f"A: {fmt(a)}\nB: {fmt(b)}\n"
+        "Are A and B the SAME real-world event (the same recurring series, "
+        "exhibition or run - possibly under a decorated title, different "
+        "word order, a typo, or listed by different sites)? DIFFERENT "
+        "means genuinely separate happenings: numbered course levels or "
+        "semester editions (Kurs 1 vs Kurs 3, Zirkuswelt I vs II), "
+        "different acts, different weekday variants of a titled slot."
+    )
+    try:
+        verdict = llm.complete(tx, prompt, SameEvent).same_event
+    except BudgetExceeded:
+        raise  # no verdicts without money - park the rebuild, don't guess
+    except Exception:
+        return False  # keep distinct this rebuild; retry next time, no cache
+    _cache_verdict(pair_key, ka[:200], kb[:200], a["rep"].title, b["rep"].title,
+                   0, verdict, "llm_series")
+    return verdict
+
+
+def _adjudicate_groups(tx, groups: list[dict], venue_notes: list[str]) -> list[dict]:
+    profiles = [_group_profile(g) for g in groups]
+    blocks: dict[str, list[int]] = defaultdict(list)
+    for i, p in enumerate(profiles):
+        for tok in p["tokens"]:
+            blocks[tok].append(i)
+
+    parent = list(range(len(groups)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    compared: set = set()
+    for members in blocks.values():
+        if len(members) > MAX_GROUP_BLOCK:
+            continue  # "linz"/"konzert" blocks explode quadratically
+        for x in range(len(members)):
+            for y in range(x + 1, len(members)):
+                i, j = members[x], members[y]
+                if (i, j) in compared:
+                    continue
+                compared.add((i, j))
+                if not _group_pair_candidate(profiles[i], profiles[j]):
+                    continue
+                if _adjudicate_group_pair(tx, profiles[i], profiles[j]):
+                    _reconcile_venues(tx, profiles[i]["rep"], profiles[j]["rep"],
+                                      venue_notes)
+                    parent[find(i)] = find(j)
+
+    merged: dict[int, dict] = {}
+    for i, g in enumerate(groups):
+        m = merged.setdefault(find(i), {
+            "claims": [], "recurrence": None, "rrule_raw": None, "keys": [],
+        })
+        m["claims"].extend(g["claims"])
+        m["recurrence"] = m["recurrence"] or g["recurrence"]
+        m["rrule_raw"] = m["rrule_raw"] or g["rrule_raw"]
+        m["keys"].extend(g.get("keys", []) or [g["key"]])
     out = []
     for m in merged.values():
         series_keys = sorted(k for k in m["keys"] if k.startswith("series|"))

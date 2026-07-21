@@ -7,11 +7,14 @@ VIENNA = ZoneInfo("Europe/Vienna")
 DT = datetime(2026, 7, 10, 20, 0, tzinfo=VIENNA)
 
 
-def test_normalize_folds_umlauts_dates_stopwords():
+def test_normalize_folds_umlauts_stopwords_keeps_digits():
+    # digits stay (2026-07-21): stripping them hard-merged Kinderkurs 1-4;
+    # date-decoration variants are the group adjudicator's problem now
     assert normalize_title("Konzert im Brucknerhaus am 10.07.2026") == (
-        "konzert brucknerhaus"
+        "konzert brucknerhaus 10 07 2026"
     )
     assert normalize_title("GRÜNMARKT Urfahr") == "gruenmarkt urfahr"
+    assert normalize_title("Kinderkurs 1") != normalize_title("Kinderkurs 3")
 
 
 def test_same_event_same_fingerprint_despite_formatting():

@@ -26,10 +26,15 @@ _STOPWORDS = {
 
 
 def normalize_title(title: str) -> str:
+    # digits STAY (2026-07-21): stripping them hard-merged Kinderkurs 1-4
+    # into one event and collapsed same-day showtimes ("... 14:00" vs
+    # "... 16:00") with no adjudicator in the loop - the only true wrong
+    # merges the red team found. Date/year decoration variants that digits
+    # now split are re-merged by the group adjudicator, which is a
+    # judgment; a silent string-level merge is not.
     s = title.lower().translate(_UMLAUTS)
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    s = re.sub(r"\d+", " ", s)  # strips dates, times, years
-    s = re.sub(r"[^a-z]+", " ", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
     words = [w for w in s.split() if w not in _STOPWORDS]
     return " ".join(words)
 

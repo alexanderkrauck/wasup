@@ -287,6 +287,79 @@ def test_projection_requires_a_recurring_verdict(conn, monkeypatch):
     assert events == [] and occs == []  # announcements are not events
 
 
+def test_title_variant_series_merge_via_adjudication(conn, monkeypatch):
+    """The Kastner shape: 'Ausstellung: X' at the resolved venue vs 'X'
+    venue-less with fully DISJOINT dates - no exact key, no shared day, so
+    every pre-2026-07-21 repair was blind. The group adjudicator sees the
+    pair; one verdict, one event."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        rb.llm, "complete", lambda *a, **k: SimpleNamespace(same_event=True)
+    )
+    portal_a = _source(conn, "meinbezirk", 0.7)
+    portal_b = _source(conn, "linztermine", 0.9)
+    for day in (10, 11, 12):
+        _claim(conn, portal_a,
+               _concert("Ausstellung: Grafische Schätze aus der Sammlung Kastner",
+                        starts=f"2026-07-{day}", venue="Schlossmuseum Linz"),
+               f"ausstellung grafische schaetze aus sammlung kastner|2026-07-{day}|a")
+    for day in (21, 22, 23):  # disjoint dates, no venue resolved
+        fields = {"title": ("Grafische Schätze aus der Sammlung Kastner", 0.9),
+                  "starts_at": (f"2026-07-{day}", 0.9)}
+        _claim(conn, portal_b, fields,
+               f"grafische schaetze aus sammlung kastner|2026-07-{day}|b")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    days = {o["starts_at"].astimezone(rb.VIENNA).day
+            for o in occs if o["event_id"] == events[0]["id"]}
+    assert {10, 11, 12, 21, 22, 23} <= days
+    # the verdict is cached for every future rebuild
+    row = conn.execute(
+        "SELECT decided_by FROM adjudication WHERE decided_by = 'llm_series'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_weekday_title_variants_are_not_even_candidates(conn):
+    # 'Wochentagsmesse - Freitag' vs '- Dienstag': one shared token out of
+    # two - mechanically incompatible, the (asserting) no-LLM stub proves
+    # the adjudicator is never asked
+    sid = _source(conn, "pfarre", 0.8)
+    for wd, days in (("Freitag", (10, 17, 24)), ("Dienstag", (14, 21, 28))):
+        for day in days:
+            _claim(conn, sid,
+                   _concert(f"Wochentagsmesse - {wd}",
+                            starts=f"2026-07-{day}T08:00:00+02:00",
+                            venue="Christkönig"),
+                   f"wochentagsmesse {wd.lower()}|2026-07-{day}|x")
+    rb.rebuild(conn, now=NOW)
+    events, _ = _canon(conn)
+    assert len(events) == 2
+
+
+def test_numbered_courses_stay_distinct_when_adjudicator_says_so(conn, monkeypatch):
+    # Kinderkurs 1 vs Kinderkurs 3: identical informative tokens make them
+    # candidates; the verdict keeps them apart (the old digit-stripping
+    # fingerprint hard-merged them with no verdict at all)
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        rb.llm, "complete", lambda *a, **k: SimpleNamespace(same_event=False)
+    )
+    sid = _source(conn, "atz", 0.8)
+    for nr, days in (("1", (13, 14, 15)), ("3", (17, 18, 19))):
+        for day in days:
+            _claim(conn, sid,
+                   _concert(f"Kinderkurs {nr}", starts=f"2026-08-{day}T09:00:00+02:00",
+                            venue="ATZ Linz"),
+                   f"kinderkurs {nr}|2026-08-{day}|x")
+    rb.rebuild(conn, now=NOW)
+    events, _ = _canon(conn)
+    assert [e["title"] for e in events] == ["Kinderkurs 1", "Kinderkurs 3"]
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences

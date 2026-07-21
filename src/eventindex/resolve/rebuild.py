@@ -211,44 +211,13 @@ def _recurrence_of_raw(raw) -> Recurrence | None:
 
 
 def _recurrence_of(c: Claim) -> Recurrence | None:
-    rec = _recurrence_of_raw(c.value("recurrence"))
-    stated = rec.as_stated if rec is not None else ""
-    if rec is not None and rec.freq == "daily" and (
-        not _DAILY_CADENCE_RE.search(stated or "")
-        or (
-            _RECURRENCE_EXCEPTION_RE.search(stated or "")
-            and _WEEKDAY_WORD_RE.search(stated or "")
-        )
-    ):
-        # A bare validity range (live example: "bis 16.08.2026") is not
-        # evidence that an event happens every day.  The constrained schema
-        # promises `as_stated` is the source wording; reject an invented
-        # daily cadence deterministically and keep the observed dates only.
-        # The schema also cannot represent "daily except Tue/Sat"; expanding
-        # that as all seven days is knowingly wrong, so it fails closed too.
-        return None
     # NOTE (2026-07-20, Alexander: "weekdays are not special", "regex = bad"):
-    # rule-vs-event coherence is judged by the H1.1 verifier with full event
-    # context (title + anchor), never by vocabulary heuristics here. The
-    # _DAILY_CADENCE_RE gate above is migration debt toward that same call.
-    return rec
-
-
-_DAILY_CADENCE_RE = re.compile(
-    r"\b(täglich|taeglich|jeden\s+tag|alle\s+tage|daily|every\s+day"
-    r"|mehr(mals|fach)\s+(am|pro)\s+tag"
-    r"|(several|multiple)\s+times\s+(a|per)\s+day)\b",
-    re.IGNORECASE,
-)
-_RECURRENCE_EXCEPTION_RE = re.compile(
-    r"\b(außer|ausser|ausgenommen|except|not\s+on|nicht\s+(am|an))\b",
-    re.IGNORECASE,
-)
-_WEEKDAY_WORD_RE = re.compile(
-    r"\b(montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag|"
-    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)(s|en)?\b",
-    re.IGNORECASE,
-)
+    # rule-vs-event coherence - including invented cadences from bare
+    # validity ranges ("bis 16.08.2026" as daily, "bis 02.05.2028" as
+    # Saturdays) - is judged by the H1.1 verifier with full event context;
+    # since 2026-07-21 a rejected rule neither expands nor publishes, which
+    # retired the deterministic _DAILY_CADENCE_RE vocabulary gate here.
+    return _recurrence_of_raw(c.value("recurrence"))
 
 
 _WD_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
@@ -785,6 +754,77 @@ def _verified(tx, key: str, rec: Recurrence, occs: list[datetime],
 
 # ---------------------------------------------------------------- canon
 
+class Seriesness(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: str  # validated against the table CHECK below, defaulted on junk
+
+
+_SERIESNESS_KINDS = {"recurring", "one_off", "not_an_event"}
+
+
+def _seriesness(tx, g: dict) -> str:
+    """May this series-looking group be PROJECTED beyond its observed dates?
+
+    Cadence detection sees only date arithmetic; it happily extended a 'JULI
+    HIGHLIGHTS' blog post into September Mondays and unique liturgical
+    Sundays into weekly services (red team 2026-07-21). Whether a listing IS
+    a repeating event is a semantic judgment -> one cached mini call, the
+    adjudication/text_recurrence pattern. Failure degrades to 'one_off'
+    (observed dates only, never cached) - projection is a bonus, junk isn't.
+    """
+    rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
+    desc = " ".join((rep.value("description") or "").split())[:400]
+    content_key = hashlib.md5(
+        f"seriesness|{normalize_title(rep.title)}|{desc}".encode()
+    ).hexdigest()
+    cached = tx.execute(
+        "SELECT verdict FROM series_judgment WHERE content_key = %s",
+        (content_key,),
+    ).fetchone()
+    if cached is not None:
+        return cached["verdict"]
+    days = sorted({c.starts_at.astimezone(VIENNA).date() for c in g["claims"]})
+    sample = ", ".join(d.strftime("%a %Y-%m-%d") for d in days[:6])
+    prompt = (
+        "One listing from a Linz events source (German content is normal):\n"
+        f'Title: "{rep.title}"\n'
+        f'Description: "{desc or "-"}"\n'
+        f"Observed dates: {sample}\n"
+        "Classify what this listing IS:\n"
+        "- recurring: ONE specific public event repeating on a regular "
+        "schedule (weekly course, monthly Stammtisch, daily tour) - "
+        "projecting further dates from the observed pattern is correct\n"
+        "- one_off: a unique or per-date happening (a dated premiere, a "
+        "festival edition, a service for one specific liturgical day, a "
+        "course with fixed listed dates) - dates beyond the listed ones "
+        "must never be invented\n"
+        "- not_an_event: not an attendable dated happening at all (blog or "
+        "news post, price/tariff info, opening hours, program overview, "
+        "booking announcement)\n"
+        'Answer with kind = "recurring", "one_off" or "not_an_event".'
+    )
+    try:
+        kind = llm.complete(
+            tx, prompt, Seriesness, source_id=rep.source_id
+        ).kind.strip().lower()
+    except BudgetExceeded:
+        raise  # like adjudication: park the rebuild, don't guess
+    except Exception:
+        return "one_off"  # transient: no projection this rebuild, no cache
+    if kind not in _SERIESNESS_KINDS:
+        return "one_off"  # junk output: fail safe, uncached, retry next time
+    from eventindex import db
+
+    with db.connect() as conn:  # survives rebuild rollback, like _cache_verdict
+        conn.execute(
+            "INSERT INTO series_judgment (content_key, verdict) "
+            "VALUES (%s, %s) ON CONFLICT (content_key) DO NOTHING",
+            (content_key, kind),
+        )
+        conn.commit()
+    return kind
+
+
 def _coverage_edge(claims: list[Claim], last_observed: date) -> date:
     """How far the claims' sources demonstrably see into the future: a date
     inside this edge that the feeds did NOT show is evidence of absence, so
@@ -925,8 +965,8 @@ def _claim_cands(
 
 def _occurrences_for(
     tx, g: dict, holidays, now: datetime
-) -> tuple[list, bool, str | None, set]:
-    """Returns ([(starts, ends)], tentative, rrule_text, projected starts)."""
+) -> tuple[list, str | None, set]:
+    """Returns ([(starts, ends)], rrule_text, projected starts)."""
     rec = g["recurrence"]
     if rec is not None:
         anchor = min(c.starts_at for c in g["claims"])
@@ -939,13 +979,18 @@ def _occurrences_for(
             for s, e in expanded
         ] + _claim_cands(g["claims"], is_series=True)
         pairs = _fold_pairs(cands)
-        rule = recurrence.compile_rrule(
-            rec, pairs[0][0] if pairs else anchor
-        )
         rep = g["claims"][0]
-        tentative = not _verified(tx, g["key"], rec, [p[0] for p in pairs],
-                                  title=rep.title, anchor=rep.starts_at)
-        return pairs, tentative, str(rule) if rule else None, set()
+        if _verified(tx, g["key"], rec, [p[0] for p in pairs],
+                     title=rep.title, anchor=rep.starts_at):
+            rule = recurrence.compile_rrule(
+                rec, pairs[0][0] if pairs else anchor
+            )
+            return pairs, str(rule) if rule else None, set()
+        # a rejected rule must neither expand nor publish its rrule: the old
+        # 'tentative' label still SERVED the expansion, and 4 mutually
+        # exclusive Trinitatis services shared one parish Sunday (red team
+        # 2026-07-21). Observed dates below are all we actually know.
+        rec = None
     if g["rrule_raw"]:
         from dateutil.rrule import rrulestr
 
@@ -963,7 +1008,7 @@ def _occurrences_for(
                 (o, o + duration if duration else None)
                 for o in rule.between(now - recurrence.timedelta(hours=12), horizon, inc=True)
             ]
-            return pairs, False, g["rrule_raw"], set()
+            return pairs, g["rrule_raw"], set()
         except (ValueError, TypeError):
             pass
     # explicit dates: union over claims, folded per local day
@@ -973,9 +1018,14 @@ def _occurrences_for(
     projected: set = set()
     if g["key"].startswith("series|"):
         extra = _project_series(g, pairs)
-        projected = {p[0] for p in extra}
-        pairs.extend(extra)
-    return pairs, False, None, projected
+        if extra:
+            verdict = _seriesness(tx, g)
+            if verdict == "not_an_event":
+                return [], None, set()
+            if verdict == "recurring":
+                projected = {p[0] for p in extra}
+                pairs.extend(extra)
+    return pairs, None, projected
 
 
 def rebuild(conn, now: datetime | None = None) -> dict:
@@ -1012,7 +1062,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
         suppressed: list[str] = []
         aggregator_junk: list[str] = []
         for g in groups:
-            pairs, tentative, rrule_text, projected = _occurrences_for(
+            pairs, rrule_text, projected = _occurrences_for(
                 conn, g, holidays, now
             )
             # canon is forward-looking: a recipe gap once ingested a 2001-
@@ -1032,7 +1082,10 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             last_seen = max(c.extracted_at for c in g["claims"])
             is_series = bool(g["key"].startswith("series|"))
             rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
-            event_status = "tentative" if tentative else "confirmed"
+            # 'tentative' is gone (2026-07-21): an unverified rule no longer
+            # ships flagged occurrences - it ships none, so what remains is
+            # observed and therefore confirmed
+            event_status = "confirmed"
             # publish only real locations (claim or venue geo); the source-
             # fallback point exists for blocking, not for the API - three
             # unrelated events at the aggregator's own coordinates was how

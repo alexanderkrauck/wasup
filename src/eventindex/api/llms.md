@@ -102,8 +102,7 @@ Fine print an agent should know:
   fit typically lands around 0.4-0.7. Compare within a result set.
 - Rows carry `venue_name`/`venue_address`/`organizer` when known;
   `lat`/`lon` are only set from real venue/claim locations, never guessed.
-  `event_status: "tentative"` marks unverified series; `kind: "series"`
-  distinguishes recurring events from one-offs. `booking_url` and
+  `kind: "series"` distinguishes recurring events from one-offs. `booking_url` and
   `registration_required` appear when a source stated them.
 - Cursors (`next_cursor`) are opaque base64url strings - pass them back
   verbatim. `/v1/occurrences` also takes `include_terms=` for exhaustive

@@ -21,6 +21,8 @@ def no_llm(monkeypatch):
         AssertionError("LLM called in test")
     ))
     monkeypatch.setattr(recurrence, "verify", lambda *a, **k: True)
+    # projection gate: tests exercising cadence math assume a repeating event
+    monkeypatch.setattr(rb, "_seriesness", lambda tx, g: "recurring")
     # file writes escape the test transaction
     monkeypatch.setattr(rb, "_dump_review", lambda *a, **k: None)
 
@@ -233,6 +235,58 @@ def test_weekly_implicit_series_projects_beyond_feed_horizon(conn):
     assert left["n"] == 0
 
 
+def test_rejected_rule_serves_observed_dates_only(conn, monkeypatch):
+    # red team 2026-07-21: 'tentative' still SERVED unverified expansions -
+    # 4 mutually exclusive Trinitatis services shared one parish Sunday
+    monkeypatch.setattr(recurrence, "verify", lambda *a, **k: False)
+    sid = _source(conn, "pfarre", 0.8)
+    weekly_sunday = {
+        "freq": "weekly", "weekday": "SU", "week_of_month": None,
+        "interval": 1, "time": "09:30", "duration_minutes": None,
+        "except_holidays": [], "valid_from": None, "valid_until": None,
+        "as_stated": "Gottesdienste sonntags",
+    }
+    _claim(conn, sid,
+           _concert("Gottesdienst: 7. Sonntag nach Trinitatis",
+                    starts="2026-07-19T09:30:00+02:00", venue="Pfarrkirche",
+                    recurrence=(weekly_sunday, 0.9)),
+           "gottesdienst sonntag trinitatis|2026-07-19|x")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert len(events) == 1
+    assert events[0]["kind"] == "series"
+    # only the one observed Sunday, no weekly expansion, no published rrule
+    assert len(occs) == 1
+    rrule = conn.execute("SELECT rrule FROM event").fetchone()["rrule"]
+    assert rrule is None
+    assert events[0]["confidence"] > 0  # and it is NOT tentative
+    status = conn.execute("SELECT status FROM event").fetchone()["status"]
+    assert status == "confirmed"
+
+
+def test_projection_requires_a_recurring_verdict(conn, monkeypatch):
+    # 'JULI HIGHLIGHTS' (a blog post) was cadence-projected into September
+    sid = _source(conn, "boulderhalle", 0.8)
+    for day in ("06-10", "06-17", "06-24", "07-01"):  # Wednesdays
+        _claim(conn, sid, _concert("JULI HIGHLIGHTS",
+                                   starts=f"2026-{day}T18:00:00+02:00",
+                                   venue="Halle"),
+               f"juli highlights|2026-{day}|x")
+    conn.execute(
+        "UPDATE source SET extraction_hint = '{\"horizon_days\": 7}'")
+
+    monkeypatch.setattr(rb, "_seriesness", lambda tx, g: "one_off")
+    rb.rebuild(conn, now=NOW)
+    assert conn.execute(
+        "SELECT count(*) AS n FROM occurrence WHERE projected"
+    ).fetchone()["n"] == 0  # observed dates kept, nothing invented
+
+    monkeypatch.setattr(rb, "_seriesness", lambda tx, g: "not_an_event")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    assert events == [] and occs == []  # announcements are not events
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences
@@ -396,12 +450,15 @@ def test_recurrence_claim_expands_and_skips_summer_holidays(conn):
     assert any(d == "2026-09-15" for d in days)
 
 
-def test_bare_validity_range_cannot_invent_daily_occurrences(conn):
+def test_bare_validity_range_cannot_invent_daily_occurrences(conn, monkeypatch):
     """A source's "bis <date>" validity range is not a daily cadence.
 
     This exact extractor error made Jazz im Musikpavillon appear on every day
-    between its two real performances in production.
+    between its two real performances in production. Since 2026-07-21 the
+    judge is the H1.1 verifier (no vocabulary gate): a rule it rejects
+    neither expands nor publishes its rrule - observed dates only.
     """
+    monkeypatch.setattr(recurrence, "verify", lambda *a, **k: False)
     sid = _source(conn, "portal", 0.8)
     bad_daily = {
         "freq": "daily", "weekday": None, "week_of_month": None,
@@ -467,8 +524,12 @@ def test_explicit_daily_wording_still_expands(conn):
     } == {"2026-07-12", "2026-07-13", "2026-07-14"}
 
 
-def test_unrepresentable_daily_weekday_exceptions_do_not_expand(conn):
-    """The v1 schema cannot encode daily-except-Tue/Sat; keep truth over recall."""
+def test_unrepresentable_daily_weekday_exceptions_do_not_expand(conn, monkeypatch):
+    """The v1 schema cannot encode daily-except-Tue/Sat; keep truth over
+    recall. The judge is the H1.1 verifier (any 4 consecutive expanded days
+    contain a Tue or Sat, contradicting the wording): rejected -> observed
+    date only, no rrule."""
+    monkeypatch.setattr(recurrence, "verify", lambda *a, **k: False)
     sid = _source(conn, "stift", 0.8)
     unsupported = {
         "freq": "daily", "weekday": None, "week_of_month": None,
@@ -495,10 +556,10 @@ def test_unrepresentable_daily_weekday_exceptions_do_not_expand(conn):
 
     events, occs = _canon(conn)
     assert len(events) == 1
-    assert events[0]["kind"] == "one_off"
     assert len(occs) == 1
     assert occs[0]["starts_at"].astimezone(rb.VIENNA).date().isoformat() == \
         "2026-07-12"
+    assert conn.execute("SELECT rrule FROM event").fetchone()["rrule"] is None
 
 
 def test_text_recurrence_verified_at_birth(conn, monkeypatch):

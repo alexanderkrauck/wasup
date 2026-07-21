@@ -47,6 +47,28 @@ def test_emit_events_rejects_garbage_without_raising():
     assert [p["title"]["value"] for p in result.payloads] == ["Gutes Konzert"]
 
 
+def test_extraction_prompt_emits_a_verified_recipe_before_api_chasing():
+    prompt = " ".join(onboard._SYSTEM_EXTRACT.split())
+    assert "404/500/empty endpoints are dead" in prompt
+    assert "emit_recipe immediately" in prompt
+    assert "subsequent recipe crawl will extract the events" in prompt
+
+
+def test_failure_notes_preserve_working_click_selectors():
+    session = onboard.Session()
+    session.record(
+        "click", {"selector": ".region-picker"},
+        'CLICKED ELEMENT: <button class="region-picker"></button>\nchanged',
+    )
+    session.record(
+        "click", {"selector": "[data-region='north']"},
+        'CLICKED ELEMENT: <a data-region="north"></a>\nchanged',
+    )
+    notes = onboard._failure_notes(session, onboard.Browser())
+    assert ".region-picker" in notes
+    assert "[data-region='north']" in notes
+
+
 def test_vision_extract_builds_data_url_and_payloads(conn, monkeypatch):
     seen = {}
 

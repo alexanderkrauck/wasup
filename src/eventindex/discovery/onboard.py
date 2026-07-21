@@ -50,6 +50,17 @@ def _failure_notes(session: "Session", browser: "Browser") -> str:
         if turn["action"] == "emit_recipe":
             parts.append(f"last emit: {turn['observation'][:250]}")
             break
+    working_clicks = [
+        (turn["args"].get("selector"), turn["observation"].splitlines()[0])
+        for turn in session.turns
+        if turn["action"] == "click"
+        and turn["observation"].startswith("CLICKED ELEMENT:")
+    ]
+    if working_clicks:
+        parts.append("working clicks: " + "; ".join(
+            f"{selector!r} ({identity[17:180]})"
+            for selector, identity in working_clicks[-3:]
+        ))
     if browser._api_calls:
         parts.append("api endpoints seen: "
                      + ", ".join(list(browser._api_calls)[-5:]))
@@ -68,6 +79,11 @@ Method:
    render='http', pagination none/url_param. Prefer it over scraping the
    rendered page. A direct PDF program link (Monatsprogramm/Spielplan .pdf)
    is likewise a valid entry_url - the interpreter extracts PDF text.
+   Only pursue an API after an observed successful response contains event
+   data. A 404/500/empty endpoint is dead: return to the working listing.
+   Once you have verified setup controls plus a pagination path the Recipe
+   schema can express, emit that recipe IMMEDIATELY; do not spend remaining
+   turns reverse-engineering a theoretically cheaper API.
 2. Classify pagination by LOOKING at the page and links: numbered pages
    (url_param with {n} template), a "weiter/next" link with a real href
    (next_link), a next/paginator control that swaps the list IN PLACE via
@@ -143,6 +159,11 @@ Method:
 1. navigate to the entry URL and find every upcoming event/course/Termin the
    site publishes, however far ahead. Watch the API RESPONSES list: a JSON
    endpoint that returns the events is the best path - navigate to it.
+   Only pursue it when an observed successful response contains event data;
+   404/500/empty endpoints are dead. As soon as verified setup controls and
+   pagination fit the Recipe schema, emit_recipe immediately. A subsequent
+   recipe crawl will extract the events, so do not exhaust the session by
+   manually clicking every page or hunting for a cheaper hidden API first.
    If the relevant listing requires public region/topic controls, click and
    verify them, then include their ordered exact selectors in setup_clicks
    when you emit a recipe. Never use login or personalized state.

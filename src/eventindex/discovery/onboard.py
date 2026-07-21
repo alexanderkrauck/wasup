@@ -865,7 +865,8 @@ def onboard_source(tx, source: dict, job_id, model: str,
                 observation = _execute(name, args, browser, source, tx, job_id,
                                        min_horizon_days, expected_events,
                                        require_venues=bool(
-                                           task_reason and "venue" in task_reason),
+                                           (task_reason and "venue" in task_reason)
+                                           or hint.get("venue_escalated")),
                                        result=result)
                 if isinstance(observation, Recipe):
                     result.recipe = observation

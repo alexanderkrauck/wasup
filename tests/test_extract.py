@@ -76,6 +76,18 @@ def test_explicit_concert_start_beats_box_office_time():
     )
 
 
+def test_parse_dt_accepts_german_listing_dates_and_ranges():
+    assert parse_dt("21. Jul. 2026, 09:00 Uhr") == datetime(
+        2026, 7, 21, 9, 0, tzinfo=VIENNA,
+    )
+    assert parse_dt("3. März 2027, 18:30 Uhr") == datetime(
+        2027, 3, 3, 18, 30, tzinfo=VIENNA,
+    )
+    assert parse_dt("21. Jul. 2026 – 22. Jul. 2026") == datetime(
+        2026, 7, 21, 0, 0, tzinfo=VIENNA,
+    )
+
+
 def test_pdf_fixture_text_extraction():
     from eventindex.extract import pdf
 

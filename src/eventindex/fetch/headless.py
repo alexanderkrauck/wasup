@@ -102,13 +102,26 @@ def render_page(
         if setup_clicks and not _apply_setup_clicks(page, setup_clicks):
             return None
 
+        best_content = None
         if click_selector:
+            # load_more_click means the DOM accumulates. Some controls stay
+            # visible after exhaustion and one click too far replaces the
+            # list with an empty state; preserve the largest productive DOM
+            # instead of returning that destructive final snapshot.
+            previous = page.content()
+            best_content = previous
             for _ in range(MAX_CLICKS):
                 button = page.query_selector(click_selector)
                 if button is None or not button.is_visible():
                     break
                 _click_with_cookie_retry(page, button)
                 page.wait_for_timeout(1200)
+                content = page.content()
+                if len(content) > len(best_content):
+                    best_content = content
+                if content == previous:
+                    break
+                previous = content
         elif scroll:
             last_height = 0
             for _ in range(MAX_SCROLLS):
@@ -119,7 +132,7 @@ def render_page(
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(1200)
 
-        return page.content().encode()
+        return (best_content or page.content()).encode()
     except Exception as e:
         log.warning("headless render failed %s: %s", url, e)
         return None

@@ -14,12 +14,24 @@
   </div>
   <div id="scope">Ganzes Land</div>
   <div id="events"><h3>Nationaler Termin</h3></div>
+  <button id="load-more" hidden onclick="loadMore()">Mehr laden</button>
   <script>
     setTimeout(() => document.querySelector('#consent').style.display = 'block', 1800);
+    let loaded = 0;
     function chooseRegion() {
       sessionStorage.setItem('region', 'north');
       document.querySelector('#scope').textContent = 'Region Nord';
       document.querySelector('#events').innerHTML = '<h3>Regionaler Termin</h3>';
+      document.querySelector('#load-more').hidden = false;
+    }
+    function loadMore() {
+      if (loaded++ === 0) {
+        document.querySelector('#events').insertAdjacentHTML(
+          'beforeend', '<h3>Zweiter regionaler Termin</h3>'
+        );
+      } else {
+        document.querySelector('#events').innerHTML = '<p>Keine Ergebnisse</p>';
+      }
     }
     if (sessionStorage.getItem('region') === 'north') chooseRegion();
   </script>

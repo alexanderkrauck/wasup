@@ -21,6 +21,21 @@ from eventindex.extract import ics, json_api, jsonld, linztermine, llm_text, pdf
 
 VIENNA = ZoneInfo(config.TIMEZONE)
 
+_GERMAN_DATE_PARTS = (
+    ("Jänner", "January"), ("Jän.", "Jan"),
+    ("Februar", "February"), ("Feb.", "Feb"),
+    ("März", "March"), ("Mär.", "Mar"),
+    ("April", "April"), ("Apr.", "Apr"),
+    ("Mai", "May"),
+    ("Juni", "June"), ("Jun.", "Jun"),
+    ("Juli", "July"), ("Jul.", "Jul"),
+    ("August", "August"), ("Aug.", "Aug"),
+    ("September", "September"), ("Sept.", "Sep"), ("Sep.", "Sep"),
+    ("Oktober", "October"), ("Okt.", "Oct"),
+    ("November", "November"), ("Nov.", "Nov"),
+    ("Dezember", "December"), ("Dez.", "Dec"),
+)
+
 
 def field(value, confidence: float) -> dict:
     return {"value": value, "confidence": confidence}
@@ -163,8 +178,17 @@ def parse_dt(value) -> datetime | None:
     if isinstance(value, datetime):
         dt = value
     else:
+        text = str(value).strip()
+        # German event listings commonly use display strings such as
+        # "21. Jul. 2026, 09:00 Uhr". dateutil is locale-agnostic; normalize
+        # the finite month vocabulary without adding another dependency.
+        # A displayed range is a valid starts_at input: its left side is the
+        # start (ends_at remains a separate claim field).
+        text = text.split(" – ", 1)[0].removesuffix(" Uhr")
+        for german, english in _GERMAN_DATE_PARTS:
+            text = text.replace(german, english)
         try:
-            dt = dateparser.parse(str(value))
+            dt = dateparser.parse(text)
         except (ValueError, OverflowError):
             return None
     if dt.tzinfo is None:

@@ -27,6 +27,21 @@ def test_render_page_fails_closed_when_setup_control_disappears():
     assert render_page(SESSION_FIXTURE, setup_clicks=["#missing-region"]) is None
 
 
+def test_load_more_preserves_largest_dom_when_exhaustion_clears_results():
+    from bs4 import BeautifulSoup
+
+    html = render_page(
+        SESSION_FIXTURE,
+        click_selector="#load-more",
+        setup_clicks=["#open-region", "#region-north"],
+    )
+    assert html is not None
+    visible_events = BeautifulSoup(html, "html.parser").select_one("#events")
+    assert visible_events.get_text(" ", strip=True) == (
+        "Regionaler Termin Zweiter regionaler Termin"
+    )
+
+
 def test_render_states_harvests_every_page_and_stops_on_disabled():
     states, reason = render_states(FIXTURE, "a#next", max_states=10)
     assert len(states) == 3  # 3 pages, then the disabled control stops the loop

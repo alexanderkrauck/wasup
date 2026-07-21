@@ -233,6 +233,23 @@ def test_weekly_implicit_series_projects_beyond_feed_horizon(conn):
     assert left["n"] == 0
 
 
+def test_far_future_claims_never_reach_canon(conn):
+    # red team 2026-07-21: hallucinated dates served "Friday Night Magic
+    # 2028" and Münzensammler 2032 as upcoming occurrences
+    sid = _source(conn, "portal", 0.9)
+    _claim(conn, sid, _concert("Friday Night Magic",
+                               starts="2028-07-14T19:00:00+02:00"),
+           "friday night magic|2028-07-14|x")
+    _claim(conn, sid, _concert("Konzert nächste Saison",
+                               starts="2027-05-01T19:00:00+02:00"),
+           "konzert naechste saison|2027-05-01|x")
+    rb.rebuild(conn, now=NOW)
+    events, occs = _canon(conn)
+    # inside 550 days: a next-season program is real; beyond: garbage
+    assert [e["title"] for e in events] == ["Konzert nächste Saison"]
+    assert len(occs) == 1
+
+
 def test_irregular_dates_are_never_projected(conn):
     sid = _source(conn, "portal", 0.9)
     for day in ("06-10", "06-14", "06-29"):

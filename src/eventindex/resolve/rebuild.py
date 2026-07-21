@@ -45,6 +45,10 @@ FIELD_KEYS = [
     "booking_url", "registration_required",
 ]
 PAST_RETENTION_DAYS = 90  # archives are not events (STWST shipped 2001-2019)
+# hallucinated/misparsed far-future dates served "Friday Night Magic 2028"
+# and Münzensammler 2032 (red team 2026-07-21); a season program never
+# reaches this far, so beyond it is garbage by definition
+FUTURE_HORIZON_DAYS = 550
 
 
 @dataclass
@@ -821,7 +825,7 @@ def _deep_url(url: str | None) -> bool:
     return bool(url) and not _BARE_DOMAIN_RE.match(url)
 
 
-_MAX_EVENT_SPAN = timedelta(days=14)
+_MAX_EVENT_SPAN = timedelta(days=10)  # 13/14d "events" were listing windows
 _MAX_EXHIBITION_SPAN = timedelta(days=370)
 _MAX_SINGLE_TIMED_OCCURRENCE_SPAN = timedelta(hours=12)
 
@@ -891,9 +895,22 @@ def _claim_cands(
     their real end.
     """
     starts = {c.starts_at for c in claims if c.starts_at is not None}
+    # date-only start + rejected far end = a listing's validity RANGE. One
+    # such claim may state the real first date (Jazz im Musikpavillon), but
+    # portals clamp the range start to the VIEWING day, so repeated crawls
+    # leave several contradictory "first days" in one group - then none is
+    # an observed occurrence (695 midnight rows, red team 2026-07-21)
+    def _range_boundary(c) -> bool:
+        return (not c.has_time and c.ends_at is not None
+                and c.ends_at > c.starts_at
+                and _sane_end(c.starts_at, c.ends_at, c.value("category")) is None)
+
+    clamped = len({c.starts_at for c in claims if _range_boundary(c)}) >= 2
     out = []
     for c in claims:
         ends = _sane_end(c.starts_at, c.ends_at, c.value("category"))
+        if clamped and _range_boundary(c):
+            continue
         if (
             is_series
             and c.has_time
@@ -1002,7 +1019,8 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             # 2019 archive feed as events (audit A5); claims keep history
             pairs = [
                 p for p in pairs
-                if p[0] >= now - timedelta(days=PAST_RETENTION_DAYS)
+                if now - timedelta(days=PAST_RETENTION_DAYS) <= p[0]
+                <= now + timedelta(days=FUTURE_HORIZON_DAYS)
             ]
             # a zero-occurrence event is invisible to every API read path;
             # 115 rule-bearing events with DTSTART=rebuild-time proved the

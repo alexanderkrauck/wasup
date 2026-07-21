@@ -73,6 +73,67 @@ def test_announcements_are_non_events():
     assert not is_non_event("Sommerkonzert der Stadtkapelle")
 
 
+def test_junk_urls_dropped_at_claim_hygiene():
+    # live corpus 2026-07-21: "Keine URL", an e-mail address, bare domains
+    # and zoom paths without scheme shipped as event links (65 events)
+    from eventindex.extract import normalize_claim
+
+    def payload(url):
+        return {"title": {"value": "Konzert", "confidence": 0.9},
+                "url": {"value": url, "confidence": 0.9}}
+
+    for junk in ("Keine URL", "info@utsc-linz.at", "tfc-twisters.at",
+                 "zoom.us/j/99847510499", "oökultur.at/x"):
+        assert "url" not in normalize_claim(payload(junk)), junk
+    kept = normalize_claim(payload("https://posthof.at/x"))
+    assert kept["url"]["value"] == "https://posthof.at/x"
+
+
+def test_llm_text_drops_invented_urls(monkeypatch):
+    # live: a fabricated linz-termine slug (301-loop, never existed on the
+    # page) shipped as canonical URL - text-tier urls must appear in the text
+    from eventindex.extract import llm_text
+
+    text = ("Workshop Extremismus am 12.09.2026 im Wissensturm. " * 4
+            + "Anmeldung: https://linztermine.at/kurs/123 ")
+    ev = dict.fromkeys(llm_text.LLMEvent.model_fields) | {
+        "title": "Workshop Extremismus", "starts_at": "2026-09-12",
+        "url": "https://www.linz-termine.at/event/extremismus-basisworkshop",
+        "booking_url": "https://linztermine.at/kurs/123", "confidence": 0.9,
+    }
+    extraction = llm_text.LLMExtraction(events=[llm_text.LLMEvent(**ev)])
+    monkeypatch.setattr("eventindex.llm.complete", lambda *a, **k: extraction)
+    payloads = llm_text.extract(None, text, {"id": None})
+    assert "url" not in payloads[0]                      # invented -> dropped
+    assert payloads[0]["booking_url"]["value"] == "https://linztermine.at/kurs/123"
+
+
+def test_clamped_validity_ranges_yield_no_occurrences():
+    # the 695-row midnight cluster: linztermine clamps a series' validity
+    # range to the VIEWING day, so daily crawls leave contradictory "first
+    # days" (Sun 12.07, Mon 13.07 for a Tuesday series) - none is observed
+    from eventindex.resolve.rebuild import _claim_cands
+
+    def claim(starts, ends):
+        c = _claim("Dienstagabend im Mariendom", starts, None)
+        c.ends_at = ends
+        return c
+
+    range_end = datetime(2026, 9, 8, 0, 0, tzinfo=VIENNA)
+    clamped = [
+        claim(datetime(2026, 7, 12, 0, 0, tzinfo=VIENNA), range_end),
+        claim(datetime(2026, 7, 13, 0, 0, tzinfo=VIENNA), range_end),
+    ]
+    assert _claim_cands(clamped) == []
+    # a SINGLE range claim may state the real first date (Jazz im
+    # Musikpavillon) - it stays
+    assert len(_claim_cands(clamped[:1])) == 1
+    # timed claims in the same group are untouched
+    tue = datetime(2026, 7, 14, 19, 30, tzinfo=VIENNA)
+    cands = _claim_cands(clamped + [claim(tue, tue + timedelta(minutes=45))])
+    assert cands == [(tue, tue + timedelta(minutes=45), True)]
+
+
 def test_internal_source_url_never_becomes_canonical():
     from types import SimpleNamespace
 

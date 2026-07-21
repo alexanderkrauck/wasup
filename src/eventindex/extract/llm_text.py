@@ -102,7 +102,16 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
         tx, prompt, LLMExtraction,
         source_id=source["id"], job_id=job_id,
     )
-    return to_payloads(result)
+    payloads = to_payloads(result)
+    # the model only saw TEXT: a url it emits that is not literally in that
+    # text is invented provenance (red team 2026-07-21: a fabricated
+    # linz-termine slug shipped as an event's canonical URL, 301-looping)
+    for p in payloads:
+        for key in ("url", "booking_url"):
+            entry = p.get(key)
+            if entry and str(entry["value"]) not in text:
+                del p[key]
+    return payloads
 
 
 def to_payloads(result: LLMExtraction) -> list[dict]:

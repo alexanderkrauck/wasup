@@ -81,6 +81,16 @@ def normalize_claim(payload: dict) -> dict:
         venue = (payload.get("venue_name") or {}).get("value")
         payload["title"]["value"] = _clean_title(title, venue)
 
+    # 65 events shipped "Keine URL", bare domains, an e-mail address and an
+    # umlaut domain as their link (red team 2026-07-21): a url either parses
+    # as http(s) or it is not a url
+    for key in ("url", "booking_url"):
+        entry = payload.get(key)
+        if entry is not None and not str(entry.get("value") or "").startswith(
+            ("http://", "https://")
+        ):
+            payload.pop(key)
+
     # Some listings put box-office/doors time in their structured start
     # while stating the actual performance time unambiguously in prose
     # (live: 19:00 Abendkasse, 19:30 Einlass, Konzertbeginn 20:00). The

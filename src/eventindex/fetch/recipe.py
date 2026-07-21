@@ -331,13 +331,16 @@ def run_recipe(
             close()
     truncated = truncated or getattr(fetch_page, "truncated", None)
 
-    # dedupe identical payloads (listing + detail double-extraction);
-    # url-bearing payloads win so detail links survive the dedupe (A7)
+    # dedupe identical payloads (listing + detail double-extraction); the
+    # higher-confidence url wins so detail links (0.6) survive the dedupe
+    # over listing-page stamps (0.5) (A7)
     by_key: dict = {}
     for p in payloads:
         key = (p.get("title", {}).get("value"), p.get("starts_at", {}).get("value"))
         held = by_key.get(key)
-        if held is None or (not held.get("url") and p.get("url")):
+        if held is None or (p.get("url") or {}).get("confidence", 0) > (
+            (held.get("url") or {}).get("confidence", 0)
+        ):
             by_key[key] = p
     unique = list(by_key.values())
     result = validate(recipe, unique)
@@ -380,6 +383,12 @@ def _crawl_pages(recipe, source, tx, job_id, fetch_page, queue, visited,
                 _, page_payloads = cascade_extract(
                     source, _FakeResult(html, url), tx, job_id=job_id
                 )
+            for p in page_payloads:
+                # the page the claim was seen on: without it canon falls back
+                # to source.url, frozen at registration - 2,736 events linked
+                # a registration URL, one restructure away from a 404 while
+                # the recipe crawled healthy entry pages (forensic 2026-07-21)
+                p.setdefault("url", {"value": url, "confidence": 0.5})
             if recipe.image_selector:
                 for src in _page_image_urls(recipe, html, url):
                     if src not in image_urls:

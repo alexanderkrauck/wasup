@@ -126,17 +126,25 @@ def run_job(conn, job: dict) -> None:
             log.warning("monthly budget hit - job %s parked until next month", job["id"])
             return
         if "Insufficient credits" in error or "Error code: 402" in error:
-            # credit outage is a system condition, not a job failure: pause
-            # the job an hour without burning an attempt (learned 2026-07-07:
-            # an empty OpenRouter balance mass-failed 5k jobs overnight)
+            # Credit outage is a kind-wide circuit breaker, not a job
+            # failure. Parking only the current row lets systemd restart the
+            # worker and hammer every sibling of the same kind (a resolve did
+            # thousands of rejected per-event calls on 2026-07-22). Pause
+            # ready siblings too; unrelated deterministic work can continue.
             with conn.transaction():
                 conn.execute(
-                    "UPDATE jobs SET status = 'pending', attempts = attempts - 1, "
-                    "run_after = now() + interval '1 hour', last_error = 'credits empty' "
-                    "WHERE id = %s",
-                    (job["id"],),
+                    "UPDATE jobs SET "
+                    "status = CASE WHEN id = %(id)s THEN 'pending' ELSE status END, "
+                    "attempts = attempts - CASE WHEN id = %(id)s THEN 1 ELSE 0 END, "
+                    "started_at = CASE WHEN id = %(id)s THEN NULL ELSE started_at END, "
+                    "run_after = greatest(run_after, now() + interval '1 hour'), "
+                    "last_error = 'credits empty' "
+                    "WHERE id = %(id)s OR (kind = %(kind)s AND status = 'pending')",
+                    {"id": job["id"], "kind": job["kind"]},
                 )
-            log.warning("credits empty - job %s paused 1h, worker exiting", job["id"])
+            log.warning(
+                "credits empty - %s jobs paused 1h, worker exiting", job["kind"]
+            )
             raise SystemExit(0)
         _persist_agent_notes(conn, job, exc)
         with conn.transaction():

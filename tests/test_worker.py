@@ -1,3 +1,5 @@
+import pytest
+
 from eventindex import config
 from eventindex.budget import BudgetExceeded
 from eventindex.jobs import handlers
@@ -64,6 +66,31 @@ def test_monthly_budget_parks_job_until_month_rollover(conn, monkeypatch):
         "SELECT extract(epoch FROM run_after - now()) / 86400 AS d FROM jobs"
     ).fetchone()["d"]
     assert days_parked > 0.5  # waits for the month rollover, not a backoff
+
+
+def test_credit_outage_pauses_ready_siblings_without_burning_attempts(
+    conn, monkeypatch,
+):
+    def broke_handler(job, tx):
+        raise BudgetExceeded("Error code: 402 - OpenRouter credits empty")
+
+    monkeypatch.setitem(handlers.HANDLERS, "test_kind", broke_handler)
+    with conn.transaction():
+        enqueue(conn, "test_kind", {"row": 1})
+        enqueue(conn, "test_kind", {"row": 2})
+    job = claim_next(conn)
+    with pytest.raises(SystemExit):
+        run_job(conn, job)
+
+    rows = conn.execute(
+        "SELECT status, attempts, last_error, "
+        "extract(epoch FROM run_after - now()) AS wait_s "
+        "FROM jobs ORDER BY payload->>'row'"
+    ).fetchall()
+    assert [row["status"] for row in rows] == ["pending", "pending"]
+    assert [row["attempts"] for row in rows] == [0, 0]
+    assert all(row["last_error"] == "credits empty" for row in rows)
+    assert all(row["wait_s"] > 3500 for row in rows)
 
 
 def test_failed_crawl_leaves_error_trace_for_the_scheduler(conn, monkeypatch):

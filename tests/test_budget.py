@@ -64,3 +64,28 @@ def test_llm_create_retries_provider_json_blips(monkeypatch):
     monkeypatch.setattr(_t, "sleep", lambda s: None)
     assert llm._create() == "response"
     assert calls["n"] == 3
+
+
+def test_llm_credit_outage_becomes_budget_signal(monkeypatch):
+    """Resolver fallbacks re-raise BudgetExceeded; a raw 402 must use that
+    path or one rebuild makes a rejected request for every uncached event."""
+    import httpx
+    from openai import APIStatusError
+    from types import SimpleNamespace
+
+    from eventindex import llm
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(402, request=request)
+
+    def no_credit(**kwargs):
+        raise APIStatusError(
+            "Payment required", response=response,
+            body={"error": {"message": "Insufficient credits"}},
+        )
+
+    fake = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=no_credit)))
+    monkeypatch.setattr(llm, "_get_client", lambda: fake)
+    with pytest.raises(BudgetExceeded, match="Error code: 402"):
+        llm._create()

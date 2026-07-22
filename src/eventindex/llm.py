@@ -15,7 +15,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config
-from eventindex.budget import check_budget, record_spend
+from eventindex.budget import BudgetExceeded, check_budget, record_spend
 
 S = TypeVar("S", bound=BaseModel)
 
@@ -49,6 +49,15 @@ def _create(**kwargs):
         except (json.JSONDecodeError, APIConnectionError) as e:
             last = e
         except APIStatusError as e:
+            if e.status_code == 402:
+                # Treat provider credit exhaustion like the local budget
+                # guard. Resolver call sites intentionally re-raise
+                # BudgetExceeded before their conservative transient-error
+                # fallbacks, so one empty account parks the job instead of
+                # causing one rejected request per event.
+                raise BudgetExceeded(
+                    "Error code: 402 - OpenRouter credits empty"
+                ) from e
             if e.status_code not in (408, 429, 500, 502, 503, 504):
                 raise
             last = e

@@ -263,6 +263,15 @@ def test_venue_gate_bounces_locationless_recipes(conn, monkeypatch):
                                  require_venues=True)
     assert error is not None and "VENUES MISSING" in error
 
+    with_venues = [dict(p, url={"value": f"https://x.at/e/{i}"},
+                        venue_name={"value": f"Venue {i}"})
+                   for i, p in enumerate(bare)]
+    monkeypatch.setattr(ob, "run_recipe", lambda *a, **k: (
+        with_venues, ValidationResult(ok=True, items=6, reasons=[])))
+    _, error = ob._self_validate(r, ["E1"], {"id": None}, conn, None,
+                                 require_venues=True)
+    assert error is None
+
     # follow_detail=true is the accepted answer when the listing lacks venues
     r_deep = Recipe(entry_urls=["https://x.at/events"],
                     pagination=Pagination(type="none"), follow_detail=True)

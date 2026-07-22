@@ -703,7 +703,10 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
         # (which the detail fetch and the timefix re-fetch both need).
         n = len(payloads)
         with_url = sum(1 for p in payloads if (p.get("url") or {}).get("value"))
-        with_venue = sum(1 for p in payloads if (p.get("venue") or {}).get("value"))
+        with_venue = sum(
+            1 for p in payloads
+            if (p.get("venue_name") or p.get("venue") or {}).get("value")
+        )
         if with_url < 0.5 * n:
             return None, (
                 f"DETAIL URLS MISSING: only {with_url}/{n} extracted events "

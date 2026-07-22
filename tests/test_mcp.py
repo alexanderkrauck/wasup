@@ -73,7 +73,6 @@ def _mark_sex_service(conn, event_id, value=True):
                 "value": value, "confidence": 0.8,
                 "evidence": "private raw evidence must never be served",
             },
-            "vibe_tags": ["nightlife"],
         }), event_id),
     )
 
@@ -149,13 +148,20 @@ def test_get_calendar_link_builds_ics_url(client):
     })
     assert "include_time_unknown=true" in with_unknown_times["ics_url"]
 
+    semantic = _call(client, "get_calendar_link", {
+        "tags": ["salsa dancing"], "min_tag_match": 0.6,
+    })
+    assert "tags=salsa+dancing" in semantic["ics_url"]
+    assert "min_tag_match=0.6" in semantic["ics_url"]
+
 
 def test_get_calendar_link_rejects_an_unscoped_subscription(client):
     body = _rpc(client, "tools/call", {
         "name": "get_calendar_link", "arguments": {},
     })
     assert body["result"].get("isError") is True
-    assert "category" in body["result"]["content"][0]["text"].lower()
+    message = body["result"]["content"][0]["text"].lower()
+    assert "category" in message and "tag" in message
 
 
 def test_get_event_detail(conn, client):
@@ -252,7 +258,12 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
     )
     conn.execute(
         "UPDATE event SET inferred = %s WHERE id = %s",
-        (Jsonb({"vibe_tags": ["run"]}), polluted_id),
+        (Jsonb({}), polluted_id),
+    )
+    conn.execute(
+        "INSERT INTO event_tag (event_id, name, confidence, origins) "
+        "VALUES (%s, 'run', 0.8, '{inferred}')",
+        (polluted_id,),
     )
     exact_phrase_id = _add_event(
         conn, "Football Lounge Nights Special",
@@ -271,7 +282,7 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
     assert ids[0] == future_id
     assert ids.count(future_id) == 1
     assert ongoing_id not in ids       # past-start stays excluded
-    assert polluted_id not in ids      # vibe_tags are not lexical evidence
+    assert polluted_id not in ids      # semantic tags are not name-search evidence
     phrase_results = _call(client, "search", {
         "query": "football lounge nights special",
     })["results"]
@@ -331,10 +342,12 @@ def test_event_detail_never_returns_raw_claim_payload(conn, client):
         "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
         (fingerprint, event_id),
     )
-    conn.execute(
-        "UPDATE event SET inferred = %s WHERE id = %s",
-        (Jsonb({"vibe_tags": [f"tag-{i}" for i in range(20)]}), event_id),
-    )
+    with conn.cursor() as cursor:
+        cursor.executemany(
+            "INSERT INTO event_tag (event_id, name, confidence, origins) "
+            "VALUES (%s, %s, 0.4, '{inferred}')",
+            [(event_id, f"tag-{i}") for i in range(20)],
+        )
     conn.commit()
 
     mcp_detail = _call(client, "get_event", {"event_id": str(event_id)})
@@ -342,7 +355,8 @@ def test_event_detail_never_returns_raw_claim_payload(conn, client):
     assert mcp_detail["sources"][0]["name"] == "Public Source"
     assert mcp_detail["sources"][0]["url"] == \
         "https://source.example/events/correct-event"
-    assert len(mcp_detail["event"]["estimates"]["vibe_tags"]) == 6
+    assert len(mcp_detail["event"]["tags"]) == 16
+    assert set(mcp_detail["event"]["tags"][0]) == {"name", "confidence", "origins"}
     public_detail = client.get(f"/v1/events/{event_id}").json()
     assert "claims" not in public_detail
     assert "SECRET PRIVATE ADDRESS" not in json.dumps(public_detail)

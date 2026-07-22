@@ -65,6 +65,19 @@ class Estimate(_Output):
     confidence: float | None
 
 
+class PriceEstimate(_Output):
+    min: float | None
+    max: float | None
+    currency: str | None
+    confidence: float | None
+
+
+class EventTag(_Output):
+    name: str
+    confidence: float
+    origins: list[str]
+
+
 class EventEstimates(_Output):
     age_min: Estimate | None = None
     age_max: Estimate | None = None
@@ -78,7 +91,8 @@ class EventEstimates(_Output):
     interaction_structure: Estimate | None = None
     energy: Estimate | None = None
     sex_service_context: Estimate | None = None
-    vibe_tags: list[str] = Field(default_factory=list)
+    venue: Estimate | None = None
+    stated_price: PriceEstimate | None = None
     start_time: Estimate | None = None
 
 
@@ -105,6 +119,7 @@ class SearchOccurrence(_Output):
     event_status: str
     confidence: float
     match_score: float
+    tag_match: float | None
     provenance_summary: list[str]
 
 
@@ -142,7 +157,7 @@ class EventRecord(_Output):
     title: str
     description: str | None
     category: list[str]
-    tags: list[str]
+    tags: list[EventTag]
     venue_name: str | None
     venue_address: str | None
     lat: float | None
@@ -227,7 +242,15 @@ def _estimates(values: dict | None, *, include_sex: bool) -> EventEstimates:
         sex_service_context=(
             _estimate(values.get("sex_service_context")) if include_sex else None
         ),
-        vibe_tags=list(values.get("vibe_tags") or []),
+        venue=_estimate(values.get("venue")),
+        stated_price=(
+            PriceEstimate(
+                min=values["stated_price"].get("min"),
+                max=values["stated_price"].get("max"),
+                currency=values["stated_price"].get("currency"),
+                confidence=values["stated_price"].get("confidence"),
+            ) if isinstance(values.get("stated_price"), dict) else None
+        ),
         start_time=_estimate(values.get("start_time")),
     )
 
@@ -256,6 +279,7 @@ def _search_occurrence(row: dict) -> SearchOccurrence:
         event_status=row["event_status"],
         confidence=row["confidence"],
         match_score=row["match_score"],
+        tag_match=row.get("tag_match"),
         provenance_summary=list(row.get("provenance_summary") or []),
     )
 
@@ -383,6 +407,8 @@ def get_event(
 @mcp.tool(title="Get calendar subscription link", annotations=_READ_ONLY)
 def get_calendar_link(
     category: str | None = None,
+    tags: list[str] | None = None,
+    min_tag_match: Annotated[float, Field(ge=0, le=1)] = 0.5,
     from_dt: str | None = None,
     to_dt: str | None = None,
     min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
@@ -396,15 +422,15 @@ def get_calendar_link(
 ) -> CalendarLinkResponse:
     """Use this when the user wants a read-only .ics subscription URL for
     public Linz-area events. This only builds a link; it does not subscribe,
-    create calendar entries, or invite anyone. Ask for a category before
-    calling rather than creating an unscoped feed. The returned feed defaults
-    to timed events only and always excludes known commercial sex-service
-    contexts while retaining unknown classifications."""
-    if category is None:
+    create calendar entries, or invite anyone. Ask for a category or desired
+    tags before calling rather than creating an unscoped feed. The returned
+    feed defaults to timed events only and always excludes known commercial
+    sex-service contexts while retaining unknown classifications. A
+    subscription may be scoped by category, semantic tags, or both."""
+    if category is None and not tags:
         raise ValueError(
-            "A calendar subscription requires a category so the calendar "
-            "does not silently truncate a broad all-event feed. Ask the user "
-            "which event category they want."
+            "A calendar subscription requires a category or at least one tag "
+            "so it does not silently truncate a broad all-event feed."
         )
     params = {
         key: value
@@ -413,9 +439,12 @@ def get_calendar_link(
             ("from", from_dt),
             ("to", to_dt),
             ("min_confidence", min_confidence),
-        ]
+    ]
         if value is not None
     }
+    if tags:
+        params["tags"] = ",".join(tags)
+        params["min_tag_match"] = min_tag_match
     params["exclude_sex_service_context"] = "true"
     params["include_time_unknown"] = (
         "true" if include_time_unknown else "false"
@@ -551,7 +580,7 @@ def search(query: str) -> StandardSearchResponse:
         sort="starts_at",
         distinct=True,
         exclude_sex_service_context=True,
-        include_inferred_terms=False,
+        include_tag_terms=False,
     )
     rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
     results, seen = [], set()
@@ -580,7 +609,6 @@ def search(query: str) -> StandardSearchResponse:
 
 def _format_estimates(estimates: EventEstimates) -> str | None:
     values = estimates.model_dump(exclude_none=True)
-    values.pop("vibe_tags", None)
     if not values:
         return None
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))

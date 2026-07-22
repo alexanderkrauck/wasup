@@ -90,7 +90,6 @@ event (
   description     text,
   rights          text,      -- quoted (scraped, don't republish) | generated (ours) | licensed
   category        text[],    -- taxonomy, see §8
-  tags            text[],
   venue_id        uuid FK,
   geo             geometry,
   is_recurring    bool,
@@ -112,11 +111,25 @@ event (
   expected_gender_split   float,   -- 0=all male .. 1=all female, 0.5=balanced
   expected_attendance     int,
   expected_fullness       float,   -- 0..1 vs venue capacity
-  vibe_embedding          vector(1024),
   field_provenance jsonb,   -- {"title": {"claim": uuid, "confidence": 0.97}, ...}
   confidence       float,   -- overall "this event is real and correct"
   status           text,    -- confirmed | tentative | cancelled | past
   first_seen / last_seen / updated_at timestamptz
+)
+
+event_tag (                 -- one unified collection, rebuildable canon
+  event_id       uuid FK,
+  name           text,      -- normalized 1-3-word concept
+  confidence     float,     -- source/category/LLM certainty
+  origins        text[],    -- provenance only; not separate tag types
+  origin_confidences jsonb,  -- per-origin inputs behind the public maximum
+  PK (event_id, name)
+)
+
+tag_embedding (             -- derived local-model cache, rebuildable
+  name           text PK,
+  embedding      vector(768),
+  model          text
 )
 ```
 
@@ -438,7 +451,7 @@ The API exposes all three. Filters accept `min_confidence`; the default feed hid
 
 > **Extended 2026-07-08 (preference model, DECISIONS):** hard filters keep this contract verbatim. Audience attributes queried as SOFT preferences score unknowns at a fixed prior (0.45) so they stay visible and honestly ranked - the contract's spirit (never fabricate knowledge) holds; only the failure mode changed from "hidden" to "ranked as uncertain".
 
-**Negative constraints are set logic, not similarity:** exclusion filters (`exclude_category=comedy`) are exact tag/category filters applied BEFORE ranking; embeddings only rank within the allowed set. A grieving user who says "nothing funny" gets a guarantee, not a probability.
+**Negative constraints are set logic, not similarity:** exclusion filters (`exclude_category=comedy`, `exclude_terms`) are exact text/tag set logic applied BEFORE ranking. A grieving user who says "nothing funny" gets a guarantee, not a probability. Positive tag matching ranks by default; only an explicit `min_tag_match` turns its calibrated certainty-weighted score into a hard membership filter (needed for subscriptions).
 
 **Preference queries combine importance and certainty (2026-07-08):** every inferred attribute is stored with a certainty; a query states per-attribute importance. Ranking uses the importance-weighted mean of P(satisfied) = 0.5 + c/2 on a match, 0.5 - c/2 on a contradiction, 0.45 when unknown - so confident matches > weak guesses > unknowns > contradictions, and nothing is silently dropped. `required_attributes` opts an attribute back into hard set logic. Implementation + extension point: the ATTRIBUTES registry in `api/search.py`.
 
@@ -446,7 +459,7 @@ The API exposes all three. Filters accept `min_confidence`; the default feed hid
 
 ## 8. Enrichment & Inferred Attributes
 
-**Taxonomy:** two-level, ~15 top / ~120 sub (music>techno, sport>climbing, community>flohmarkt, learning>language_exchange, family>kids_workshop, ...). Assigned by LLM at extraction, embeddings as fallback. Events can hold multiple categories.
+**Taxonomy:** stable top-level categories remain exact filters. Source-native labels, categories, and richer LLM concepts also enter one `event_tag` collection; origins are provenance, not different kinds of tags. Every tag has confidence.
 
 **Inferred audience attributes** - computed by an LLM enrichment pass over (event text + venue profile + category priors), each with confidence:
 
@@ -456,9 +469,9 @@ The API exposes all three. Filters accept `min_confidence`; the default feed hid
 | `expected_gender_split` | category priors (base rates per category/subculture), organizer audience, past attendee signals where visible |
 | `expected_attendance` | venue capacity × category prior × artist/organizer draw (follower counts, past RSVP data from Meetup/FB where visible) |
 | `expected_fullness` | expected_attendance / capacity; boosted by sold-out signals, ticket-tier depletion, "nur noch Restkarten" |
-| `vibe` (embedding + tags) | free-text: "sweaty basement techno" vs "sit-down jazz brunch" - powers semantic search |
-| `price_band`, `is_free` | extracted or inferred |
-| `language` | de / en / other - matters in a student city |
+| `tags` | 6-12 short activity/topic/format/audience/setting concepts, each with certainty; powers calibrated multilingual matching |
+| `stated_price`, `venue` | completion only from explicit text evidence; never guessed |
+| `language` | de / en / other with confidence - matters in a student city |
 | `weather_dependence` | outdoor flag → API can join a weather forecast |
 | `accessibility`, `kid_friendly`, `newcomer_friendly` | wording + venue attributes; newcomer_friendly (open to strangers vs. members-only Verein evening) is a killer filter for exactly your "I don't know 1000 people" problem |
 
@@ -481,8 +494,7 @@ GET /v1/occurrences
     &age_range=20-35&max_fullness=0.7&newcomer_friendly=true
     &min_confidence=0.6&include_tentative=true
     &sort=starts_at|distance|confidence|relevance
-    &q=free text                              → hybrid: filters + pgvector semantic
-                                              (superseded 2026-07-06: see /v1/search note below)
+    &tags=dancing&min_tag_match=0.5           → explicit semantic membership
 
 GET /v1/events/{id}            full record incl. field_provenance + claims
 GET /v1/events/{id}/similar    embedding neighbors
@@ -491,14 +503,15 @@ GET /v1/search?q=...           AGENT search, not pure semantic (redefined by Ale
                                2026-07-06, DECISIONS changelog): a mini model parses the
                                query into HARD filters (time, category, exclusions,
                                price - set logic in SQL); audience attributes are SOFT
-                               preferences (importance x certainty, see §7); residual
-                               vibe terms only RANK. Embeddings never select.
+                               preferences (importance x certainty, see §7); desired
+                               tags rank softly unless min_tag_match is explicit.
 POST /v1/query                 the same search WITHOUT the index-side LLM (added
                                2026-07-08): callers send the filter fields directly,
-                               plus importance weights and required_attributes. The
+                               plus importance weights, required_attributes, tags,
+                               and optional min_tag_match. The
                                endpoint for agents; discovery via /llms.txt (llmstxt.org
                                convention) + /.well-known/api-catalog (RFC 9727).
-GET /v1/feed.ics?{same filters}   any filter combo as a calendar subscription
+GET /v1/feed.ics?tags=...&min_tag_match=...   semantic calendar subscription
 POST /v1/reports               user feedback: wrong/cancelled/duplicate → QA queue,
                                feeds source trust
 GET /v1/changes?since=cursor   delta stream for downstream consumers/agents
@@ -541,6 +554,8 @@ Rough expectation: 800-1500 registered sources for the metro area, yielding (est
 - **LLM:** mini model for extraction/classification, mid model for adjudication escalation + agentic onboarding, vision when the PDF fence unfences. Structured outputs everywhere. (*As decided 2026-07-07: mini=deepseek-v4-flash, mid=kimi-k2.7-code, two tiers only - see DECISIONS changelog.*)
 - **Scrapers:** Apify (or similar) for Instagram/Facebook - the one line item worth paying for (*when the socials fence unfences, H7.2*).
 - **API:** FastAPI. No caching until a measured query is slow (CLAUDE.md).
+- **Tag embeddings:** local quantized multilingual MPNet through ONNX Runtime,
+  768d in the existing pgvector; tag names only, no service or API key.
 
 Cost estimate at steady state: ~1200 sources, avg crawl every 2-3 days, ~80% early-exit on content hash → ~150-250 LLM extraction calls/day + enrichment ≈ **€2-6/day LLM + €30-80/month scraping APIs + one €20-40/month server**. The bootstrap month is heavier (everything is new content).
 
@@ -553,7 +568,7 @@ Dependency-ordered phases (each phase is independently shippable and verifiable;
 1. **Skeleton:** schema, fetcher, JSON-LD/ICS extractor, LLM extractor, manual registry of ~40 tier-1/2 sources. Ship `/v1/occurrences` with basic filters. *Done when: real Linz events queryable via API.*
 2. **Resolve & recur:** venue resolver, fingerprint dedup, rrule handling, occurrence expansion. Ingest the portals; verify cross-source merging on real collisions. *Done when: the same concert from 3 sources is one event.*
 3. **Discovery + recipes:** GMaps/OSM sweep, probe-and-register, link-graph expansion, search fan-out. Recipe interpreter + onboarding agent (§5b) so new sources need zero code. Registry to 500+ sources. Adaptive scheduler. *Done when: a never-seen source goes from URL to indexed events with no human code.*
-4. **Intelligence:** confidence model wiring, enrichment pass (demographics/fullness/vibe), agent search (*embeddings dropped from the critical path 2026-07-06 - hard filters + vibe-term ranking*), `.ics` feeds, `/reports`. *Done when: "something active tonight, not techno" returns sensible results.*
+4. **Intelligence:** confidence model wiring, enrichment pass, unified confidence-bearing tags, local calibrated multilingual tag matching, agent search, semantic `.ics` feeds, `/reports`. *Done when: "something active tonight, not techno" returns sensible results and a dancing subscription selects related events without startup filler.*
 5. **Later (triggered, see HURDLES.md H7.2):** socials scraping, PDF/vision path, tier-D agent crawls, zero-result monitor, and a thin frontend (or just point Claude at the API and ask "what's on tonight" - which is the original itch).
 
 The single highest-leverage early investment: **the QA loop** (nightly random re-verification + user reports adjusting source trust). Every aggregator degrades into stale garbage without it; freshness + trust is what will make this one different.

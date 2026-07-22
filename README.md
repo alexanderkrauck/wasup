@@ -57,12 +57,12 @@ unknowns > contradictions, nothing silently dropped, `match_score` exposed.
 
 ```json
 POST /v1/query
-{"from_dt": "2026-07-11T08:00", "include_terms": ["lauf", "run"],
+{"from_dt": "2026-07-11T08:00", "tags": ["running"],
  "newcomer_friendly": true, "importance": {"newcomer_friendly": 1.0}}
 ```
 
 Also: `GET /v1/occurrences` (raw listing), `GET /v1/events/{id}` (sanitized
-event detail + source provenance), `GET /v1/feed.ics` (any filter combo as a calendar
+event detail + source provenance), `GET /v1/feed.ics` (category and/or semantic tag
 subscription; `include_time_unknown=false` gives a timed-only feed),
 `GET /v1/changes` (delta stream), `POST /v1/reports`
 (feedback feeds source trust). A drop-in Claude skill lives in

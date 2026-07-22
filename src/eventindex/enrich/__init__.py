@@ -15,7 +15,7 @@ from typing import Literal
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
-from eventindex import config, llm
+from eventindex import config, llm, tags as tag_store
 
 CONFIDENCE_CAP = 0.8
 # Confidence tiers (Alexander 2026-07-06: ALWAYS estimate; confidence says
@@ -45,6 +45,36 @@ class _TimeEst(BaseModel):
     evidence: str | None
 
 
+class _LanguageEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: Literal["de", "en", "other"] | None
+    confidence: float
+    evidence: str | None
+
+
+class _TextEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str | None
+    confidence: float
+    evidence: str | None
+
+
+class _PriceEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    min: float | None
+    max: float | None
+    currency: Literal["EUR"] | None
+    confidence: float
+    evidence: str | None
+
+
+class _TagEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    confidence: float
+    evidence: str | None
+
+
 class Enrichment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # descriptions live in the prompt: strict schema mode forbids
@@ -53,7 +83,7 @@ class Enrichment(BaseModel):
     age_max: _Est
     gender_split: _Est
     expected_attendance: _Est
-    language: Literal["de", "en", "other"] | None
+    language: _LanguageEst
     kid_friendly: _BoolEst
     newcomer_friendly: _BoolEst
     outdoor: _BoolEst
@@ -61,15 +91,17 @@ class Enrichment(BaseModel):
     interaction_structure: Literal["none", "optional", "built_in"] | None
     energy: Literal["low", "medium", "high"] | None
     sex_service_context: _BoolEst
-    vibe_tags: list[str] = Field(
-        description="3-6 short lowercase vibe words - single words or "
-        "two-word phrases, NEVER commentary or parentheses")
+    tags: list[_TagEst] = Field(
+        description="6-12 useful event concepts, each 1-3 lowercase words "
+        "with its own confidence; no synonyms, translations, or commentary")
+    venue: _TextEst
+    stated_price: _PriceEst
     start_time: _TimeEst
 
 
 # bump when the Enrichment schema gains fields: old cache rows lack them, so
 # a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def content_key(event: dict) -> str:
@@ -133,6 +165,18 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "quiz with assigned teams, language tandem), 'optional' = easy but "
         "not forced (Stammtisch, board game cafe), 'none' = you can stay "
         "silent throughout (concert, cinema, lecture). "
+        "language: infer the language attendees will need from the event text "
+        "and context, with confidence like every other estimate. "
+        "tags: provide 6-12 distinct, useful concepts covering activity/topic, "
+        "format, audience, and setting. Each tag is 1-3 lowercase words. "
+        "Do not emit generic tags like 'event' or 'linz', commentary, duplicate "
+        "synonyms, or translations of the same concept. A tag may use world "
+        "knowledge at low confidence; quote evidence when explicit. "
+        "venue: only a public venue/organization name explicitly present in "
+        "TITLE or DESCRIPTION; never guess and never return an address. "
+        "stated_price: only a price explicitly present in TITLE or DESCRIPTION; "
+        "use EUR and min=max for a single price, 0 for explicitly free, and "
+        "null values when unstated. Never estimate a typical price. "
         "start_time: the typical LOCAL start time (HH:MM) for this kind of "
         "event - used only when the source stated no time; estimate from "
         "the event type (Sunday mass ~09:30, club night ~23:00, "
@@ -170,7 +214,7 @@ _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 def _sanity_clamp(attributes: dict) -> None:
     """Deterministic guards (audit A11: age range [18,7251), attendance 0,
-    LLM commentary leaking into vibe_tags). Estimates stay estimates, but
+    LLM commentary leaking into tags). Estimates stay estimates, but
     impossible values become unknown."""
     lo = attributes.get("age_min", {}).get("value")
     hi = attributes.get("age_max", {}).get("value")
@@ -180,10 +224,27 @@ def _sanity_clamp(attributes: dict) -> None:
     att = attributes.get("expected_attendance", {})
     if att.get("value") is not None and att["value"] < 1:
         att["value"] = None
-    attributes["vibe_tags"] = [
-        t.strip().lower() for t in attributes.get("vibe_tags", [])
-        if t.strip() and len(t.strip()) <= 25 and "(" not in t
-    ][:6]
+    attributes["tags"] = tag_store.clean_estimates(attributes.get("tags", []))
+    for tag in attributes["tags"]:
+        tag["confidence"] = min(tag["confidence"], CONFIDENCE_CAP)
+    language = attributes.get("language", {})
+    if language.get("value") not in {"de", "en", "other", None}:
+        language["value"] = None
+    venue = attributes.get("venue", {})
+    if venue.get("value") is not None:
+        venue["value"] = str(venue["value"]).strip()[:120] or None
+        if venue.get("evidence") is None:
+            venue["value"] = None
+    price = attributes.get("stated_price", {})
+    lo, hi = price.get("min"), price.get("max")
+    if (
+        price.get("evidence") is None
+        or price.get("currency") not in {"EUR", None}
+        or (lo is not None and (lo < 0 or lo > 5000))
+        or (hi is not None and (hi < 0 or hi > 5000))
+        or (lo is not None and hi is not None and lo > hi)
+    ):
+        price.update(min=None, max=None, currency=None)
     st = attributes.get("start_time", {})
     if st.get("value") is not None and not _TIME_RE.match(str(st["value"])):
         st["value"] = None
@@ -197,6 +258,17 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
         attributes.get("age_min", {}).get("confidence", 0),
         attributes.get("age_max", {}).get("confidence", 0),
     )
+    current = tx.execute(
+        "SELECT venue_id FROM event WHERE id = %s", (event_id,)
+    ).fetchone()
+    venue_id = current["venue_id"] if current else None
+    venue = attributes.get("venue", {})
+    if venue_id is None and venue.get("value") and venue.get("evidence"):
+        from eventindex.resolve.venues import VenueResolver
+
+        venue_id = VenueResolver(tx).resolve(venue["value"])
+    price = attributes.get("stated_price", {})
+    language = attributes.get("language", {})
     tx.execute(
         """
         UPDATE event SET
@@ -208,6 +280,10 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
             expected_gender_split_confidence = %(gender_conf)s,
             expected_attendance = %(attendance)s,
             expected_attendance_confidence = %(attendance_conf)s,
+            lang = %(language)s,
+            venue_id = coalesce(venue_id, %(venue_id)s),
+            price_min = coalesce(price_min, %(price_min)s),
+            price_max = coalesce(price_max, %(price_max)s),
             inferred = %(inferred)s
         WHERE id = %(id)s
         """,
@@ -223,12 +299,17 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
                 is not None else None
             ),
             "attendance_conf": attributes.get("expected_attendance", {}).get("confidence"),
+            "language": language.get("value"),
+            "venue_id": venue_id,
+            "price_min": price.get("min"),
+            "price_max": price.get("max") if price.get("max") is not None else price.get("min"),
             "inferred": Jsonb({
                 k: attributes[k] for k in
                 ("language", "kid_friendly", "newcomer_friendly", "outdoor",
                  "solo_friendly", "interaction_structure", "energy",
-                 "sex_service_context", "vibe_tags", "start_time")
+                 "sex_service_context", "venue", "stated_price", "start_time")
                 if k in attributes
             }),
         },
     )
+    tag_store.replace_inferred(tx, event_id, attributes.get("tags", []))

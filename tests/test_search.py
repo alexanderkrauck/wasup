@@ -21,7 +21,7 @@ def _filters(**kw):
     return SearchFilters(**(FILTER_DEFAULTS | kw))
 
 
-def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
+def _add(conn, title, *, category=None, age=None, energy=None, tags=None,
          kid=None, kid_conf=0.6, price=None, gender=None, gender_conf=None,
          venue=None):
     event_id = uuid.uuid4()
@@ -33,8 +33,6 @@ def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
     inferred = {}
     if energy:
         inferred["energy"] = energy
-    if vibe:
-        inferred["vibe_tags"] = vibe
     if kid is not None:
         inferred["kid_friendly"] = {"value": kid, "confidence": kid_conf}
     from psycopg.types.json import Jsonb
@@ -55,6 +53,13 @@ def _add(conn, title, *, category=None, age=None, energy=None, vibe=None,
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
         (event_id, NOW + timedelta(days=1)),
     )
+    for tag in tags or []:
+        conn.execute(
+            "INSERT INTO event_tag (event_id, name, confidence, origins) "
+            "VALUES (%s, %s, 0.8, '{inferred}')",
+            (event_id, tag),
+        )
+    return event_id
 
 
 def _run(conn, filters):
@@ -62,20 +67,28 @@ def _run(conn, filters):
     where, params = build_sql(filters)
     params["limit"] = 50
     rows = conn.execute(
-        f"SELECT e.title, 0.9::float AS confidence, e.category, "
-        f"e.inferred->'vibe_tags' AS vibe_tags, {attribute_select()} "
+        f"SELECT e.id AS event_id, e.title, 0.9::float AS confidence, e.category, "
+        f"{attribute_select()} "
         f"FROM occurrence o JOIN event e ON e.id = o.event_id "
         f"LEFT JOIN venue v ON v.id = e.venue_id "
         f"WHERE {where} LIMIT %(limit)s", params,
     ).fetchall()
-    return [r["title"] for r in rank(rows, filters)]
+    exact_scores = {
+        row["event_id"]: 0.8
+        for row in rows
+        if conn.execute(
+            "SELECT 1 FROM event_tag WHERE event_id = %s AND name = ANY(%s)",
+            (row["event_id"], filters.tags),
+        ).fetchone()
+    } if filters.tags else {}
+    return [r["title"] for r in rank(rows, filters, tag_scores=exact_scores)]
 
 
 # ------------------------------------------------------------- guarantees
 
 def test_exclusions_are_leakproof(conn):
-    _add(conn, "Techno Rave", category=["nightlife"], vibe=["techno"])
-    _add(conn, "Jazz Brunch", category=["music"], vibe=["jazz", "calm"])
+    _add(conn, "Techno Rave", category=["nightlife"], tags=["techno"])
+    _add(conn, "Jazz Brunch", category=["music"], tags=["jazz", "calm"])
     conn.commit()
     titles = _run(conn, _filters(exclude_categories=["nightlife"]))
     assert "Techno Rave" not in titles
@@ -98,7 +111,7 @@ def test_include_terms_require_one_synonym_word_boundary_aware(conn):
     _add(conn, "HWYD Social Run")
     _add(conn, "FUN-Orientierungslauf Solar City")   # compound suffix: match
     _add(conn, "Führung: Max Pechstein")             # 'run' inside: NO match
-    _add(conn, "Salsa Night", vibe=["running"])      # tag match
+    _add(conn, "Salsa Night", tags=["running"])      # tag match
     conn.commit()
     titles = _run(conn, _filters(include_terms=["lauf", "run", "running"]))
     assert "Führung: Max Pechstein" not in titles
@@ -197,36 +210,30 @@ def test_age_overlap_soft_scoring():
     assert preference_score(unknown, f) == UNKNOWN_PRIOR
 
 
-def test_vibe_terms_match_compounds_not_substrings():
-    f = _filters(vibe_terms=["run", "lauf"])
+def test_tags_rank_but_never_exclude_or_exceed_one():
+    f = _filters(tags=["dance"])
+    salsa_id, chess_id = uuid.uuid4(), uuid.uuid4()
     rows = [
-        {"title": "Führung: Max Pechstein", "vibe_tags": [], "category": [],
-         "confidence": 0.9},
-        {"title": "FUN-Orientierungslauf Solar City", "vibe_tags": [],
-         "category": [], "confidence": 0.9},
-        {"title": "HWYD Social Run", "vibe_tags": [], "category": [],
-         "confidence": 0.9},
-    ]
-    ranked = rank(rows, f)
-    # "run" inside "Führung" is not a hit; compound suffix "lauf" is
-    assert {r["title"] for r in ranked[:2]} == {
-        "HWYD Social Run", "FUN-Orientierungslauf Solar City",
-    }
-    assert ranked[-1]["title"].startswith("Führung")
-
-
-def test_vibe_terms_rank_but_never_exclude():
-    f = _filters(vibe_terms=["dance"])
-    rows = [
-        {"title": "Salsa Night", "vibe_tags": ["dance", "energetic"],
+        {"event_id": salsa_id, "title": "Salsa Night",
          "category": ["nightlife"], "confidence": 0.8},
-        {"title": "Chess Evening", "vibe_tags": ["quiet"],
+        {"event_id": chess_id, "title": "Chess Evening",
          "category": ["community"], "confidence": 0.9},
     ]
-    ranked = rank(rows, f)
+    ranked = rank(rows, f, tag_scores={salsa_id: 0.75, chess_id: 0.05})
     assert ranked[0]["title"] == "Salsa Night"  # ranked up...
     assert len(ranked) == 2                     # ...but nothing dropped
-    assert all("match_score" in r for r in ranked)
+    assert all(0 <= r["match_score"] <= 1 for r in ranked)
+
+
+def test_min_tag_match_is_an_explicit_hard_filter():
+    f = _filters(tags=["dance"], min_tag_match=0.6)
+    salsa_id, chess_id = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        {"event_id": salsa_id, "title": "Salsa", "confidence": 0.8},
+        {"event_id": chess_id, "title": "Chess", "confidence": 0.9},
+    ]
+    ranked = rank(rows, f, tag_scores={salsa_id: 0.75, chess_id: 0.05})
+    assert [row["title"] for row in ranked] == ["Salsa"]
 
 
 # ------------------------------------------------------------- registry

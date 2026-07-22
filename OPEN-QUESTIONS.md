@@ -4,12 +4,13 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 ## Open
 
-9. **Embeddings provider** - *premise updated 2026-07-08: phase 4 shipped WITHOUT embeddings (agent search = hard filters + vibe-term-overlap ranking; title matching = trigram + word containment). Nothing is blocked on this anymore.* If real usage shows ranking lacking: OK to add a direct OpenAI/Voyage key just for embeddings (~cents/month), or defer indefinitely?
-11. **Venue review** - weekly 5-min skim of `var/review/venues-*.md` and `suppressed-*.md` dumps for obvious junk (latest rebuilds append; the 2026-07-05 file with 132 venues is still unreviewed).
-16. **event.lang column** - null on all 6,104 events (red team 2026-07-21): fill it (one field in the extraction schema, ~free) or drop the column? One word: fill / drop.
-17. **Enrichment-based field completion** - 4 of 6 audited price gaps were stated on the page (once even inside our own stored description). Extending the enrichment schema with stated_price/venue extraction re-enriches the corpus (~EUR 1-2, SCHEMA_VERSION bump). OK to spend once the OpenRouter balance is topped up? y/n.
+11. **Weekly review summary** - the system already writes lists of suspicious new venue names and events whose locations were hidden for privacy; should the nightly/weekly digest show the few items that need your approval instead of leaving them only in files nobody checks? y/n.
 
 ## Answered
+
+9. **Embeddings provider** → local multilingual MPNet for unified 1–3-word tags. Measured comparison on the Wasup relation set: E5-small AUC 0.890, E5-base 0.943, `paraphrase-multilingual-mpnet-base-v2` 1.000 with zero unrelated pairs above the calibrated 0.5 boundary. The winning quantized ONNX build is 279 MB/768d and runs comfortably on the production CPU without a service, API key, or recurring cost. *(Alexander direction + measured agent evaluation, 2026-07-22)*
+16. **event.lang column** → **fill** through the LLM enrichment, represented as a confidence-bearing estimate like the other inferred attributes rather than a bare unqualified value. *(Alexander, 2026-07-22)*
+17. **Enrichment-based field completion** → **yes**: add stated-price and venue extraction to enrichment and perform the one-time re-enrichment (~EUR 1–2) once the OpenRouter balance is available. *(Alexander, 2026-07-22)*
 
 15. **Locality gate for aggregator junk** → applied, **decided by the agent under the 2026-07-10 full-autonomy grant - veto here if wrong.** Evidence: Boston/Las Vegas career fairs and a NASA launch were being served as Linz events (all Eventbrite, non-.at URLs, zero locality data). Gate (rebuild-side, pure function, fully reversible): only-global-platform provenance (eventbrite|meetup) AND no venue AND no geo AND non-.at event URL → unpublished; suppressed titles dumped to var/review/aggregator-junk-*.md. Austria-local aggregators (linztermine/tips/meinbezirk/eventfinder) are exempt by design - their placeless events are real events with lazy markup. *(2026-07-10)*
 

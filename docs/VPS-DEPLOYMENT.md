@@ -101,7 +101,12 @@ eventindex-api (127.0.0.1:8400), eventindex-worker, timers for
 schedule/digest/discover (Europe/Vienna OnCalendar). No public exposure
 until domain+Caddy: access via `ssh -L 8400:localhost:8400 netcup`.
 Deploy = `cd /opt/eventindex && git pull && uv sync && systemctl restart
-eventindex-api eventindex-worker eventindex-worker2 eventindex-worker3`
+eventindex-api eventindex-worker eventindex-worker2 eventindex-worker3`.
+For a migration that removes a column used by the previous release, stop all
+four units first, migrate while stopped, warm local assets (currently
+`uv run python -c 'from eventindex.embeddings import warm; warm()'`), then
+start all four units. This trades a short explicit outage for old/new schema
+safety.
 (`uv sync` since 2026-07-20: pypdf).
 
 **THREE worker units exist** (worker2/worker3 were added undocumented at

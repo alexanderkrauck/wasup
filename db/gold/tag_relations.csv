@@ -1,0 +1,61 @@
+left,right,target
+dancing,dance,1.0
+dancing,Tanzen,1.0
+salsa dancing,Salsa tanzen,1.0
+sport,Sport,1.0
+startup,Unternehmensgründung,1.0
+startup,entrepreneurship,1.0
+concert,Konzert,1.0
+live music,Live-Musik,1.0
+theatre,Theater,1.0
+workshop,Workshop,1.0
+family,Familie,1.0
+children,Kinder,1.0
+running,Laufen,1.0
+art,Kunst,1.0
+exhibition,Ausstellung,1.0
+market,Markt,1.0
+food,Kulinarik,1.0
+community,Gemeinschaft,1.0
+networking,Netzwerken,1.0
+yoga,Yoga,1.0
+sport,dancing,0.7
+dancing,salsa,0.7
+sport,running,0.7
+startup,networking,0.7
+entrepreneurship,networking,0.7
+concert,live music,0.7
+theatre,culture,0.7
+art,exhibition,0.7
+family,children,0.7
+food,market,0.7
+learning,workshop,0.7
+community,volunteering,0.7
+nightlife,dancing,0.7
+outdoor,hiking,0.7
+technology,startup,0.7
+concert,dancing,0.3
+theatre,dancing,0.3
+culture,concert,0.3
+learning,startup,0.3
+community,market,0.3
+sport,yoga,0.3
+family,market,0.3
+nightlife,concert,0.3
+workshop,networking,0.3
+art,theatre,0.3
+dancing,startup,0.0
+sport,startup,0.0
+concert,startup,0.0
+family,nightlife,0.0
+running,theatre,0.0
+food,technology,0.0
+religion,nightlife,0.0
+children,commercial sex,0.0
+yoga,concert,0.0
+exhibition,football,0.0
+market,software development,0.0
+community,heavy metal,0.0
+learning,nightclub,0.0
+art,marathon,0.0
+volunteering,strip club,0.0

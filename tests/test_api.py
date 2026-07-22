@@ -142,6 +142,30 @@ def test_feed_ics_serves_filtered_calendar(client):
     assert b"Nearby Concert" not in only_music.content
 
 
+def test_feed_semantic_tags_filter_before_calendar_membership(
+    conn, client, monkeypatch,
+):
+    from eventindex.api import app as app_mod
+
+    ids = {
+        row["title"]: row["id"]
+        for row in conn.execute(
+            "SELECT id, title FROM event WHERE title IN "
+            "('Nearby Concert', 'Unknown Location Talk')"
+        )
+    }
+    def tag_sql(desired, min_match, params, prefix):
+        params["selected_tag_event"] = ids["Unknown Location Talk"]
+        return "e.id = %(selected_tag_event)s", desired
+
+    monkeypatch.setattr(app_mod.tag_store, "semantic_threshold_sql", tag_sql)
+    response = client.get(
+        "/v1/feed.ics", params={"tags": "workshop", "min_tag_match": 0.5}
+    )
+    assert b"Unknown Location Talk" in response.content
+    assert b"Nearby Concert" not in response.content
+
+
 def test_feed_all_day_dates_are_local_and_use_date_typed_exclusive_end(conn, client):
     """DATE events must not shift back a day or mix DATE and DATE-TIME.
 
@@ -255,6 +279,31 @@ def test_query_endpoint_needs_no_llm_and_accepts_partial_filters(client):
     assert "Nearby Concert" in titles
     assert "No Category Thing" not in titles  # null category = unknown (hard)
     assert all("match_score" in o for o in data["occurrences"])
+
+
+def test_query_endpoint_exposes_semantic_tag_score(conn, client, monkeypatch):
+    from eventindex.api import app as app_mod
+
+    ids = {
+        row["title"]: row["id"]
+        for row in conn.execute(
+            "SELECT id, title FROM event WHERE title IN "
+            "('Nearby Concert', 'Unknown Location Talk')"
+        )
+    }
+    monkeypatch.setattr(
+        app_mod.tag_store,
+        "semantic_scores",
+        lambda tx, event_ids, desired: {
+            ids["Nearby Concert"]: 0.1,
+            ids["Unknown Location Talk"]: 0.8,
+        },
+    )
+    rows = client.post(
+        "/v1/query", json={"tags": ["learning"], "min_tag_match": 0.5}
+    ).json()["occurrences"]
+    assert [row["title"] for row in rows] == ["Unknown Location Talk"]
+    assert rows[0]["tag_match"] == 0.8
 
 
 def test_query_endpoint_soft_preferences_keep_unknowns(client):

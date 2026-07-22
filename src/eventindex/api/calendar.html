@@ -34,7 +34,10 @@ direkt aus dem Index. Für KI-Assistenten: <a href="/llms.txt">/llms.txt</a></p>
 <div class="controls">
   <label>ab <input type="date" id="from"></label>
   <select id="category"><option value="">alle Kategorien</option></select>
+  <input id="tags" type="search" placeholder="Tags, z. B. salsa tanzen"
+         aria-label="Semantische Tags">
   <button id="reload">Anzeigen</button>
+  <a id="subscribe" href="#">Kalender-Abo (.ics)</a>
   <span id="status"></span>
 </div>
 
@@ -131,6 +134,8 @@ function render(occurrences) {
       price(o.price_min, o.price_max),
       o.confidence !== null
         ? "Konfidenz " + Math.round(o.confidence * 100) + " %" : null,
+      o.tag_match !== null && o.tag_match !== undefined
+        ? "Tag-Treffer " + Math.round(o.tag_match * 100) + " %" : null,
     ].filter(Boolean).join(" · ");
     node.querySelector(".meta").textContent = meta;
     list.appendChild(node);
@@ -147,7 +152,16 @@ async function load() {
   const params = new URLSearchParams({ limit: PAGE_SIZE });
   if ($("from").value) params.set("from", $("from").value);
   if ($("category").value) params.set("category", $("category").value);
+  if ($("tags").value.trim()) {
+    params.set("tags", $("tags").value.trim());
+    params.set("min_tag_match", "0.5");
+  }
   if (currentCursor) params.set("cursor", currentCursor);
+  const feed = new URLSearchParams(params);
+  feed.delete("limit"); feed.delete("cursor");
+  feed.set("include_time_unknown", "false");
+  feed.set("exclude_sex_service_context", "true");
+  $("subscribe").href = "/v1/feed.ics?" + feed;
   try {
     const res = await fetch("/v1/occurrences?" + params);
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -172,6 +186,7 @@ function reset() { cursorStack = []; currentCursor = null; load(); }
 $("reload").addEventListener("click", reset);
 $("from").addEventListener("change", reset);
 $("category").addEventListener("change", reset);
+$("tags").addEventListener("change", reset);
 $("next").addEventListener("click", () => {
   cursorStack.push(currentCursor); currentCursor = nextCursor; load();
 });

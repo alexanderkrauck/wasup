@@ -27,7 +27,9 @@ user's natural language into filters - the index runs no LLM for this.
   `sex_service_context` (event at a commercial sex establishment - send
   `false` BY DEFAULT, leave unset only on explicit ask, never in
   `required_attributes`); weights via `importance: {attr: 0..1}`.
-- `vibe_terms`: rank-only descriptive words.
+- `tags`: 1-3-word activity/topic/format concepts matched multilingually
+  against confidence-bearing event tags. Rank-only by default; set
+  `min_tag_match` only for an explicit hard requirement.
 
 Read the response honestly: `match_score` (preference fit), `confidence`
 (existence certainty, staleness-decayed), `projected: true` = unconfirmed
@@ -35,7 +37,7 @@ forward projection - tell the user when a recommendation rests on estimates.
 
 Details per event: `GET /v1/events/{id}` (sanitized public fields,
 occurrences, and source provenance; never raw claim payloads). Calendar:
-`/v1/feed.ics?...&exclude_sex_service_context=true&include_time_unknown=false`
+`/v1/feed.ics?tags=dancing&min_tag_match=0.5&exclude_sex_service_context=true&include_time_unknown=false`
 for a quiet, safe timed-events default; include date-only events only when the
 user explicitly asks for unknown-time/all-day entries.
 Wrong/cancelled data: `POST /v1/reports`.

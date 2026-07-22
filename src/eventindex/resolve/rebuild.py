@@ -24,7 +24,7 @@ from datetime import date, datetime, time as time_t, timedelta
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from eventindex import config, llm
+from eventindex import config, llm, tags as tag_store
 from eventindex.budget import BudgetExceeded
 from eventindex.extract import parse_dt
 from eventindex.resolve import match, projection, recurrence
@@ -1258,6 +1258,34 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                 )
                 continue
 
+            canonical_categories = (
+                [c] if (c := str(values.get("category") or "").strip().lower())
+                in config.CATEGORIES else []
+            )
+            event_confidence = _event_confidence(g["claims"])
+            source_tag_claim = next(
+                (
+                    claim for claim in g["claims"]
+                    if str(claim.id) == provenance.get("tags", {}).get("claim")
+                ),
+                None,
+            )
+            source_tag_confidence = (
+                source_tag_claim.trust * source_tag_claim.confidence("tags")
+                if source_tag_claim else event_confidence
+            )
+            category_claim = next(
+                (
+                    claim for claim in g["claims"]
+                    if str(claim.id) == provenance.get("category", {}).get("claim")
+                ),
+                None,
+            )
+            category_confidence = (
+                category_claim.trust * category_claim.confidence("category")
+                if category_claim else event_confidence
+            )
+
             # a bare-domain url asserts a detail link that isn't one (49% of
             # events shipped the source homepage, audit A7): any claim's
             # deep link beats the merged/fallback homepage
@@ -1273,7 +1301,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                 INSERT INTO event (id, kind, title, description, rights, category,
                                    venue_id, geo, is_recurring, rrule,
                                    price_min, price_max, url, image_url,
-                                   organizer, tags, booking_url,
+                                   organizer, booking_url,
                                    registration_required,
                                    field_provenance, confidence, status,
                                    expected_cadence,
@@ -1284,7 +1312,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                              ELSE ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326) END,
                         %(is_recurring)s, %(rrule)s,
                         %(price_min)s, %(price_max)s, %(url)s, %(image_url)s,
-                        %(organizer)s, %(tags)s, %(booking_url)s,
+                        %(organizer)s, %(booking_url)s,
                         %(registration_required)s,
                         %(provenance)s, %(confidence)s, %(status)s,
                         %(cadence)s,
@@ -1298,10 +1326,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     # taxonomy gate: deterministic extractors pass source-
                     # native categories through ("Allgemein", "Schnellschach")
                     # - canon publishes taxonomy values or unknown, never junk
-                    "category": (
-                        [c] if (c := str(values.get("category") or "").strip().lower())
-                        in config.CATEGORIES else []
-                    ),
+                    "category": canonical_categories,
                     "venue_id": rep.venue_id,
                     "lat": lat, "lon": lon,
                     "is_recurring": is_series,
@@ -1311,11 +1336,10 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     "url": url,
                     "image_url": values.get("image_url"),
                     "organizer": values.get("organizer"),
-                    "tags": values.get("tags") or [],
                     "booking_url": values.get("booking_url"),
                     "registration_required": values.get("registration_required"),
                     "provenance": Jsonb(provenance),
-                    "confidence": _event_confidence(g["claims"]),
+                    "confidence": event_confidence,
                     "status": event_status,
                     "cadence": min(
                         (c.crawl_interval for c in g["claims"] if c.crawl_interval),
@@ -1324,6 +1348,17 @@ def rebuild(conn, now: datetime | None = None) -> dict:
                     "first_seen": g["first_seen"],
                     "last_seen": last_seen,
                 },
+            )
+            source_tags = values.get("tags") or []
+            if isinstance(source_tags, str):
+                source_tags = [source_tags]
+            tag_store.add_canonical(
+                conn,
+                g["event_id"],
+                source_tags,
+                source_tag_confidence,
+                canonical_categories,
+                category_confidence,
             )
             for starts, ends in pairs:
                 day = starts.astimezone(VIENNA).date()
@@ -1365,7 +1400,8 @@ def _apply_enrichment(tx) -> list:
 
     rows = tx.execute(
         """
-        SELECT e.id, e.title, e.description, e.category, v.name AS venue_name,
+        SELECT e.id, e.title, e.description, e.category, e.price_min, e.price_max,
+               v.name AS venue_name,
                v.sex_service AS venue_sex_service
         FROM event e LEFT JOIN venue v ON v.id = e.venue_id
         """

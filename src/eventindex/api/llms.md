@@ -57,10 +57,8 @@ for `/v1/search` (it spends the index's own LLM budget) and `POST
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna;
 a bare date in to_dt means the WHOLE day), `near`+`radius` (geo circle),
 `categories`, `exclude_categories`, `exclude_terms`, `include_terms`
-(synonym set, at least ONE must appear in title/tags/venue name - use for
-"specifically X" queries, e.g. `["lauf","run"]` for running or
-`["factory300"]` for events at/by a named venue or organizer;
-word-boundary-aware), `max_price`, `is_free`, `required_attributes`.
+(literal title/venue/organizer lookup; word-boundary-aware), `max_price`,
+`is_free`, `required_attributes`, and `min_tag_match` when `tags` are present.
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,
@@ -89,8 +87,10 @@ per-row `match_score` exposes the result. Add an attribute name to
 `required_attributes` to make it a hard filter instead (then unknowns are
 excluded - use sparingly, most events have estimated attributes only).
 
-`vibe_terms`: free descriptive words ("dance", "cozy") - rank-only, never
-filter.
+`tags`: desired 1-3-word activity/topic/format concepts. They match the one
+confidence-bearing event-tag collection with a calibrated local multilingual
+model. They rank softly by default. Set `min_tag_match` only when the concept
+is a hard requirement; exact exclusions never use embeddings.
 
 Fine print an agent should know:
 - Windows use overlap semantics: anything still running at `from` matches
@@ -116,7 +116,7 @@ POST /v1/query
  "exclude_terms": ["techno"],
  "gender_split_min": 0.5, "kid_friendly": true,
  "importance": {"gender_split_min": 1.0, "kid_friendly": 0.4},
- "vibe_terms": ["social", "dancing"]}
+ "tags": ["social dancing"]}
 ```
 
 Taxonomy for `categories`/`exclude_categories`: {categories}
@@ -150,7 +150,8 @@ queries are COMPOSITIONS you build at query time. Examples:
 - `GET /v1/occurrences?from=&to=&near=lat,lon&radius=5km&category=&min_confidence=&cursor=` - plain listing, keyset-paginated.
 - `GET /v1/events/{id}` - sanitized public fields, occurrences, and source
   provenance; no raw claims/evidence.
-- `GET /v1/feed.ics?...` - any filter combo as a calendar subscription;
+- `GET /v1/feed.ics?tags=dancing&min_tag_match=0.5...` - category and/or
+  semantic-tag calendar subscription;
   `exclude_sex_service_context=true` removes positively known commercial
   sex-service contexts while retaining unknowns. Set
   `include_time_unknown=false` for a quieter timed-events-only feed; the
@@ -166,5 +167,5 @@ queries are COMPOSITIONS you build at query time. Examples:
   false sex_service_context hard-excludes known true events; only explicit
   true on search_events/get_event permits them, while standard search/fetch
   and generated calendar links always exclude them. Generated calendar links
-  require a category and omit unknown-time/all-day entries unless the user
+  require a category or tags and omit unknown-time/all-day entries unless the user
   explicitly asks to include them. Point your client at https://wasup.at/mcp

@@ -14,7 +14,7 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "age_max": {"value": 30, "confidence": age_conf, "evidence": "Studentenparty"},
         "gender_split": {"value": 0.5, "confidence": 0.3, "evidence": None},
         "expected_attendance": {"value": None, "confidence": 0.0, "evidence": None},
-        "language": "de",
+        "language": {"value": "de", "confidence": 0.7, "evidence": "Studentenparty"},
         "kid_friendly": {"value": False, "confidence": 0.6, "evidence": "ab 18"},
         "newcomer_friendly": {"value": True, "confidence": 0.5, "evidence": None},
         "outdoor": {"value": None, "confidence": 0.0, "evidence": None},
@@ -22,7 +22,16 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "interaction_structure": "optional",
         "energy": "high",
         "sex_service_context": {"value": None, "confidence": 0.0, "evidence": None},
-        "vibe_tags": ["techno", "student", "loud"],
+        "tags": [
+            {"name": "techno", "confidence": 0.9, "evidence": "Studentenparty"},
+            {"name": "student nightlife", "confidence": 0.6, "evidence": "Studentenparty"},
+            {"name": "loud", "confidence": 0.3, "evidence": None},
+        ],
+        "venue": {"value": "Kellerclub", "confidence": 0.8, "evidence": "im Kellerclub"},
+        "stated_price": {
+            "min": 12, "max": 12, "currency": "EUR", "confidence": 0.8,
+            "evidence": "12 EUR",
+        },
         "start_time": {"value": "23:00", "confidence": 0.3, "evidence": None},
     })
 
@@ -67,14 +76,24 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
     attrs = enrich_event(conn, event_row)
     apply_to_event(conn, event_row["id"], attrs)
     row = conn.execute(
-        "SELECT expected_age_range, expected_age_range_confidence, inferred "
+        "SELECT expected_age_range, expected_age_range_confidence, inferred, "
+        "lang, price_min, price_max, venue_id "
         "FROM event WHERE id = %s", (event_row["id"],),
     ).fetchone()
     assert row["expected_age_range"].lower == 20
     assert row["expected_age_range"].upper >= 30  # inclusive range storage
     assert row["expected_age_range_confidence"] == 0.8
     assert row["inferred"]["energy"] == "high"
-    assert "techno" in row["inferred"]["vibe_tags"]
+    assert row["inferred"]["language"]["value"] == "de"
+    assert row["lang"] == "de"
+    assert float(row["price_min"]) == float(row["price_max"]) == 12
+    assert row["venue_id"] is not None
+    tags = conn.execute(
+        "SELECT name, confidence, origins FROM event_tag WHERE event_id = %s",
+        (event_row["id"],),
+    ).fetchall()
+    assert {tag["name"] for tag in tags} == {"techno", "student nightlife", "loud"}
+    assert next(tag for tag in tags if tag["name"] == "techno")["confidence"] == 0.8
 
 
 def test_content_key_changes_with_content(event_row):

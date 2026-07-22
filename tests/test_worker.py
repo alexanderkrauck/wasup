@@ -159,6 +159,49 @@ def test_ghost_target_handlers_noop_and_survive_their_imports(conn):
         assert handlers.HANDLERS[kind](job, conn) == []
 
 
+def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeypatch):
+    """A schema bump must not strand rows beyond an arbitrary first page."""
+    import uuid
+
+    pending = [uuid.uuid4() for _ in range(300)]
+    monkeypatch.setattr(
+        handlers,
+        "rebuild",
+        lambda tx: {
+            "claims": 1, "events": 300, "occurrences": 300,
+            "venues_created": 0, "enrich_pending": pending,
+        },
+    )
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind) VALUES ('resolve') RETURNING id"
+    ).fetchone()["id"]
+    jobs = handlers.resolve({"id": job_id, "payload": {}}, conn)
+    assert [job["kind"] for job in jobs].count("enrich") == 300
+    assert jobs[-1] == {"kind": "embed_tags", "payload": {}}
+
+
+def test_embed_tags_handler_fills_missing_names(conn, monkeypatch):
+    import uuid
+
+    from eventindex import embeddings, tags
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, confidence, status) "
+        "VALUES (%s, 'one_off', 'Salsa', 0.9, 'confirmed')",
+        (event_id,),
+    )
+    tags.upsert(conn, event_id, "salsa dancing", 0.8, "inferred")
+    captured = []
+    monkeypatch.setattr(
+        embeddings,
+        "store_missing",
+        lambda tx, names: captured.extend(names) or len(names),
+    )
+    assert handlers.embed_tags({"id": uuid.uuid4(), "payload": {}}, conn) == []
+    assert captured == ["salsa dancing"]
+
+
 def test_detail_claims_kept_for_time_or_missing_venue():
     payloads = [
         {"title": {"value": "A"}, "starts_at": {"value": "2030-01-01 19:00:00"}},

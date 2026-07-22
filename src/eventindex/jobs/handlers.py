@@ -241,9 +241,6 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
     return jobs
 
 
-ENRICH_BATCH_PER_REBUILD = 200
-
-
 def resolve(job: dict, tx) -> list[dict]:
     """Full canon rebuild (H0): resolve(all_claims) -> canon, atomically."""
     stats = rebuild(tx)
@@ -263,10 +260,12 @@ def resolve(job: dict, tx) -> list[dict]:
          f"{stats['occurrences']} occurrences, {stats['venues_created']} new venues, "
          f"{len(pending)} events awaiting enrichment"),
     )
-    return [
+    jobs = [
         {"kind": "enrich", "payload": {"event_id": str(eid)}}
-        for eid in pending[:ENRICH_BATCH_PER_REBUILD]
+        for eid in pending
     ]
+    jobs.append({"kind": "embed_tags", "payload": {}})
+    return jobs
 
 
 def enrich(job: dict, tx) -> list[dict]:
@@ -283,7 +282,39 @@ def enrich(job: dict, tx) -> list[dict]:
         return []  # event resolved away since; the next rebuild re-enqueues
     attributes = enrich_event(tx, row, job_id=job["id"])
     apply_to_event(tx, row["id"], attributes)
-    return []
+    # Debounced derived-cache convergence: the current batch may finish while
+    # more enrichment jobs create new tags, so a later enrichment re-arms it.
+    pending = tx.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'embed_tags' "
+        "AND status IN ('pending', 'running') LIMIT 1"
+    ).fetchone()
+    return [] if pending else [{"kind": "embed_tags", "payload": {}}]
+
+
+TAG_EMBED_BATCH = 256
+
+
+def embed_tags(job: dict, tx) -> list[dict]:
+    """Fill the derived local vector cache in bounded idempotent batches."""
+    from eventindex import embeddings
+
+    rows = tx.execute(
+        """
+        SELECT DISTINCT et.name
+        FROM event_tag et
+        LEFT JOIN tag_embedding te
+          ON te.name = et.name AND te.model = %s
+        WHERE te.name IS NULL
+        ORDER BY et.name
+        LIMIT %s
+        """,
+        (embeddings.MODEL_VERSION, TAG_EMBED_BATCH),
+    ).fetchall()
+    if not rows:
+        return []
+    embeddings.store_missing(tx, [row["name"] for row in rows])
+    more = len(rows) == TAG_EMBED_BATCH
+    return [{"kind": "embed_tags", "payload": {}}] if more else []
 
 
 def onboard(job: dict, tx) -> list[dict]:
@@ -781,6 +812,7 @@ def timefix(job: dict, tx) -> list[dict]:
 
 HANDLERS = {
     "crawl": crawl, "resolve": resolve, "enrich": enrich,
+    "embed_tags": embed_tags,
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
     "discover": discover, "qa_check": qa_check, "timefix": timefix,
     "parity_audit": parity_audit,

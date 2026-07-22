@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
-from eventindex import config, db
+from eventindex import config, db, tags as tag_store
 from eventindex.api.search import QueryBody, VIENNA
 
 MAX_LIMIT = 200
@@ -371,6 +371,10 @@ def occurrences(
     include_terms: str | None = Query(
         None, description="comma-separated synonyms; at least one must "
         "match title/venue/organizer (word-boundary aware)"),
+    tags: str | None = Query(
+        None, description="comma-separated semantic event tags; supplying "
+        "tags makes this chronological listing a certainty-weighted filter"),
+    min_tag_match: float = Query(0.5, ge=0, le=1),
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
@@ -380,6 +384,15 @@ def occurrences(
     conditions, params = _occurrence_filters(
         from_, to, near, radius, bbox, category, min_confidence, include_terms
     )
+    desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
+    if desired_tags:
+        try:
+            condition, desired_tags = tag_store.semantic_threshold_sql(
+                desired_tags, min_tag_match, params, prefix="occ_tag"
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        conditions.append(condition)
     params["limit"] = limit
     if cursor is not None:
         after_ts, after_id = _parse_cursor(cursor)
@@ -407,6 +420,17 @@ def occurrences(
     """
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()
+        if desired_tags:
+            tag_scores = tag_store.semantic_scores(
+                conn, [row["event_id"] for row in rows], desired_tags
+            )
+            rows = [
+                row for row in rows
+                if tag_scores.get(row["event_id"], 0.0) >= min_tag_match
+            ]
+            for row in rows:
+                row["tag_match"] = round(tag_scores[row["event_id"]], 4)
+            rows = rows[:limit]
         freshness = _data_freshness(conn)
 
     next_cursor = None
@@ -431,6 +455,11 @@ def feed_ics(
     category: str | None = Query(None, description="comma-separated"),
     min_confidence: float | None = Query(None, ge=0, le=1),
     include_terms: str | None = Query(None, description="comma-separated"),
+    tags: str | None = Query(
+        None, description="comma-separated semantic event tags"),
+    min_tag_match: float = Query(
+        0.5, ge=0, le=1,
+        description="minimum certainty-weighted semantic tag match"),
     exclude_sex_service_context: bool = Query(
         False,
         description="exclude events positively identified as taking place "
@@ -452,9 +481,18 @@ def feed_ics(
     )
     if not include_time_unknown:
         conditions.append("NOT o.time_unknown")
+    desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
+    if desired_tags:
+        try:
+            condition, desired_tags = tag_store.semantic_threshold_sql(
+                desired_tags, min_tag_match, params, prefix="feed_tag"
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        conditions.append(condition)
     params["limit"] = limit
     sql = f"""
-        SELECT o.id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
+        SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
                e.title, e.url, v.name AS venue_name
         FROM occurrence o JOIN event e ON e.id = o.event_id
         LEFT JOIN venue v ON v.id = e.venue_id
@@ -503,17 +541,18 @@ def _run_filters(filters, limit: int,
                  sort: str = "relevance", distinct: bool = False,
                  offset: int = 0,
                  exclude_sex_service_context: bool = False,
-                 include_inferred_terms: bool = True) -> dict:
+                 include_tag_terms: bool = True,
+                 ) -> dict:
     """The deterministic search core shared by /v1/search and /v1/query:
     guarantees as set logic in SQL; soft attribute preferences scored as
-    importance x certainty; vibe terms only rank."""
+    importance x certainty; unified tags rank or explicitly threshold."""
     from eventindex.api.search import attribute_select, build_sql, rank
 
     with db.connect() as conn:
         where, params = build_sql(
             filters,
             exclude_sex_service_context=exclude_sex_service_context,
-            include_inferred_terms=include_inferred_terms,
+            include_tag_terms=include_tag_terms,
         )
         # soft preferences reorder, so the pool must cover the WHOLE window -
         # a small pool ordered by starts_at would only ever score the first
@@ -532,7 +571,6 @@ def _run_filters(filters, limit: int,
                    e.kind, e.organizer, e.status AS event_status,
                    e.booking_url, e.registration_required,
                    v.name AS venue_name, v.address AS venue_address,
-                   e.inferred->'vibe_tags' AS vibe_tags,
                    e.expected_age_range AS age_range,
                    ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                    ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
@@ -545,12 +583,15 @@ def _run_filters(filters, limit: int,
             """,
             params,
         ).fetchall()
+        tag_scores = tag_store.semantic_scores(
+            conn, [row["event_id"] for row in rows], filters.tags
+        ) if filters.tags else {}
         freshness = _data_freshness(conn)
     truncated = len(rows) > pool
     rows = rows[:pool]
     for r in rows:
         r["age_range"] = str(r["age_range"]) if r["age_range"] else None
-    ranked = rank(rows, filters, importance)
+    ranked = rank(rows, filters, importance, tag_scores)
     if distinct:
         # one row per EVENT (its best-ranked occurrence): a recurring event
         # filled 6 of 10 slots of a discovery query (audit B1)
@@ -678,10 +719,13 @@ def _safe_estimates(inferred: dict | None) -> dict:
     """
     safe: dict = {}
     for name, value in (inferred or {}).items():
-        if name == "vibe_tags":
-            # Legacy enrichment rows predate the six-tag clamp and some
-            # contain model rambling; never turn that into a giant MCP dump.
-            safe[name] = [str(tag)[:25] for tag in list(value or [])[:6]]
+        if name == "stated_price" and isinstance(value, dict):
+            safe[name] = {
+                "min": value.get("min"),
+                "max": value.get("max"),
+                "currency": value.get("currency"),
+                "confidence": value.get("confidence"),
+            }
         elif isinstance(value, dict):
             safe[name] = {
                 "value": value.get("value"),
@@ -698,7 +742,7 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
         row = conn.execute(
             f"""
             SELECT e.id, e.kind, e.parent_event_id, e.title, e.description,
-                   e.rights, e.category, e.tags, e.is_recurring, e.rrule,
+                   e.rights, e.category, e.is_recurring, e.rrule,
                    e.registration_required, e.registration_deadline,
                    e.booking_url, e.late_entry_ok,
                    e.price_min, e.price_max, e.url, e.image_url, e.lang,
@@ -725,6 +769,7 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
             inferred.get("sex_service_context", {}).get("value") is True
         )
         row["estimates"] = _safe_estimates(inferred)
+        row["tags"] = tag_store.public_for_event(conn, event_id)
         if row.get("expected_age_range") is not None:
             row["expected_age_range"] = str(row["expected_age_range"])
         occurrences = conn.execute(

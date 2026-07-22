@@ -49,7 +49,7 @@ def _radius_m(radius: str) -> float:
 # just above a weak contradiction: strong match .9 > weak match .6 >
 # unknown .45 > weak contradiction .4 > strong contradiction .1
 UNKNOWN_PRIOR = 0.45
-ENUM_CONFIDENCE = 0.5  # energy/language are stored without their own confidence
+ENUM_CONFIDENCE = 0.5  # legacy energy/interaction values lack own confidence
 
 # the soft-queryable audience attributes; also the valid names for
 # required_attributes and importance. Must stay in lockstep with ATTRIBUTES
@@ -102,8 +102,8 @@ class SearchFilters(BaseModel):
     include_terms: list[str] = Field(
         description="synonym set of which at least ONE must appear in "
         "title/tags/venue name (word-prefix/suffix match) - hard filter for "
-        "'I want specifically X' queries, e.g. ['lauf','run'] for running or "
-        "['factory300'] for a venue/organizer; keep empty for broad/mood queries"
+        "a literal title, venue, or organizer name such as ['factory300']; "
+        "activity/topic concepts belong in tags"
     )
     age_min: int | None
     age_max: int | None
@@ -149,9 +149,23 @@ class SearchFilters(BaseModel):
                 f"unknown attributes {sorted(unknown)}; valid: {sorted(SOFT_ATTRIBUTES)}"
             )
         return v
-    vibe_terms: list[str] = Field(
-        description="residual descriptive words for RANKING only (e.g. 'dance', "
-        "'high energy' -> ['dance','energetic']); never constraints"
+    tags: list[str] = Field(
+        description="desired 1-3-word activity/topic/format concepts, matched "
+        "multilingually against the event's confidence-bearing tags; soft "
+        "ranking unless min_tag_match is set"
+    )
+
+    @field_validator("tags")
+    @classmethod
+    def _valid_tags(cls, values: list[str]) -> list[str]:
+        from eventindex.tags import clean_desired
+
+        return clean_desired(values)
+
+    min_tag_match: float | None = Field(
+        default=None, ge=0, le=1,
+        description="explicit hard threshold for certainty-weighted semantic "
+        "tag matching; null keeps tags rank-only"
     )
     near: str | None = Field(
         description="'lat,lon' center overriding the default 15km-around-"
@@ -179,6 +193,8 @@ class SearchFilters(BaseModel):
                 raise ValueError("near must be 'lat,lon'")
         if self.radius is not None:
             _radius_m(self.radius)  # raises ValueError on junk
+        if self.min_tag_match is not None and not self.tags:
+            raise ValueError("min_tag_match requires at least one tag")
         return self
 
 
@@ -193,7 +209,7 @@ FILTER_DEFAULTS: dict = {
     "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
     "outdoor": None, "solo_friendly": None, "interaction_structure": None,
     "energy": None, "language": None, "sex_service_context": None,
-    "required_attributes": [], "vibe_terms": [],
+    "required_attributes": [], "tags": [], "min_tag_match": None,
     "near": None, "radius": None,
 }
 
@@ -267,8 +283,9 @@ ATTRIBUTES: dict[str, Attribute] = {
         hard_sql="e.inferred->>'energy' = %({p})s",
     ),
     "language": Attribute(
-        kind="enum", value_sql="e.inferred->>'language'", conf_sql=str(ENUM_CONFIDENCE),
-        hard_sql="e.inferred->>'language' = %({p})s",
+        kind="enum", value_sql="e.inferred->'language'->>'value'",
+        conf_sql="(e.inferred->'language'->>'confidence')::float",
+        hard_sql="e.inferred->'language'->>'value' = %({p})s",
     ),
 }
 
@@ -315,9 +332,10 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "23:59. No time mentioned = from now, no end.\n"
         "Only set a filter the query actually implies; everything else null/empty. "
         "Negations (nicht/kein/ohne X) go to exclude_*. When the user wants "
-        "a SPECIFIC activity/thing, put its German+English synonyms in "
-        "include_terms (['lauf','run'] for running); mood/vibe words go to "
-        "vibe_terms instead.\n"
+        "a literal title, venue, or organizer, put it in include_terms. Put "
+        "activity, topic, format, and mood concepts in tags as concise 1-3 "
+        "word phrases; multilingual semantic matching handles translations. "
+        "Set min_tag_match only for an explicit must/only requirement.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
         "when the user is emphatic ('unbedingt', 'muss', 'nur wenn').\n\n"
@@ -330,7 +348,7 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
 
 def build_sql(
     f: SearchFilters, *, exclude_sex_service_context: bool = False,
-    include_inferred_terms: bool = True,
+    include_tag_terms: bool = True,
 ) -> tuple[str, dict]:
     """HARD conditions only: guarantees + attributes marked required.
     null attribute = unknown = never matches a hard constraint (§7)."""
@@ -387,13 +405,14 @@ def build_sql(
             f"NOT (e.title ILIKE %({key})s "
             f"OR coalesce(v.name ILIKE %({key})s, false) "
             f"OR coalesce(e.organizer ILIKE %({key})s, false) "
-            f"OR coalesce(e.inferred->'vibe_tags' @> to_jsonb(lower(%({key}raw)s)::text), false))"
+            f"OR EXISTS (SELECT 1 FROM event_tag et WHERE et.event_id = e.id "
+            f"AND et.name ILIKE %({key})s))"
         )
         params[key] = f"%{term}%"
         params[key + "raw"] = term
     if f.include_terms:
         # at least one synonym must appear: word-prefix (\mterm) or compound
-        # suffix (term\M) in the title, or as an exact vibe tag. Same
+        # suffix (term\M) in the title, or a tag name. Same
         # boundary semantics as the ranker: "run" != "Führung",
         # "lauf" == "Orientierungslauf"
         import re as _re
@@ -409,9 +428,9 @@ def build_sql(
                 f"OR coalesce(v.name ~* %({key})s, false) "
                 f"OR coalesce(e.organizer ~* %({key})s, false)"
                 + (
-                    f" OR coalesce(e.inferred->'vibe_tags' @> "
-                    f"to_jsonb(lower(%({key}raw)s)::text), false)"
-                    if include_inferred_terms else ""
+                    f" OR EXISTS (SELECT 1 FROM event_tag et "
+                    f"WHERE et.event_id = e.id AND et.name ~* %({key})s)"
+                    if include_tag_terms else ""
                 )
             )
             # multi-word terms tolerate hyphen/compound spelling: 'krone
@@ -494,30 +513,29 @@ def preference_score(row: dict, f: SearchFilters,
     ) / total_w
 
 
-def rank(rows: list[dict], f: SearchFilters,
-         importance: dict[str, float] | None = None) -> list[dict]:
-    """Rank WITHIN the allowed set: preference score x vibe-term overlap x
-    effective confidence. Nothing is dropped here - hard filtering already
-    happened in SQL."""
-    terms = [t.lower() for t in f.vibe_terms]
-
-    def hit(term: str, tokens: list[str]) -> bool:
-        # token prefix/suffix, not substring: "lauf" must match
-        # "orientierungslauf" (German compounds) but "run" must NOT match
-        # "führung"/"stadtrundfahrten"
-        return any(t.startswith(term) or t.endswith(term) for t in tokens)
+def rank(
+    rows: list[dict], f: SearchFilters,
+    importance: dict[str, float] | None = None,
+    tag_scores: dict | None = None,
+) -> list[dict]:
+    """Rank the allowed set by certainty-aware preferences and unified tags."""
+    tag_scores = tag_scores or {}
 
     def score(row) -> float:
         s = preference_score(row, f, importance) * (row["confidence"] or 0.0)
-        if terms:
-            tokens = " ".join([
-                (row["title"] or "").lower(),
-                " ".join(row.get("vibe_tags") or []),
-                " ".join(row.get("category") or []),
-            ]).split()
-            hits = sum(1 for t in terms if hit(t, tokens))
-            s *= 0.5 + hits / len(terms)
+        if f.tags:
+            tag_match = float(tag_scores.get(row["event_id"], 0.0))
+            row["tag_match"] = round(tag_match, 4)
+            s *= 0.5 + 0.5 * tag_match
+        else:
+            row["tag_match"] = None
         row["match_score"] = round(s, 4)  # exposed: consumers see the weighting
         return s
 
-    return sorted(rows, key=score, reverse=True)
+    scored = [(score(row), row) for row in rows]
+    if f.tags and f.min_tag_match is not None:
+        scored = [
+            pair for pair in scored
+            if pair[1]["tag_match"] >= f.min_tag_match
+        ]
+    return [row for _, row in sorted(scored, key=lambda pair: pair[0], reverse=True)]

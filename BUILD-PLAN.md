@@ -37,12 +37,12 @@ Recipe schema + interpreter (pagination taxonomy, stop conditions, validation co
 
 ## Phase 4 - Intelligence: the product feel
 
-Confidence wiring end-to-end (source trust EMA, compound event confidence, staleness decay verified). Nightly QA sampler (re-verify N random events, feed trust). Embeddings + hybrid semantic search (`/v1/search`, `q=` on occurrences; exclusions as set logic BEFORE ranking). `.ics` feed endpoint with filter params. `/v1/reports` (user feedback → QA queue → trust). `/v1/changes` cursor stream. Booking-schema extraction where trivially present (ticket URL, "Anmeldung unter..." - full §13 agent-action layer stays future). API keys + rate limits. §9b suppression heuristics.
+Confidence wiring end-to-end (source trust EMA, compound event confidence, staleness decay verified). Nightly QA sampler (re-verify N random events, feed trust). One confidence-bearing tag collection plus local calibrated multilingual tag matching; exclusions remain set logic before ranking. `.ics` supports explicit semantic tag membership. `/v1/reports` (user feedback → QA queue → trust). `/v1/changes` cursor stream. Booking-schema extraction where trivially present (ticket URL, "Anmeldung unter..." - full §13 agent-action layer stays future). API keys + rate limits. §9b suppression heuristics.
 
 **Done when:** (a) "was geht heute abend, nicht techno, unter 20€" via `/v1/search` returns sensible ranked results with zero excluded-category leaks over a 50-query test set; (b) Alexander subscribes to a filtered .ics and events appear in his calendar; (c) a `/reports` submission demonstrably lowers a source's trust; (d) digest shows the QA loop running nightly.
 **[human]:** use it for a week; the feedback from real usage IS the phase-4 acceptance test.
 
-*Status 2026-07-07 (corrected 07-08): phase-4 components shipped (qa_check, .ics, /reports, /changes, api keys, §9b suppression, 50-query gate at tests/test_search_live.py) EXCEPT booking-schema extraction (ticket URL, "Anmeldung unter...") - unshipped, now red-team backlog #8. Evidence pending budget reset: (a) run `uv run pytest -m live tests/test_search_live.py`, (c)+(d) flow from the queue. (b) needs Alexander: subscribe to /v1/feed.ics?api_key=... Embeddings for ranking remain deliberately unbuilt (agent-search decision 2026-07-06: vibe-term overlap ranks; add pgvector ranking only if real usage shows it lacking). Rate limits deferred until a second consumer exists.*
+*Status 2026-07-22: the unified tag/local-embedding extension is in rollout. The measured model gate compares three multilingual candidates; MPNet won at strong-vs-unrelated AUC 1.000. Completion evidence is the full suite, relation gold set, real-corpus re-enrichment/backfill, semantic search/feed examples, and monitored production rollout.*
 
 ## After v1 (do not touch until trigger fires - HURDLES §H7.2)
 

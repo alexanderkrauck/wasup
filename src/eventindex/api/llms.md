@@ -97,11 +97,14 @@ excluded - use sparingly, most events have estimated attributes only).
 
 `tags`: all jointly desired 1-3-word activity/topic/format/atmosphere concepts
 in one list. They match the one confidence-bearing event-tag collection with
-a calibrated local multilingual model. Each requested concept gets its own
-best match and the concept scores are averaged; one excellent tag cannot hide
-a missing second concept. They rank softly by default. Set `min_tag_match`
-only when the combined concepts are a hard requirement; exact exclusions
-never use embeddings.
+a calibrated local multilingual model. Each requested concept keeps its own
+evidence. Multi-concept requests average the two strongest supporting tags and
+give half the score to an order-invariant joint phrase, which suppresses
+single-tag embedding hubs and disambiguates senses such as salsa food versus
+salsa dance. The returned `joint=true` evidence row makes that contribution
+visible. They rank softly by default. Set `min_tag_match` only when the
+combined concepts are a hard requirement; exact exclusions never use
+embeddings.
 
 Fine print an agent should know:
 - Windows use overlap semantics: anything still running at `from` matches

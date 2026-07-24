@@ -96,12 +96,21 @@ class EventScale(_Output):
     basis: list[str]
 
 
+class TagSupport(_Output):
+    score: float
+    event_tag: str
+    tag_confidence: float
+    relatedness: float
+
+
 class TagConceptMatch(_Output):
     query: str
     score: float
     event_tag: str | None
     tag_confidence: float | None
     relatedness: float
+    supports: list[TagSupport] = Field(default_factory=list)
+    joint: bool = False
 
 
 class EventTag(_Output):
@@ -398,7 +407,11 @@ def search_events(
     Make one call for the whole request. Put a literal event-title word in
     `name`; put literal organizer, venue, and reporting-source names in their
     own filters; put every jointly desired activity/topic/format/atmosphere concept in the
-    single `tags` list. Tags are soft by default and jointly scored.
+    single `tags` list. Tags are soft by default and jointly scored. With two
+    or three concepts the response also shows a `joint=true` context match:
+    it disambiguates phrases such as salsa+dance from salsa food, while two
+    supporting event tags prevent one accidental embedding neighbour from
+    dominating the result.
     Set `min_tag_match` only for an explicit must/only requirement.
 
     Hard versus soft examples:

@@ -13,9 +13,12 @@ Date: 2026-07-24
   and venue names have their own hard filters. A reporting source has its own
   hard `source` filter, so `source="WKO"` composes cleanly with
   `tags=["startup"]` even when the event omitted its organizer.
-- Desired tags are a composition, not alternatives. Every desired concept gets
-  its own best certainty-weighted semantic match and the concept scores are
-  averaged. `min_tag_match` is the explicit hard threshold over that aggregate.
+- Desired tags are a composition, not alternatives. Every desired concept
+  retains certainty-weighted evidence. Multi-concept queries average two
+  supporting tags per concept and devote half the score to an order-invariant
+  joint phrase, preventing one embedding hub from dominating and resolving
+  word senses such as salsa food versus salsa dance. `min_tag_match` is the
+  explicit hard threshold over that aggregate.
 - Public, non-login facts that a human can find are pipeline requirements.
   Missing price, venue, booking link, or confirmed time triggers generic detail
   and public-web recovery. Recovered facts remain append-only claims with the
@@ -53,18 +56,25 @@ MCP `search`/`fetch` pair remains only because connector hosts require that
 document-search contract; both it and `search_events` use the same event-first
 candidate core.
 
-For each desired concept `q`:
+For each desired concept `q` in a multi-concept request:
 
 ```text
-concept_score(q) =
-    max(event_tag_confidence × calibrated_relatedness(q, event_tag))
+concept_score(q) = mean(top 2 (
+    event_tag_confidence × calibrated_relatedness(q, event_tag)))
 
-tag_match = weighted_mean(concept_score(q) for every desired q)
+joint_score = mean(top 2 (
+    event_tag_confidence × calibrated_relatedness(
+        sorted desired concepts as one phrase, event_tag)))
+
+tag_match = 0.5 × mean(concept_score(q)) + 0.5 × joint_score
 ```
 
-The existing monotonic sigmoid remains the nonlinear cosine calibration. It
-widens the model's compressed similarity range without changing its ordering.
-Exact tag equality remains relatedness 1.
+The joint phrase applies to two or three desired concepts. Single-concept
+requests retain the original best-match behavior; longer lists retain
+per-concept composition without truncating their intent. The existing
+monotonic sigmoid remains the nonlinear cosine calibration. It widens the
+model's compressed similarity range without changing its ordering. Exact tag
+equality remains relatedness 1.
 
 Soft price and scale fields join the existing importance × certainty model.
 Hard price uses `max_price`/`is_free`; hard scale uses a stated participant

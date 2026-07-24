@@ -2,6 +2,7 @@ import math
 import uuid
 
 import numpy as np
+import pytest
 
 from eventindex import embeddings, tags
 
@@ -101,11 +102,76 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
     matches = tags.semantic_matches(
         conn, [both_id, dance_only_id], ["dance", "elegant"]
     )
-    assert matches[both_id]["score"] == 0.75
-    assert matches[dance_only_id]["score"] == 0.45
+    # With no semantic vector evidence the exact individual concepts retain
+    # half the score and the unavailable joint context contributes zero.
+    assert matches[both_id]["score"] == 0.375
+    assert matches[dance_only_id]["score"] == 0.225
     assert [m["query"] for m in matches[both_id]["concepts"]] == [
-        "dance", "elegant"
+        "dance", "elegant", "dance + elegant"
     ]
+    assert matches[both_id]["concepts"][-1]["joint"] is True
+
+
+def test_joint_context_rejects_embedding_hubs_and_word_sense(conn):
+    formal_id = _event(conn, "Graduation Ball")
+    sports_id = _event(conn, "Ball Sports Training")
+    salsa_id = _event(conn, "Salsa Social")
+    sauce_id = _event(conn, "Salsa Cooking")
+    event_tags = {
+        formal_id: [
+            ("formal dance", 0.6), ("maturaball", 0.7),
+            ("formal attire", 0.35),
+        ],
+        sports_id: [
+            ("ballsport", 0.8), ("fortbildung", 0.8), ("bewegung", 0.4),
+        ],
+        salsa_id: [("salsa", 0.8), ("dance", 0.8), ("social dance", 0.6)],
+        sauce_id: [("kulinarik", 0.8), ("food", 0.8), ("cooking", 0.6)],
+    }
+    for event_id, values in event_tags.items():
+        for name, confidence in values:
+            tags.upsert(conn, event_id, name, confidence, "inferred")
+    embeddings.store_missing(
+        conn, [name for values in event_tags.values() for name, _ in values]
+    )
+
+    ball_scores = tags.semantic_scores(
+        conn, [formal_id, sports_id], ["dance", "elegant"]
+    )
+    salsa_scores = tags.semantic_scores(
+        conn, [salsa_id, sauce_id], ["salsa", "dance"]
+    )
+    reverse_score = tags.semantic_scores(
+        conn, [formal_id], ["elegant", "dance"]
+    )[formal_id]
+
+    assert ball_scores[formal_id] > ball_scores[sports_id]
+    assert salsa_scores[salsa_id] > salsa_scores[sauce_id]
+    assert reverse_score == pytest.approx(ball_scores[formal_id])
+
+
+def test_multi_tag_sql_threshold_uses_the_displayed_rounded_score(conn):
+    event_id = _event(conn, "Elegant Dance")
+    for name, confidence in [
+        ("formal dance", 0.6), ("maturaball", 0.7), ("formal attire", 0.35),
+    ]:
+        tags.upsert(conn, event_id, name, confidence, "inferred")
+    embeddings.store_missing(
+        conn, ["formal dance", "maturaball", "formal attire"]
+    )
+    score = tags.semantic_scores(
+        conn, [event_id], ["dance", "elegant"]
+    )[event_id]
+    params = {}
+    condition, _ = tags.semantic_threshold_sql(
+        ["dance", "elegant"], round(score, 4), params, prefix="rounded_tag"
+    )
+
+    rows = conn.execute(
+        f"SELECT e.id FROM event e WHERE {condition}", params
+    ).fetchall()
+
+    assert {row["id"] for row in rows} == {event_id}
 
 
 def test_semantic_threshold_runs_before_sql_limit(conn, monkeypatch):

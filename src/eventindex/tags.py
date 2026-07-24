@@ -11,6 +11,8 @@ MAX_TAGS_PER_EVENT = 16
 MAX_DESIRED_TAGS = 8
 MAX_TAG_WORDS = 3
 MAX_TAG_LENGTH = 60
+MULTI_CONCEPT_SUPPORTS = 2
+MAX_JOINT_CONCEPTS = 3
 
 
 def clean_name(value: str) -> str | None:
@@ -62,6 +64,29 @@ def clean_desired(values: Iterable[str]) -> list[str]:
     if len(cleaned) > MAX_DESIRED_TAGS:
         raise ValueError(f"at most {MAX_DESIRED_TAGS} tag concepts are allowed")
     return cleaned
+
+
+def _query_specs(desired: list[str]) -> list[dict]:
+    """Requested concepts plus one order-invariant joint context.
+
+    Short embeddings are good at broad relatedness but single words are
+    polysemous (live examples: salsa sauce versus salsa dance) and can be
+    embedding hubs. For two or three requested concepts, the combined phrase
+    supplies the missing word sense. It receives half of the final weight;
+    the individual concepts retain the other half and their own evidence.
+    """
+    specs = [
+        {"query": name, "embedding_text": name, "weight": 1, "joint": False}
+        for name in desired
+    ]
+    if 1 < len(desired) <= MAX_JOINT_CONCEPTS:
+        specs.append({
+            "query": " + ".join(desired),
+            "embedding_text": " ".join(sorted(desired)),
+            "weight": len(desired),
+            "joint": True,
+        })
+    return specs
 
 
 def upsert(tx, event_id: UUID, name: str, confidence: float, origin: str) -> None:
@@ -144,14 +169,19 @@ def semantic_matches(
 ) -> dict[UUID, dict]:
     """Joint concept coverage with per-concept evidence for agent responses.
 
-    Every requested concept gets its own best event-tag match. Averaging those
-    concept scores makes ["dance", "elegant"] a composition rather than an OR.
+    Every requested concept retains its own confidence-bearing evidence.
+    Multi-concept queries average the two strongest supporting event tags
+    instead of trusting one accidental embedding neighbour, then devote half
+    the score to an order-invariant joint phrase that disambiguates word sense.
     """
     event_ids = list(dict.fromkeys(event_ids))
     desired = clean_desired(desired)
     if not event_ids or not desired:
         return {}
-    vectors = embeddings.embed_tags(desired)
+    specs = _query_specs(desired)
+    vectors = embeddings.embed_tags([
+        spec["embedding_text"] for spec in specs
+    ])
     params: dict = {"event_ids": event_ids}
     sim_columns = []
     for index, vector in enumerate(vectors):
@@ -167,40 +197,64 @@ def semantic_matches(
           "AND te.model = %(model)s WHERE et.event_id = ANY(%(event_ids)s)",
         params | {"model": embeddings.MODEL_VERSION},
     ).fetchall()
-    best: dict[UUID, list[dict]] = {
+    evidence: dict[UUID, list[list[dict]]] = {
         event_id: [
-            {
-                "query": query, "score": 0.0, "event_tag": None,
-                "tag_confidence": None, "relatedness": 0.0,
-            }
-            for query in desired
+            [] for _ in specs
         ]
         for event_id in event_ids
     }
     for row in rows:
-        for index, query in enumerate(desired):
-            if row["name"] == query:
+        for index, spec in enumerate(specs):
+            if row["name"] == spec["embedding_text"]:
                 relatedness = 1.0
             elif row[f"sim_{index}"] is None:
                 relatedness = 0.0
             else:
                 relatedness = embeddings.calibrated_relatedness(row[f"sim_{index}"])
             score = float(row["confidence"]) * relatedness
-            if score > best[row["event_id"]][index]["score"]:
-                best[row["event_id"]][index] = {
-                    "query": query,
-                    "score": score,
-                    "event_tag": row["name"],
-                    "tag_confidence": float(row["confidence"]),
-                    "relatedness": relatedness,
-                }
-    return {
-        event_id: {
-            "score": sum(item["score"] for item in concepts) / len(concepts),
+            if score <= 0:
+                continue
+            evidence[row["event_id"]][index].append({
+                "score": score,
+                "event_tag": row["name"],
+                "tag_confidence": float(row["confidence"]),
+                "relatedness": relatedness,
+            })
+
+    support_limit = 1 if len(desired) == 1 else MULTI_CONCEPT_SUPPORTS
+    result = {}
+    for event_id, by_spec in evidence.items():
+        concepts = []
+        for spec, candidates in zip(specs, by_spec):
+            supports = sorted(
+                candidates,
+                key=lambda item: (-item["score"], item["event_tag"]),
+            )[:support_limit]
+            score = (
+                sum(item["score"] for item in supports) / len(supports)
+                if supports else 0.0
+            )
+            best = supports[0] if supports else {
+                "event_tag": None, "tag_confidence": None, "relatedness": 0.0,
+            }
+            concepts.append({
+                "query": spec["query"],
+                "score": score,
+                "event_tag": best["event_tag"],
+                "tag_confidence": best["tag_confidence"],
+                "relatedness": best["relatedness"],
+                "supports": supports,
+                "joint": spec["joint"],
+            })
+        total_weight = sum(spec["weight"] for spec in specs)
+        result[event_id] = {
+            "score": sum(
+                concept["score"] * spec["weight"]
+                for concept, spec in zip(concepts, specs)
+            ) / total_weight,
             "concepts": concepts,
         }
-        for event_id, concepts in best.items()
-    }
+    return result
 
 
 def semantic_scores(
@@ -226,12 +280,15 @@ def semantic_threshold_sql(
     desired = clean_desired(desired)
     if not desired:
         return "FALSE", desired
-    vectors = embeddings.embed_tags(desired)
+    specs = _query_specs(desired)
+    vectors = embeddings.embed_tags([
+        spec["embedding_text"] for spec in specs
+    ])
     relations = []
-    for index, (name, vector) in enumerate(zip(desired, vectors)):
+    for index, (spec, vector) in enumerate(zip(specs, vectors)):
         name_key = f"{prefix}_name_{index}"
         vector_key = f"{prefix}_vector_{index}"
-        params[name_key] = name
+        params[name_key] = spec["embedding_text"]
         params[vector_key] = embeddings.vector_literal(vector)
         relations.append(
             "CASE WHEN et.name = %({name})s THEN 1.0 "
@@ -249,16 +306,31 @@ def semantic_threshold_sql(
     match_key = f"{prefix}_min_match"
     params[model_key] = embeddings.MODEL_VERSION
     params[match_key] = min_match
-    concept_scores = [
-        f"coalesce(max(et.confidence * ({relation})), 0.0)"
-        for relation in relations
+    support_limit = 1 if len(desired) == 1 else MULTI_CONCEPT_SUPPORTS
+    score_arrays = [
+        "array_agg(et.confidence * ({relation}) "
+        "ORDER BY et.confidence * ({relation}) DESC) "
+        "FILTER (WHERE et.confidence * ({relation}) > 0) "
+        "AS scores_{index}".format(
+            relation=relation, index=index,
+        )
+        for index, relation in enumerate(relations)
     ]
+    concept_scores = [
+        "coalesce((SELECT avg(value) FROM "
+        f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
+        for index in range(len(relations))
+    ]
+    weighted_score = " + ".join(
+        f"({score}) * {spec['weight']}"
+        for score, spec in zip(concept_scores, specs)
+    )
+    total_weight = sum(spec["weight"] for spec in specs)
     return (
-        "(SELECT (" + " + ".join(concept_scores) + f") / {len(relations)} "
-        "FROM event_tag et "
-        "LEFT JOIN tag_embedding te ON te.name = et.name "
-        f"AND te.model = %({model_key})s "
-        "WHERE et.event_id = e.id) "
+        "(SELECT round(((" + weighted_score + f") / {total_weight})::numeric, 4) "
+        "FROM (SELECT " + ", ".join(score_arrays) + " "
+        "FROM event_tag et LEFT JOIN tag_embedding te ON te.name = et.name "
+        f"AND te.model = %({model_key})s WHERE et.event_id = e.id) ranked) "
         + f">= %({match_key})s",
         desired,
     )

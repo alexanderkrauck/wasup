@@ -84,6 +84,24 @@ def test_confidence_cap_is_code_not_model_discipline(conn, event_row, monkeypatc
     monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment(0.99))
     attrs = enrich_event(conn, event_row)
     assert attrs["age_min"]["confidence"] == 0.8
+    assert attrs["newcomer_friendly"]["confidence"] == 0.35
+    assert attrs["solo_friendly"]["confidence"] == 0.35
+
+
+def test_unsupported_tag_certainty_is_capped_at_prior_tier(
+    conn, event_row, monkeypatch,
+):
+    raw = _fake_enrichment().model_dump()
+    raw["tags"][3]["confidence"] = 0.8
+    raw["tags"][3]["evidence"] = None
+    monkeypatch.setattr(
+        en.llm, "complete", lambda *a, **k: Enrichment.model_validate(raw)
+    )
+
+    attrs = enrich_event(conn, event_row)
+
+    dance = next(tag for tag in attrs["tags"] if tag["name"] == "dance")
+    assert dance["confidence"] == 0.35
 
 
 def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):

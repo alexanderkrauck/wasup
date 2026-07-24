@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from eventindex import config, llm, tags as tag_store
 
 CONFIDENCE_CAP = 0.8
+PRIOR_CONFIDENCE_CAP = 0.35
 # Confidence tiers (Alexander 2026-07-06: ALWAYS estimate; confidence says
 # how much it's a guess): ~0.2 pure world-knowledge guess, ~0.35 typical for
 # this kind of event, up to 0.8 with explicit textual evidence.
@@ -149,7 +150,7 @@ class Enrichment(BaseModel):
 
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
@@ -291,6 +292,10 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
     for entry in attributes.values():  # the cap is code, not model discipline
         if isinstance(entry, dict) and "confidence" in entry:
             entry["confidence"] = min(entry["confidence"], CONFIDENCE_CAP)
+            if entry.get("evidence") is None:
+                entry["confidence"] = min(
+                    entry["confidence"], PRIOR_CONFIDENCE_CAP
+                )
     _sanity_clamp(
         attributes,
         " ".join([
@@ -337,6 +342,10 @@ def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
         )
     for tag in attributes["tags"]:
         tag["confidence"] = min(tag["confidence"], CONFIDENCE_CAP)
+        if tag.get("evidence") is None:
+            tag["confidence"] = min(
+                tag["confidence"], PRIOR_CONFIDENCE_CAP
+            )
     language = attributes.get("language", {})
     if language.get("value") not in {"de", "en", "other", None}:
         language["value"] = None

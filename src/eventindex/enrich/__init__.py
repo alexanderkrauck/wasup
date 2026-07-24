@@ -150,7 +150,7 @@ class Enrichment(BaseModel):
 
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
@@ -231,6 +231,9 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "best estimate. Every queryable audience attribute must have a value "
         "and every estimate/tag must have confidence greater than zero; never "
         "use null or zero confidence to mean 'not sure'. "
+        "Evidence must be an exact, contiguous substring copied from TITLE, "
+        "DESCRIPTION, VENUE, or PRICE, never an explanation or absence-of-"
+        "evidence rationale; use null when no such quote exists. "
         "Confidence encodes how much it is a guess: "
         f"~{GUESS_CONFIDENCE} = pure world-knowledge guess, ~0.35 = typical "
         "for this kind of event (use the category prior if given), up to "
@@ -301,6 +304,9 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         " ".join([
             event.get("title") or "",
             (event.get("description") or "")[:DESCRIPTION_CHARS],
+            event.get("venue_name") or "",
+            str(event.get("price_min") or ""),
+            str(event.get("price_max") or ""),
         ]),
     )
     tx.execute(
@@ -322,6 +328,16 @@ def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
     hi = attributes.get("age_max", {}).get("value")
     if lo is None or hi is None or not (0 <= lo <= hi <= 100):
         raise ValueError("invalid age range")
+    source_folded = source_text.casefold()
+    for entry in attributes.values():
+        if not isinstance(entry, dict) or "confidence" not in entry:
+            continue
+        evidence = str(entry.get("evidence") or "").strip()
+        if evidence and evidence.casefold() not in source_folded:
+            entry["evidence"] = None
+            entry["confidence"] = min(
+                entry["confidence"], PRIOR_CONFIDENCE_CAP
+            )
     scale = attributes.get("event_scale", {})
     estimate = scale.get("estimated_participants")
     low, high = scale.get("plausible_min"), scale.get("plausible_max")
@@ -342,6 +358,9 @@ def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
         )
     for tag in attributes["tags"]:
         tag["confidence"] = min(tag["confidence"], CONFIDENCE_CAP)
+        evidence = str(tag.get("evidence") or "").strip()
+        if evidence and evidence.casefold() not in source_folded:
+            tag["evidence"] = None
         if tag.get("evidence") is None:
             tag["confidence"] = min(
                 tag["confidence"], PRIOR_CONFIDENCE_CAP

@@ -52,13 +52,13 @@ def event_row(conn):
     conn.execute(
         "INSERT INTO event (id, kind, title, description, category, "
         "confidence, status) VALUES (%s, 'one_off', "
-        "'Studentenparty im Keller', 'Eintritt 12 EUR', '{nightlife}', "
+        "'Studentenparty im Keller', 'Eintritt 12 EUR im Kellerclub', '{nightlife}', "
         "0.8, 'confirmed')",
         (event_id,),
     )
     return {
         "id": event_id, "title": "Studentenparty im Keller",
-        "description": "Eintritt 12 EUR",
+        "description": "Eintritt 12 EUR im Kellerclub",
         "category": ["nightlife"], "venue_name": "Kellerclub",
         "price_min": None, "price_max": None,
     }
@@ -102,6 +102,28 @@ def test_unsupported_tag_certainty_is_capped_at_prior_tier(
 
     dance = next(tag for tag in attrs["tags"] if tag["name"] == "dance")
     assert dance["confidence"] == 0.35
+
+
+def test_explanatory_non_quote_does_not_unlock_high_certainty(
+    conn, event_row, monkeypatch,
+):
+    raw = _fake_enrichment().model_dump()
+    raw["sex_service_context"] = {
+        "value": False,
+        "confidence": 0.8,
+        "evidence": "no indication of commercial sex services",
+    }
+    monkeypatch.setattr(
+        en.llm, "complete", lambda *a, **k: Enrichment.model_validate(raw)
+    )
+
+    attrs = enrich_event(conn, event_row)
+
+    assert attrs["sex_service_context"] == {
+        "value": False,
+        "confidence": 0.35,
+        "evidence": None,
+    }
 
 
 def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):

@@ -102,10 +102,12 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
     matches = tags.semantic_matches(
         conn, [both_id, dance_only_id], ["dance", "elegant"]
     )
-    # With no semantic vector evidence, exact requested-concept coverage
-    # distinguishes both concepts from a one-concept partial match.
-    assert matches[both_id]["score"] == pytest.approx(0.525)
-    assert matches[dance_only_id]["score"] == pytest.approx(0.315)
+    # Exact evidence keeps its full certainty. Harmonic coverage makes a
+    # missing desired concept score zero instead of letting "dance" substitute
+    # for "elegant"; absent joint context applies only its bounded 10% penalty.
+    harmonic = 2 / (1 / 0.8 + 1 / 0.7)
+    assert matches[both_id]["score"] == pytest.approx(0.9 * harmonic)
+    assert matches[dance_only_id]["score"] == 0
     assert [m["query"] for m in matches[both_id]["concepts"]] == [
         "dance", "elegant", "dance + elegant"
     ]

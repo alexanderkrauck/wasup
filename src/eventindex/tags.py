@@ -13,8 +13,7 @@ MAX_TAG_WORDS = 3
 MAX_TAG_LENGTH = 60
 MULTI_CONCEPT_SUPPORTS = 2
 MAX_JOINT_CONCEPTS = 3
-MULTI_SEMANTIC_WEIGHT = 0.6
-MULTI_EXACT_COVERAGE_WEIGHT = 0.4
+JOINT_CONTEXT_WEIGHT = 0.1
 
 
 def clean_name(value: str) -> str | None:
@@ -74,18 +73,17 @@ def _query_specs(desired: list[str]) -> list[dict]:
     Short embeddings are good at broad relatedness but single words are
     polysemous (live examples: salsa sauce versus salsa dance) and can be
     embedding hubs. For two or three requested concepts, the combined phrase
-    supplies the missing word sense. It receives half of the final weight;
-    the individual concepts retain the other half and their own evidence.
+    supplies the missing word sense. It may confirm or reduce joint coverage,
+    but cannot compensate for a weak requested concept.
     """
     specs = [
-        {"query": name, "embedding_text": name, "weight": 1, "joint": False}
+        {"query": name, "embedding_text": name, "joint": False}
         for name in desired
     ]
     if 1 < len(desired) <= MAX_JOINT_CONCEPTS:
         specs.append({
             "query": " + ".join(desired),
             "embedding_text": " ".join(sorted(desired)),
-            "weight": len(desired),
             "joint": True,
         })
     return specs
@@ -172,11 +170,12 @@ def semantic_matches(
     """Joint concept coverage with per-concept evidence for agent responses.
 
     Every requested concept retains its own confidence-bearing evidence.
-    Multi-concept queries average the two strongest supporting event tags
-    instead of trusting one accidental embedding neighbour. The semantic
-    composition is blended with exact requested-concept coverage: symmetric
-    embeddings know that salsa and dance are related, but exact evidence is
-    what distinguishes "salsa" from an arbitrary kind of dance.
+    Non-exact concepts average the two strongest supporting event tags instead
+    of trusting one accidental embedding neighbour; exact evidence keeps its
+    full certainty. Requested concepts combine with a harmonic mean, which
+    nonlinearly penalizes a weak concept instead of letting another substitute
+    for it. Joint-phrase context can confirm or reduce that coverage, never
+    inflate it.
     """
     event_ids = list(dict.fromkeys(event_ids))
     desired = clean_desired(desired)
@@ -237,12 +236,16 @@ def semantic_matches(
     result = {}
     for event_id, by_spec in evidence.items():
         concepts = []
-        for spec, candidates in zip(specs, by_spec):
+        for index, (spec, candidates) in enumerate(zip(specs, by_spec)):
             supports = sorted(
                 candidates,
                 key=lambda item: (-item["score"], item["event_tag"]),
             )[:support_limit]
-            score = (
+            exact = (
+                exact_confidences[event_id][index]
+                if not spec["joint"] else 0.0
+            )
+            score = exact or (
                 sum(item["score"] for item in supports) / len(supports)
                 if supports else 0.0
             )
@@ -258,18 +261,27 @@ def semantic_matches(
                 "supports": supports,
                 "joint": spec["joint"],
             })
-        total_weight = sum(spec["weight"] for spec in specs)
-        semantic_score = sum(
-            concept["score"] * spec["weight"]
-            for concept, spec in zip(concepts, specs)
-        ) / total_weight
-        exact_coverage = sum(exact_confidences[event_id]) / len(desired)
+        individual_scores = [
+            concept["score"] for concept in concepts[:len(desired)]
+        ]
+        if len(desired) == 1:
+            semantic_score = individual_scores[0]
+        elif any(score <= 0 for score in individual_scores):
+            semantic_score = 0.0
+        else:
+            coverage = len(individual_scores) / sum(
+                1.0 / score for score in individual_scores
+            )
+            if len(specs) > len(desired):
+                joint_score = concepts[-1]["score"]
+                semantic_score = (
+                    (1 - JOINT_CONTEXT_WEIGHT) * coverage
+                    + JOINT_CONTEXT_WEIGHT * min(coverage, joint_score)
+                )
+            else:
+                semantic_score = coverage
         result[event_id] = {
-            "score": (
-                MULTI_SEMANTIC_WEIGHT * semantic_score
-                + MULTI_EXACT_COVERAGE_WEIGHT * exact_coverage
-                if len(desired) > 1 else semantic_score
-            ),
+            "score": semantic_score,
             "concepts": concepts,
         }
     return result
@@ -340,29 +352,36 @@ def semantic_threshold_sql(
         f"AS exact_{index}"
         for index in range(len(desired))
     ]
-    concept_scores = [
-        "coalesce((SELECT avg(value) FROM "
-        f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
-        for index in range(len(relations))
-    ]
-    weighted_score = " + ".join(
-        f"({score}) * {spec['weight']}"
-        for score, spec in zip(concept_scores, specs)
-    )
-    total_weight = sum(spec["weight"] for spec in specs)
-    semantic_score = f"(({weighted_score}) / {total_weight})"
-    if len(desired) > 1:
-        exact_coverage = (
-            "(" + " + ".join(
-                f"exact_{index}" for index in range(len(desired))
-            ) + f") / {len(desired)}"
+    concept_scores = []
+    for index in range(len(relations)):
+        averaged = (
+            "coalesce((SELECT avg(value) FROM "
+            f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
         )
-        final_score = (
-            f"{MULTI_SEMANTIC_WEIGHT} * {semantic_score} + "
-            f"{MULTI_EXACT_COVERAGE_WEIGHT} * ({exact_coverage})"
+        concept_scores.append(
+            f"CASE WHEN exact_{index} > 0 THEN exact_{index} ELSE {averaged} END"
+            if index < len(desired) else averaged
         )
+    if len(desired) == 1:
+        final_score = concept_scores[0]
     else:
-        final_score = semantic_score
+        individual_scores = concept_scores[:len(desired)]
+        any_zero = " OR ".join(f"({score}) <= 0" for score in individual_scores)
+        reciprocal_sum = " + ".join(
+            f"(1.0 / ({score}))" for score in individual_scores
+        )
+        coverage = (
+            f"CASE WHEN {any_zero} THEN 0.0 ELSE "
+            f"{len(desired)}::float / ({reciprocal_sum}) END"
+        )
+        if len(specs) > len(desired):
+            joint_score = concept_scores[-1]
+            final_score = (
+                f"(1 - {JOINT_CONTEXT_WEIGHT}) * ({coverage}) + "
+                f"{JOINT_CONTEXT_WEIGHT} * least(({coverage}), ({joint_score}))"
+            )
+        else:
+            final_score = coverage
     return (
         "(SELECT round((" + final_score + ")::numeric, 4) "
         "FROM (SELECT " + ", ".join(score_arrays + exact_columns) + " "

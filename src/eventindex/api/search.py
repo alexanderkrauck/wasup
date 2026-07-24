@@ -51,14 +51,18 @@ def _radius_m(radius: str) -> float:
 UNKNOWN_PRIOR = 0.45
 ENUM_CONFIDENCE = 0.5  # legacy energy/interaction values lack own confidence
 
-# the soft-queryable audience attributes; also the valid names for
-# required_attributes and importance. Must stay in lockstep with ATTRIBUTES
-# below (pinned by test) - note "age" here vs age_min/age_max filter fields.
+# The soft-queryable attributes and the valid names for importance. Tags share
+# the same certainty-aware ranking surface even though they are stored in
+# event_tag rather than ATTRIBUTES.
 SOFT_ATTRIBUTES = frozenset({
     "age", "gender_split_min", "kid_friendly", "newcomer_friendly",
     "outdoor", "energy", "language", "solo_friendly", "interaction_structure",
-    "sex_service_context",
+    "sex_service_context", "price", "event_scale", "tags",
 })
+
+# Hard-required attributes are deliberately narrower. Price already has the
+# exact-fact max_price/is_free contract, while tags have min_tag_match.
+REQUIRED_ATTRIBUTES = SOFT_ATTRIBUTES - {"price", "tags"}
 
 
 class SearchFilters(BaseModel):
@@ -98,12 +102,25 @@ class SearchFilters(BaseModel):
                 f"valid: {sorted(config.CATEGORIES)}"
             )
         return v
-    exclude_terms: list[str] = Field(description="words that must NOT appear in title/tags/venue - hard guarantee")
-    include_terms: list[str] = Field(
-        description="synonym set of which at least ONE must appear in "
-        "title/tags/venue name (word-prefix/suffix match) - hard filter for "
-        "a literal title, venue, or organizer name such as ['factory300']; "
-        "activity/topic concepts belong in tags"
+    exclude_terms: list[str] = Field(
+        description="words that must NOT appear in title/tags/venue; hard "
+        "guarantee, so unknown never counts as excluded")
+    name: str | None = Field(
+        description="literal event-title search, including German compound "
+        "suffixes: 'ball' matches 'Maturaball' but not 'Ballett'. This is a "
+        "hard candidate filter. Put activities, topics, format, atmosphere, "
+        "and audience concepts in tags instead"
+    )
+    organizer: str | None = Field(
+        description="literal organizer-name substring; hard candidate filter. "
+        "Example: organizer='WKO' with tags=['startup']"
+    )
+    venue: str | None = Field(
+        description="literal venue-name substring; hard candidate filter"
+    )
+    source: str | None = Field(
+        description="literal reporting-source name or URL substring; hard "
+        "candidate filter. Example: source='WKO' with tags=['startup']"
     )
     age_min: int | None
     age_max: int | None
@@ -111,8 +128,16 @@ class SearchFilters(BaseModel):
         description="0=all male..1=all female; 'mostly women'/'at least half "
         "women' -> 0.5; null unless the query implies audience gender mix"
     )
-    max_price: float | None
-    is_free: bool | None
+    max_price: float | None = Field(
+        description="hard maximum stated price in EUR; events whose price is "
+        "unknown or merely estimated do not match. Use preferred_max_price "
+        "when the user says ideally/preferably")
+    preferred_max_price: float | None = Field(
+        description="soft preferred maximum price in EUR; stated and estimated "
+        "prices rank by their confidence and unknown stays visible")
+    is_free: bool | None = Field(
+        description="true is a hard explicitly-free requirement; unknown and "
+        "estimated-free events do not match")
     kid_friendly: bool | None
     newcomer_friendly: bool | None
     outdoor: bool | None
@@ -126,6 +151,14 @@ class SearchFilters(BaseModel):
     )
     energy: Literal["low", "medium", "high"] | None
     language: Literal["de", "en"] | None
+    participant_count_min: int | None = Field(
+        description="soft preferred minimum estimated participant count; use "
+        "required_attributes=['event_scale'] only when the user says it must "
+        "be at least this large")
+    participant_count_max: int | None = Field(
+        description="soft preferred maximum estimated participant count; use "
+        "required_attributes=['event_scale'] only when the user makes it a "
+        "hard limit")
     sex_service_context: bool | None = Field(
         description="event at a commercial sex establishment (Bordell, "
         "strip club, swinger club) - NOT mere 18+ nightlife. On the public "
@@ -137,16 +170,18 @@ class SearchFilters(BaseModel):
         description="attribute names the user makes NON-NEGOTIABLE "
         "('unbedingt', 'muss') - enforced as hard filters instead of "
         "preferences; from: age, gender_split_min, kid_friendly, "
-        "newcomer_friendly, outdoor, energy, language"
+        "newcomer_friendly, outdoor, energy, language, solo_friendly, "
+        "interaction_structure, sex_service_context, event_scale"
     )
 
     @field_validator("required_attributes")
     @classmethod
     def _known_attributes(cls, v: list[str]) -> list[str]:
-        unknown = set(v) - SOFT_ATTRIBUTES
+        unknown = set(v) - REQUIRED_ATTRIBUTES
         if unknown:
             raise ValueError(
-                f"unknown attributes {sorted(unknown)}; valid: {sorted(SOFT_ATTRIBUTES)}"
+                f"unknown attributes {sorted(unknown)}; "
+                f"valid: {sorted(REQUIRED_ATTRIBUTES)}"
             )
         return v
     tags: list[str] = Field(
@@ -186,6 +221,20 @@ class SearchFilters(BaseModel):
         if (self.age_min is not None and self.age_max is not None
                 and self.age_min > self.age_max):
             raise ValueError("age_min is greater than age_max")
+        if (self.participant_count_min is not None
+                and self.participant_count_max is not None
+                and self.participant_count_min > self.participant_count_max):
+            raise ValueError(
+                "participant_count_min is greater than participant_count_max"
+            )
+        if self.max_price is not None and self.max_price < 0:
+            raise ValueError("max_price must be non-negative")
+        if self.preferred_max_price is not None and self.preferred_max_price < 0:
+            raise ValueError("preferred_max_price must be non-negative")
+        for field in ("name", "organizer", "venue", "source"):
+            value = getattr(self, field)
+            if value is not None:
+                setattr(self, field, " ".join(value.split())[:120] or None)
         if self.near is not None:
             try:
                 lat, lon = (float(x) for x in self.near.split(","))
@@ -203,12 +252,15 @@ class SearchFilters(BaseModel):
 # partial bodies; these defaults fill the gaps.
 FILTER_DEFAULTS: dict = {
     "from_dt": None, "to_dt": None, "categories": None,
-    "exclude_categories": [], "exclude_terms": [], "include_terms": [],
+    "exclude_categories": [], "exclude_terms": [], "name": None,
+    "organizer": None, "venue": None, "source": None,
     "age_min": None,
     "age_max": None, "gender_split_min": None, "max_price": None,
+    "preferred_max_price": None,
     "is_free": None, "kid_friendly": None, "newcomer_friendly": None,
     "outdoor": None, "solo_friendly": None, "interaction_structure": None,
     "energy": None, "language": None, "sex_service_context": None,
+    "participant_count_min": None, "participant_count_max": None,
     "required_attributes": [], "tags": [], "min_tag_match": None,
     "near": None, "radius": None,
 }
@@ -222,10 +274,9 @@ QueryBody = create_model(
     **{name: (f.annotation, Field(FILTER_DEFAULTS[name], description=f.description))
        for name, f in SearchFilters.model_fields.items()},
     importance=(dict[str, float], Field(
-        {}, description="0..1 weight per soft attribute "
-        "(age, gender_split_min, kid_friendly, newcomer_friendly, outdoor, "
-        "energy, language); default 1.0 each. Combined with each event's "
-        "stored certainty into match_score - see /llms.txt")),
+        {}, description="0..1 weight per soft attribute, including tags, "
+        "price, and event_scale; default 1.0 for every preference the request "
+        "actually supplies. Stored certainty is always part of match_score")),
 )
 
 
@@ -287,6 +338,29 @@ ATTRIBUTES: dict[str, Attribute] = {
         conf_sql="(e.inferred->'language'->>'confidence')::float",
         hard_sql="e.inferred->'language'->>'value' = %({p})s",
     ),
+    "price": Attribute(
+        kind="max_float",
+        value_sql=(
+            "coalesce(e.price_min, "
+            "(e.inferred->'price'->>'min')::float)"
+        ),
+        conf_sql=(
+            "CASE WHEN e.price_min IS NOT NULL THEN coalesce("
+            "(e.field_provenance->'price_min'->>'confidence')::float, 0.8) "
+            "ELSE (e.inferred->'price'->>'confidence')::float END"
+        ),
+        hard_sql="e.price_min <= %({p})s",
+    ),
+    "event_scale": Attribute(
+        kind="range",
+        value_sql="e.expected_attendance",
+        conf_sql="e.expected_attendance_confidence",
+        hard_sql=(
+            "(%({p}min)s::int IS NULL OR e.expected_attendance >= %({p}min)s) "
+            "AND (%({p}max)s::int IS NULL OR "
+            "e.expected_attendance <= %({p}max)s)"
+        ),
+    ),
 }
 
 
@@ -300,6 +374,13 @@ def _wanted(f: SearchFilters) -> dict:
                  "energy", "language", "sex_service_context"):
         if (v := getattr(f, name)) is not None:
             wanted[name] = v
+    if f.preferred_max_price is not None:
+        wanted["price"] = f.preferred_max_price
+    if (f.participant_count_min is not None
+            or f.participant_count_max is not None):
+        wanted["event_scale"] = (
+            f.participant_count_min, f.participant_count_max
+        )
     return wanted
 
 
@@ -332,9 +413,14 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "23:59. No time mentioned = from now, no end.\n"
         "Only set a filter the query actually implies; everything else null/empty. "
         "Negations (nicht/kein/ohne X) go to exclude_*. When the user wants "
-        "a literal title, venue, or organizer, put it in include_terms. Put "
+        "a literal event title, put it in name; literal organizer, venue, and "
+        "reporting-source names have their own fields. Put "
         "activity, topic, format, and mood concepts in tags as concise 1-3 "
         "word phrases; multilingual semantic matching handles translations. "
+        "Put ALL jointly desired concepts in one tags list, never treat them "
+        "as separate searches. max_price/is_free are hard stated-price facts; "
+        "preferred_max_price is soft. participant_count_min/max describe the "
+        "event_scale estimate and are soft unless event_scale is required. "
         "Set min_tag_match only for an explicit must/only requirement.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
@@ -348,7 +434,6 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
 
 def build_sql(
     f: SearchFilters, *, exclude_sex_service_context: bool = False,
-    include_tag_terms: bool = True,
 ) -> tuple[str, dict]:
     """HARD conditions only: guarantees + attributes marked required.
     null attribute = unknown = never matches a hard constraint (§7)."""
@@ -410,35 +495,32 @@ def build_sql(
         )
         params[key] = f"%{term}%"
         params[key + "raw"] = term
-    if f.include_terms:
-        # at least one synonym must appear: word-prefix (\mterm) or compound
-        # suffix (term\M) in the title, or a tag name. Same
-        # boundary semantics as the ranker: "run" != "Führung",
-        # "lauf" == "Orientierungslauf"
+    if f.name:
+        # Event names are title-scoped. Suffix-boundary matching supports
+        # German head-final compounds (Maturaball) without treating Ballett as
+        # a "ball" hit. This regex is mechanical token handling, not semantic
+        # content interpretation; semantic concepts belong in tags.
         import re as _re
 
-        alts = []
-        for i, term in enumerate(f.include_terms):
-            key = f"inc_term_{i}"
-            # venue name included: "events from factory300" names a venue/
-            # organizer, and nothing else in the schema can reach it (a
-            # consumer query came back empty over this, 2026-07-12)
-            alts.append(
-                f"e.title ~* %({key})s "
-                f"OR coalesce(v.name ~* %({key})s, false) "
-                f"OR coalesce(e.organizer ~* %({key})s, false)"
-                + (
-                    f" OR EXISTS (SELECT 1 FROM event_tag et "
-                    f"WHERE et.event_id = e.id AND et.name ~* %({key})s)"
-                    if include_tag_terms else ""
-                )
-            )
-            # multi-word terms tolerate hyphen/compound spelling: 'krone
-            # fest' must find 'Krone-Fest' AND 'Kronefest' (audit B4)
-            pat = r"[-\s]?".join(_re.escape(t) for t in term.split())
-            params[key] = rf"\m{pat}|{pat}\M"
-            params[key + "raw"] = term
-        conditions.append("(" + " OR ".join(alts) + ")")
+        pat = r"[-\s]?".join(_re.escape(t) for t in f.name.split())
+        conditions.append("e.title ~* %(event_name)s")
+        params["event_name"] = rf"{pat}\M"
+    if f.organizer:
+        conditions.append("e.organizer ILIKE %(organizer_name)s")
+        params["organizer_name"] = f"%{f.organizer}%"
+    if f.venue:
+        conditions.append("v.name ILIKE %(venue_name)s")
+        params["venue_name"] = f"%{f.venue}%"
+    if f.source:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM identity src_i "
+            "JOIN event_claim src_c ON src_c.fingerprint = src_i.fingerprint "
+            "JOIN source src_s ON src_s.id = src_c.source_id "
+            "WHERE src_i.event_id = e.id AND src_s.kind <> 'internal' "
+            "AND (src_s.name ILIKE %(source_name)s "
+            "OR src_s.url ILIKE %(source_name)s))"
+        )
+        params["source_name"] = f"%{f.source}%"
     if f.is_free:
         conditions.append("e.price_min = 0")
     elif f.max_price is not None:
@@ -464,6 +546,8 @@ def build_sql(
         conditions.append(attr.hard_sql.format(p=p))
         if attr.kind == "age":
             params[p + "min"], params[p + "max"] = wanted["age"]
+        elif attr.kind == "range":
+            params[p + "min"], params[p + "max"] = wanted[name]
         else:
             params[p] = wanted[name]
     return " AND ".join(conditions), params
@@ -490,6 +574,14 @@ def _satisfaction(row: dict, name: str, want) -> float:
         conf = float(raw_conf) if raw_conf is not None else ENUM_CONFIDENCE
         if attr.kind == "min_float":
             ok = float(value) >= want
+        elif attr.kind == "max_float":
+            ok = float(value) <= want
+        elif attr.kind == "range":
+            lower, upper = want
+            ok = (
+                (lower is None or float(value) >= lower)
+                and (upper is None or float(value) <= upper)
+            )
         else:  # bool, enum
             ok = value == want
     return 0.5 + conf / 2 if ok else 0.5 - conf / 2
@@ -521,14 +613,33 @@ def rank(
     """Rank the allowed set by certainty-aware preferences and unified tags."""
     tag_scores = tag_scores or {}
 
+    soft_attributes = {
+        name: wanted for name, wanted in _wanted(f).items()
+        if name not in f.required_attributes
+    }
+
     def score(row) -> float:
-        s = preference_score(row, f, importance) * (row["confidence"] or 0.0)
+        weighted_scores: list[tuple[float, float]] = []
+        for name, want in soft_attributes.items():
+            weight = (importance or {}).get(name, 1.0)
+            if weight > 0:
+                weighted_scores.append(
+                    (weight, _satisfaction(row, name, want))
+                )
         if f.tags:
             tag_match = float(tag_scores.get(row["event_id"], 0.0))
             row["tag_match"] = round(tag_match, 4)
-            s *= 0.5 + 0.5 * tag_match
+            tag_weight = (importance or {}).get("tags", 1.0)
+            if tag_weight > 0:
+                weighted_scores.append((tag_weight, tag_match))
         else:
             row["tag_match"] = None
+        preference = (
+            sum(weight * value for weight, value in weighted_scores)
+            / sum(weight for weight, _ in weighted_scores)
+            if weighted_scores else 1.0
+        )
+        s = preference * (row["confidence"] or 0.0)
         row["match_score"] = round(s, 4)  # exposed: consumers see the weighting
         return s
 
@@ -538,4 +649,14 @@ def rank(
             pair for pair in scored
             if pair[1]["tag_match"] >= f.min_tag_match
         ]
-    return [row for _, row in sorted(scored, key=lambda pair: pair[0], reverse=True)]
+    return [
+        row for _, row in sorted(
+            scored,
+            key=lambda pair: (
+                -pair[0],
+                pair[1].get("starts_at")
+                or datetime.max.replace(tzinfo=VIENNA),
+                str(pair[1]["event_id"]),
+            ),
+        )
+    ]

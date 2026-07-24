@@ -105,3 +105,26 @@ def test_fetch_blocked_suspects_render():
     text = render(stats, NOW)
     assert "FETCH-BLOCKED SUSPECTS" in text
     assert "Stadionwelt" in text
+
+
+def test_field_completeness_and_hydration_render():
+    stats = _stats(NOW) | {
+        "field_completeness": {
+            "future_events": 100,
+            "stated_price": 25,
+            "any_price": 90,
+            "booking_without_stated_price": 7,
+            "event_scale": 95,
+        },
+        "hydration": {
+            "unresolved": 8,
+            "oldest_unresolved": NOW - timedelta(hours=6),
+            "failed_24h": 2,
+        },
+    }
+    text = render(stats, NOW)
+    assert "stated price: 25/100 (25.0%)" in text
+    assert "any price (stated or estimated): 90/100 (90.0%)" in text
+    assert "event scale estimate: 95/100 (95.0%)" in text
+    assert "booking URL without stated price: 7" in text
+    assert "hydration jobs: 8 unresolved, oldest 6:00:00 ago" in text

@@ -10,8 +10,9 @@ import pytest
 from pydantic import ValidationError
 
 from eventindex.api.search import (
-    ATTRIBUTES, FILTER_DEFAULTS, SearchFilters, UNKNOWN_PRIOR, attribute_select,
-    build_sql, preference_score, rank,
+    ATTRIBUTES, FILTER_DEFAULTS, REQUIRED_ATTRIBUTES, SOFT_ATTRIBUTES,
+    SearchFilters, UNKNOWN_PRIOR, attribute_select, build_sql,
+    preference_score, rank,
 )
 
 NOW = datetime.now(timezone.utc)
@@ -23,7 +24,8 @@ def _filters(**kw):
 
 def _add(conn, title, *, category=None, age=None, energy=None, tags=None,
          kid=None, kid_conf=0.6, price=None, gender=None, gender_conf=None,
-         venue=None):
+         venue=None, organizer=None, attendance=None, attendance_conf=None,
+         estimated_price=None):
     event_id = uuid.uuid4()
     venue_id = None
     if venue:
@@ -35,19 +37,26 @@ def _add(conn, title, *, category=None, age=None, energy=None, tags=None,
         inferred["energy"] = energy
     if kid is not None:
         inferred["kid_friendly"] = {"value": kid, "confidence": kid_conf}
+    if estimated_price is not None:
+        inferred["price"] = {
+            "min": estimated_price, "max": estimated_price,
+            "currency": "EUR", "basis": "estimated", "confidence": 0.2,
+        }
     from psycopg.types.json import Jsonb
     conn.execute(
         "INSERT INTO event (id, kind, title, category, confidence, status, "
         "expected_age_range, expected_age_range_confidence, "
         "expected_gender_split, expected_gender_split_confidence, "
-        "inferred, price_min, venue_id) VALUES "
+        "expected_attendance, expected_attendance_confidence, "
+        "inferred, price_min, venue_id, organizer) VALUES "
         "(%s, 'one_off', %s, %s, 0.9, 'confirmed', "
         " CASE WHEN %s::int IS NULL THEN NULL ELSE int4range(%s, %s, '[]') END, "
-        " 0.5, %s, %s, %s, %s, %s)",
+        " 0.5, %s, %s, %s, %s, %s, %s, %s, %s)",
         (event_id, title, category or [],
          age[0] if age else None, age[0] if age else None,
          age[1] if age else None, gender, gender_conf,
-         Jsonb(inferred) if inferred else None, price, venue_id),
+         attendance, attendance_conf,
+         Jsonb(inferred) if inferred else None, price, venue_id, organizer),
     )
     conn.execute(
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
@@ -107,16 +116,14 @@ def test_exclude_terms_do_not_drop_unenriched_events(conn):
     assert "Techno Nacht" not in titles
 
 
-def test_include_terms_require_one_synonym_word_boundary_aware(conn):
-    _add(conn, "HWYD Social Run")
-    _add(conn, "FUN-Orientierungslauf Solar City")   # compound suffix: match
-    _add(conn, "Führung: Max Pechstein")             # 'run' inside: NO match
-    _add(conn, "Salsa Night", tags=["running"])      # tag match
+def test_name_is_title_scoped_and_compound_suffix_aware(conn):
+    _add(conn, "Maturaball der HLW")
+    _add(conn, "Fußball Turnier")
+    _add(conn, "Ballett Premiere")
+    _add(conn, "Salsa Night", tags=["ball"])
     conn.commit()
-    titles = _run(conn, _filters(include_terms=["lauf", "run", "running"]))
-    assert "Führung: Max Pechstein" not in titles
-    assert set(titles) == {"HWYD Social Run", "FUN-Orientierungslauf Solar City",
-                           "Salsa Night"}
+    titles = _run(conn, _filters(name="ball"))
+    assert set(titles) == {"Maturaball der HLW", "Fußball Turnier"}
 
 
 def test_window_strings_validated_and_vienna_pinned():
@@ -243,26 +250,67 @@ def test_filter_defaults_cover_the_whole_model():
 
 
 def test_registry_covers_every_soft_filter_field():
-    from eventindex.api.search import SOFT_ATTRIBUTES
-
     soft = {"gender_split_min", "kid_friendly", "newcomer_friendly",
             "outdoor", "energy", "language", "age", "solo_friendly",
-            "interaction_structure", "sex_service_context"}
-    assert soft == set(ATTRIBUTES) == SOFT_ATTRIBUTES
+            "interaction_structure", "sex_service_context", "price",
+            "event_scale"}
+    assert soft == set(ATTRIBUTES)
+    assert SOFT_ATTRIBUTES == soft | {"tags"}
+    assert REQUIRED_ATTRIBUTES == SOFT_ATTRIBUTES - {"price", "tags"}
 
 
 def test_unknown_required_attribute_is_rejected():
     with pytest.raises(ValidationError):
         _filters(required_attributes=["favourite_color"])
+    with pytest.raises(ValidationError):
+        _filters(preferred_max_price=30, required_attributes=["price"])
+    with pytest.raises(ValidationError):
+        _filters(tags=["dance"], required_attributes=["tags"])
 
 
-def test_include_terms_match_venue_name(conn):
-    """'events from factory300' names a venue/organizer, not a title word -
-    a consumer query came back empty over this (2026-07-12)."""
+def test_name_does_not_blur_event_title_with_venue(conn):
     _add(conn, "Community Oktoberfest", venue="factory300")
     _add(conn, "Sommerkonzert")
-    titles = _run(conn, _filters(include_terms=["factory300"]))
-    assert titles == ["Community Oktoberfest"]
+    titles = _run(conn, _filters(name="factory300"))
+    assert titles == []
+
+
+def test_literal_organizer_combines_with_concept_tags(conn):
+    _add(conn, "Gründungsworkshop", organizer="WKO Oberösterreich",
+         tags=["startup"])
+    _add(conn, "Gründungsworkshop", organizer="Private Academy",
+         tags=["startup"])
+    _add(conn, "Export Seminar", organizer="WKO Oberösterreich",
+         tags=["business"])
+    conn.commit()
+    titles = _run(conn, _filters(organizer="WKO", tags=["startup"]))
+    assert titles[0] == "Gründungsworkshop"
+    assert titles == ["Gründungsworkshop", "Export Seminar"]
+
+
+def test_literal_reporting_source_combines_with_concept_tags(conn):
+    source_id = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust) VALUES "
+        "('Wirtschaftskammer Events', 'https://wko.at/events', "
+        "'website', 2, 0.8) RETURNING id"
+    ).fetchone()["id"]
+    startup_id = _add(conn, "Gründungsworkshop", tags=["startup"])
+    export_id = _add(conn, "Export Seminar", tags=["business"])
+    for event_id in (startup_id, export_id):
+        fingerprint = f"source-filter-{event_id}"
+        conn.execute(
+            "INSERT INTO event_claim (source_id, fingerprint, payload) "
+            "VALUES (%s, %s, '{}')",
+            (source_id, fingerprint),
+        )
+        conn.execute(
+            "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+            (fingerprint, event_id),
+        )
+    _add(conn, "Other Startup", tags=["startup"])
+    conn.commit()
+    titles = _run(conn, _filters(source="WKO", tags=["startup"]))
+    assert titles == ["Gründungsworkshop", "Export Seminar"]
 
 
 def test_exclude_terms_match_venue_and_spare_venueless(conn):
@@ -272,27 +320,30 @@ def test_exclude_terms_match_venue_and_spare_venueless(conn):
     assert titles == ["Sommerkonzert"]
 
 
-def test_multiword_terms_match_hyphen_and_compound(conn):
-    """B4: 'krone fest' found neither 'Krone-Fest' nor 'Kronefest'."""
+def test_multiword_name_matches_hyphen_and_compound(conn):
     _add(conn, "Linzer Krone-Fest 2026")
     _add(conn, "SoulSanity LIVE @ Linzer Kronefest")
     _add(conn, "Kronleuchter-Ausstellung")
-    titles = _run(conn, _filters(include_terms=["krone fest"]))
+    titles = _run(conn, _filters(name="krone fest"))
     assert set(titles) == {"Linzer Krone-Fest 2026",
                            "SoulSanity LIVE @ Linzer Kronefest"}
 
 
-def test_include_terms_match_organizer(conn):
-    _add(conn, "Sommerfest")  # no organizer
-    event_id = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, organizer, confidence, status) "
-        "VALUES (%s, 'one_off', 'Netzwerkabend', 'tech2b', 0.9, 'confirmed')",
-        (event_id,),
-    )
-    conn.execute(
-        "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
-        (event_id, NOW + timedelta(days=1)),
-    )
-    titles = _run(conn, _filters(include_terms=["tech2b"]))
-    assert titles == ["Netzwerkabend"]
+def test_price_and_event_scale_are_soft_by_default_and_hard_when_required(conn):
+    _add(conn, "Small Free Meetup", price=0, attendance=30, attendance_conf=0.6)
+    _add(conn, "Large Estimated Gala", estimated_price=25,
+         attendance=600, attendance_conf=0.6)
+    _add(conn, "Unknown Gathering")
+    conn.commit()
+
+    soft = _run(conn, _filters(
+        preferred_max_price=30, participant_count_min=300,
+    ))
+    assert set(soft) == {
+        "Small Free Meetup", "Large Estimated Gala", "Unknown Gathering"
+    }
+    hard = _run(conn, _filters(
+        participant_count_min=300,
+        required_attributes=["event_scale"],
+    ))
+    assert hard == ["Large Estimated Gala"]

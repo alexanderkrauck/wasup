@@ -118,8 +118,9 @@ def test_hard_filters_never_leak(query, expects_exclusion, live_headers):
                 f"{query!r}: excluded term {term!r} in {occ['title']!r}"
             )
         if f["max_price"] is not None and not f["is_free"] \
-                and occ["price_min"] is not None:
-            assert float(occ["price_min"]) <= f["max_price"], (
+                and occ["price"]["min"] is not None:
+            assert occ["price"]["basis"] == "stated"
+            assert float(occ["price"]["min"]) <= f["max_price"], (
                 f"{query!r}: {occ['title']!r} over price cap"
             )
         # parsed_filters are validator-normalized to tz-aware ISO strings;

@@ -192,10 +192,10 @@ def test_locationless_source_gets_venue_escalation_once(conn):
     assert venue_escalation(conn) == 0  # one-shot
 
 
-def test_timefix_covers_locationless_events_with_deep_urls(conn):
+def test_hydration_covers_every_future_event_with_missing_public_facts(conn):
     import uuid
 
-    from eventindex.jobs.schedule import enqueue_timefix
+    from eventindex.jobs.schedule import enqueue_hydration
 
     eid = uuid.uuid4()
     conn.execute(
@@ -210,11 +210,11 @@ def test_timefix_covers_locationless_events_with_deep_urls(conn):
     )
     conn.commit()
 
-    assert enqueue_timefix(conn) == 1
+    assert enqueue_hydration(conn) == 1
     assert conn.execute(
-        "SELECT payload->>'event_id' AS e FROM jobs WHERE kind='timefix'"
+        "SELECT payload->>'event_id' AS e FROM jobs WHERE kind='hydrate_event'"
     ).fetchone()["e"] == str(eid)
-    assert enqueue_timefix(conn) == 0  # 30d re-fetch budget respected
+    assert enqueue_hydration(conn) == 0  # 30d recovery budget respected
 
 
 def test_agentic_sources_get_agent_sessions_not_crawls(conn):

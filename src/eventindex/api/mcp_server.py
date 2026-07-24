@@ -34,10 +34,21 @@ _READ_ONLY = ToolAnnotations(
 mcp = FastMCP(
     "Wasup - Linz Event Index",
     instructions=(
-        "Find public events in Linz and roughly 25 km around it. Use "
-        "search_events for structured date/category/price requests, search "
-        "and fetch only for name or title lookups, get_event after selecting a "
-        "result, and get_calendar_link for read-only .ics subscriptions. "
+        "Find public events in Linz and roughly 25 km around it. TOOL CHOICE: "
+        "use search_events for discovery, dates, filters, preferences, prices, "
+        "event scale, and comparisons. Put every jointly desired activity, "
+        "topic, format, or atmosphere concept in ONE tags list and make ONE "
+        "call; never search once per tag. Use name only for literal event-title "
+        "words such as name='ball'; organizer, venue, and reporting source "
+        "have their own literal filters. Use standard search/fetch only for a known "
+        "specific title, venue, or organizer and clients requiring that "
+        "document-search protocol. Use get_event only after selecting an event "
+        "or when full provenance is needed; search_events already returns the "
+        "price and scale needed for comparisons. Use get_calendar_link for a "
+        "read-only .ics subscription. Hard fields such as max_price, is_free, "
+        "exclusions, and required_attributes exclude unknown values. Soft "
+        "fields such as tags, preferred_max_price, and ordinary audience/scale "
+        "preferences retain unknowns and rank by stored confidence. "
         "Do not use Wasup for Vienna, restaurants, private-event creation, "
         "or invitations. Known commercial sex-service contexts are excluded "
         "unless a supported tool receives an explicit true opt-in. Null "
@@ -65,11 +76,32 @@ class Estimate(_Output):
     confidence: float | None
 
 
-class PriceEstimate(_Output):
+class PriceInfo(_Output):
     min: float | None
     max: float | None
-    currency: str | None
+    currency: str
     confidence: float | None
+    basis: Literal["stated", "estimated", "unknown"]
+    source_url: str | None
+
+
+class EventScale(_Output):
+    estimated_participants: int | None
+    plausible_min: int | None
+    plausible_max: int | None
+    band: Literal[
+        "intimate", "small", "medium", "large", "very_large", "mass"
+    ] | None
+    confidence: float | None
+    basis: list[str]
+
+
+class TagConceptMatch(_Output):
+    query: str
+    score: float
+    event_tag: str | None
+    tag_confidence: float | None
+    relatedness: float
 
 
 class EventTag(_Output):
@@ -82,7 +114,6 @@ class EventEstimates(_Output):
     age_min: Estimate | None = None
     age_max: Estimate | None = None
     gender_split: Estimate | None = None
-    expected_attendance: Estimate | None = None
     language: Estimate | None = None
     kid_friendly: Estimate | None = None
     newcomer_friendly: Estimate | None = None
@@ -92,7 +123,6 @@ class EventEstimates(_Output):
     energy: Estimate | None = None
     sex_service_context: Estimate | None = None
     venue: Estimate | None = None
-    stated_price: PriceEstimate | None = None
     start_time: Estimate | None = None
 
 
@@ -111,8 +141,8 @@ class SearchOccurrence(_Output):
     venue_name: str | None
     venue_address: str | None
     organizer: str | None
-    price_min: float | None
-    price_max: float | None
+    price: PriceInfo
+    event_scale: EventScale
     booking_url: str | None
     registration_required: bool | None
     kind: str
@@ -120,15 +150,21 @@ class SearchOccurrence(_Output):
     confidence: float
     match_score: float
     tag_match: float | None
+    tag_matches: list[TagConceptMatch]
     provenance_summary: list[str]
+
+
+class SearchDiagnostics(_Output):
+    message: str
+    suggested_retry: str | None = None
 
 
 class SearchEventsResponse(_Output):
     data_freshness: datetime | None
     parsed_filters: SearchFilters
     importance: dict[str, float]
-    pool_truncated: bool
     occurrences: list[SearchOccurrence]
+    diagnostics: SearchDiagnostics | None = None
 
 
 class EventOccurrence(_Output):
@@ -166,8 +202,8 @@ class EventRecord(_Output):
     registration_required: bool | None
     registration_deadline: datetime | None
     booking_url: str | None
-    price_min: float | None
-    price_max: float | None
+    price: PriceInfo
+    event_scale: EventScale
     url: str | None
     image_url: str | None
     language: str | None
@@ -231,7 +267,6 @@ def _estimates(values: dict | None, *, include_sex: bool) -> EventEstimates:
         age_min=_estimate(values.get("age_min")),
         age_max=_estimate(values.get("age_max")),
         gender_split=_estimate(values.get("gender_split")),
-        expected_attendance=_estimate(values.get("expected_attendance")),
         language=_estimate(values.get("language")),
         kid_friendly=_estimate(values.get("kid_friendly")),
         newcomer_friendly=_estimate(values.get("newcomer_friendly")),
@@ -243,14 +278,6 @@ def _estimates(values: dict | None, *, include_sex: bool) -> EventEstimates:
             _estimate(values.get("sex_service_context")) if include_sex else None
         ),
         venue=_estimate(values.get("venue")),
-        stated_price=(
-            PriceEstimate(
-                min=values["stated_price"].get("min"),
-                max=values["stated_price"].get("max"),
-                currency=values["stated_price"].get("currency"),
-                confidence=values["stated_price"].get("confidence"),
-            ) if isinstance(values.get("stated_price"), dict) else None
-        ),
         start_time=_estimate(values.get("start_time")),
     )
 
@@ -271,8 +298,8 @@ def _search_occurrence(row: dict) -> SearchOccurrence:
         venue_name=row.get("venue_name"),
         venue_address=row.get("venue_address"),
         organizer=row.get("organizer"),
-        price_min=row.get("price_min"),
-        price_max=row.get("price_max"),
+        price=PriceInfo.model_validate(row["price"]),
+        event_scale=EventScale.model_validate(row["event_scale"]),
         booking_url=row.get("booking_url"),
         registration_required=row.get("registration_required"),
         kind=row["kind"],
@@ -280,6 +307,10 @@ def _search_occurrence(row: dict) -> SearchOccurrence:
         confidence=row["confidence"],
         match_score=row["match_score"],
         tag_match=row.get("tag_match"),
+        tag_matches=[
+            TagConceptMatch.model_validate(match)
+            for match in row.get("tag_matches", [])
+        ],
         provenance_summary=list(row.get("provenance_summary") or []),
     )
 
@@ -321,8 +352,8 @@ def _event_detail(event_id: str, *, include_sex: bool) -> EventDetailResponse:
             registration_required=event.get("registration_required"),
             registration_deadline=event.get("registration_deadline"),
             booking_url=event.get("booking_url"),
-            price_min=event.get("price_min"),
-            price_max=event.get("price_max"),
+            price=PriceInfo.model_validate(event["price"]),
+            event_scale=EventScale.model_validate(event["event_scale"]),
             url=event.get("url"),
             image_url=event.get("image_url"),
             language=event.get("lang"),
@@ -360,34 +391,89 @@ def search_events(
     limit: Annotated[int, Field(ge=1, le=100)] = 20,
     sort: Literal["relevance", "starts_at"] = "relevance",
 ) -> SearchEventsResponse:
-    """Use this when the user wants structured discovery of public events in
-    Linz or roughly 25 km around it by date, category, price, exclusions, or
-    audience preferences. Do not use it for Vienna, restaurants, private
-    event creation, or invitations. Omitted or false sex_service_context
-    excludes known commercial sex-service contexts; only explicit true
-    permits them. Unknown attributes remain visible. Ongoing events are
-    labeled and placed after events that start inside the requested window."""
+    """Use this when the user wants to discover or compare public events in
+    Linz or roughly 25 km around it by event name, date, category, semantic
+    concepts, price, scale, exclusions, or audience preferences.
+
+    Make one call for the whole request. Put a literal event-title word in
+    `name`; put literal organizer, venue, and reporting-source names in their
+    own filters; put every jointly desired activity/topic/format/atmosphere concept in the
+    single `tags` list. Tags are soft by default and jointly scored.
+    Set `min_tag_match` only for an explicit must/only requirement.
+
+    Hard versus soft examples:
+    - "balls, ideally dancing and elegant":
+      filters={"name":"ball","tags":["dance","elegant"],
+               "importance":{"tags":1.0}}
+    - "WKO startup events":
+      filters={"source":"WKO","tags":["startup"]}
+    - "ideally under EUR 30": filters={"preferred_max_price":30}
+    - "must cost at most EUR 30": filters={"max_price":30}
+    - "large, preferably 300+ people":
+      filters={"participant_count_min":300}
+    - "must have 300+ people":
+      filters={"participant_count_min":300,
+               "required_attributes":["event_scale"]}
+
+    Do not put `dance` in name, do not call once for dance and again for
+    elegant, and do not call get_event repeatedly merely to compare prices or
+    scale: every result already returns those fields, their confidence/basis,
+    and per-requested-tag match evidence.
+
+    Returns one row per event with its next relevant occurrence. Omitted or
+    false sex_service_context excludes known commercial sex-service contexts;
+    only explicit true permits them. Unknown soft attributes remain visible.
+    Empty results include a safe retry hint and never weaken hard requirements."""
     from eventindex.api import app as api
 
     parsed, importance = _validated_filters(filters or QueryBody())
     exclude_sex = parsed.sex_service_context is not True
     payload = api._run_filters(
         parsed,
-        limit=2000,
+        limit=limit,
         importance=importance,
         sort=sort,
+        distinct=True,
         exclude_sex_service_context=exclude_sex,
     )
     # Stable partition preserves relevance or chronology inside each group.
     # Actual starts in the window must not be buried under old ongoing spans.
     rows = [row for row in payload["occurrences"] if _credible_ongoing(row)]
     rows = sorted(rows, key=lambda row: bool(row["ongoing"]))
+    selected = rows[:limit]
+    diagnostics = None
+    if not selected:
+        if parsed.max_price is not None or parsed.is_free:
+            diagnostics = SearchDiagnostics(
+                message="No event matched every hard filter; unknown or "
+                "estimated prices cannot satisfy max_price/is_free.",
+                suggested_retry=(
+                    "If price was only a preference, remove max_price/is_free "
+                    "and use preferred_max_price."
+                ),
+            )
+        elif parsed.min_tag_match is not None:
+            diagnostics = SearchDiagnostics(
+                message="No event reached the required joint semantic-tag threshold.",
+                suggested_retry=(
+                    "If the concepts were preferences, omit min_tag_match and "
+                    "keep all concepts together in tags."
+                ),
+            )
+        else:
+            diagnostics = SearchDiagnostics(
+                message="No event matched every hard filter.",
+                suggested_retry=(
+                    "Check the date window and literal name; keep conceptual "
+                    "terms in tags rather than name."
+                ),
+            )
     return SearchEventsResponse(
         data_freshness=payload["data_freshness"],
         parsed_filters=parsed,
         importance=importance,
-        pool_truncated=payload["pool_truncated"],
-        occurrences=[_search_occurrence(row) for row in rows[:limit]],
+        occurrences=[_search_occurrence(row) for row in selected],
+        diagnostics=diagnostics,
     )
 
 
@@ -406,12 +492,9 @@ def get_event(
 
 @mcp.tool(title="Get calendar subscription link", annotations=_READ_ONLY)
 def get_calendar_link(
-    category: str | None = None,
-    tags: list[str] | None = None,
-    min_tag_match: Annotated[float, Field(ge=0, le=1)] = 0.5,
-    from_dt: str | None = None,
-    to_dt: str | None = None,
+    filters: QueryBody | None = None,
     min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
+    min_scale_confidence: Annotated[float, Field(ge=0, le=1)] = 0,
     include_time_unknown: Annotated[
         bool,
         Field(
@@ -422,29 +505,91 @@ def get_calendar_link(
 ) -> CalendarLinkResponse:
     """Use this when the user wants a read-only .ics subscription URL for
     public Linz-area events. This only builds a link; it does not subscribe,
-    create calendar entries, or invite anyone. Ask for a category or desired
-    tags before calling rather than creating an unscoped feed. The returned
-    feed defaults to timed events only and always excludes known commercial
-    sex-service contexts while retaining unknown classifications. A
-    subscription may be scoped by category, semantic tags, or both."""
-    if category is None and not tags:
+    create entries, or invite anyone. Pass the same `filters` object used by
+    search_events. A feed needs membership rules rather than ranking: tags use
+    min_tag_match (0.5 when omitted), max_price/is_free use stated prices, and
+    participant_count_min/max require
+    required_attributes=["event_scale"]. Ranking-only preferred_max_price,
+    audience preferences, and importance weights are rejected with a
+    correction message.
+
+    Example: filters={"name":"ball","tags":["dance","elegant"],
+    "min_tag_match":0.5}. Example large-event feed:
+    filters={"categories":["music"],"participant_count_min":300,
+    "required_attributes":["event_scale"]}.
+
+    The feed defaults to timed events only and always excludes known
+    commercial sex-service contexts while retaining unknown classifications."""
+    parsed, importance = _validated_filters(filters or QueryBody())
+    if not (
+        parsed.name or parsed.organizer or parsed.venue or parsed.source
+        or parsed.categories or parsed.tags
+    ):
         raise ValueError(
-            "A calendar subscription requires a category or at least one tag "
-            "so it does not silently truncate a broad all-event feed."
+            "A calendar subscription requires name, organizer, venue, source, "
+            "categories, or tags so it does not silently create a broad "
+            "truncated feed."
+        )
+    soft_fields = [
+        name for name in (
+            "kid_friendly", "newcomer_friendly", "outdoor", "solo_friendly",
+            "interaction_structure", "energy", "language",
+            "gender_split_min",
+        )
+        if getattr(parsed, name) is not None
+        and name not in parsed.required_attributes
+    ]
+    if parsed.preferred_max_price is not None or importance or soft_fields:
+        raise ValueError(
+            "Calendar feeds cannot rank preferences. Remove importance and "
+            "preferred_max_price; use max_price for a hard stated-price limit. "
+            "Put any supported hard audience/scale constraint in "
+            "required_attributes."
+        )
+    has_scale = (
+        parsed.participant_count_min is not None
+        or parsed.participant_count_max is not None
+    )
+    if has_scale and "event_scale" not in parsed.required_attributes:
+        raise ValueError(
+            "Calendar event scale defines membership: add 'event_scale' to "
+            "required_attributes or remove participant_count_min/max."
+        )
+    unsupported_required = set(parsed.required_attributes) - {"event_scale"}
+    if unsupported_required:
+        raise ValueError(
+            "Calendar links currently support event_scale as a required "
+            f"estimated attribute; unsupported: {sorted(unsupported_required)}"
+        )
+    if parsed.exclude_categories or parsed.exclude_terms:
+        raise ValueError(
+            "Calendar links do not yet serialize exclusions; remove them from "
+            "this subscription filter."
         )
     params = {
         key: value
         for key, value in [
-            ("category", category),
-            ("from", from_dt),
-            ("to", to_dt),
+            ("category", ",".join(parsed.categories or [])),
+            ("name", parsed.name),
+            ("organizer", parsed.organizer),
+            ("venue", parsed.venue),
+            ("source", parsed.source),
+            ("from", parsed.from_dt),
+            ("to", parsed.to_dt),
             ("min_confidence", min_confidence),
+            ("max_price", parsed.max_price),
+            ("is_free", str(parsed.is_free).lower() if parsed.is_free else None),
+            ("participant_count_min", parsed.participant_count_min),
+            ("participant_count_max", parsed.participant_count_max),
+            ("min_scale_confidence", min_scale_confidence if has_scale else None),
     ]
-        if value is not None
+        if value not in (None, "")
     }
-    if tags:
-        params["tags"] = ",".join(tags)
-        params["min_tag_match"] = min_tag_match
+    if parsed.tags:
+        params["tags"] = ",".join(parsed.tags)
+        params["min_tag_match"] = (
+            parsed.min_tag_match if parsed.min_tag_match is not None else 0.5
+        )
     params["exclude_sex_service_context"] = "true"
     params["include_time_unknown"] = (
         "true" if include_time_unknown else "false"
@@ -462,8 +607,7 @@ _SEARCH_HINT = (
     "No lexical match. This tool only matches words against event titles, "
     "venues, and organizers. Translate the request into structured filters "
     "and call search_events instead, e.g. filters={\"from_dt\": \"<ISO "
-    "datetime>\", \"to_dt\": \"<ISO datetime>\", \"include_terms\": "
-    "[\"konzert\"]}."
+    "datetime>\", \"to_dt\": \"<ISO datetime>\", \"tags\": [\"concert\"]}."
 )
 
 
@@ -561,7 +705,7 @@ def search(query: str) -> StandardSearchResponse:
     of forwarding them here.
     BAD:  search(query="Konzerte am Wochenende in Linz")
     GOOD: search_events(filters={"from_dt": ..., "to_dt": ...,
-          "include_terms": ["konzert"]}) for dates, categories, prices.
+          "tags": ["concert"]}) for dates, concepts, prices, or scale.
     GOOD: search(query="Posthof") - name lookup is what this tool is for.
     Do not use for other cities, restaurants, private events, or
     invitations. Known commercial sex-service events and past-start
@@ -576,11 +720,14 @@ def search(query: str) -> StandardSearchResponse:
     filters = SearchFilters(**(FILTER_DEFAULTS | {"from_dt": cutoff.isoformat()}))
     payload = api._run_filters(
         filters,
-        limit=2000,
+        # Standard connector search applies lexical title/venue/organizer
+        # relevance after the shared candidate query. Linz-scale future canon
+        # is small enough to rank exhaustively; a date-ordered cap here made
+        # known far-future events unfindable.
+        limit=100_000,
         sort="starts_at",
         distinct=True,
         exclude_sex_service_context=True,
-        include_tag_terms=False,
     )
     rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
     results, seen = [], set()
@@ -644,8 +791,17 @@ def fetch(id: str) -> StandardFetchResponse:
         f"Venue: {event.venue_name or 'unknown'}",
         f"Organizer: {event.organizer or 'unknown'}",
         (
-            f"Price: {event.price_min}-{event.price_max}"
-            if event.price_min is not None else "Price: unknown"
+            f"Price: {event.price.min}-{event.price.max} EUR "
+            f"({event.price.basis}, confidence={event.price.confidence})"
+            if event.price.min is not None else "Price: unknown"
+        ),
+        (
+            "Event scale: "
+            f"{event.event_scale.estimated_participants} participants "
+            f"({event.event_scale.band}, "
+            f"confidence={event.event_scale.confidence})"
+            if event.event_scale.estimated_participants is not None
+            else "Event scale: unknown"
         ),
         "Dates: " + ("; ".join(dates) if dates else "no current or future occurrence"),
         f"Sources: {', '.join(source.name for source in detail.sources) or 'unknown'}",

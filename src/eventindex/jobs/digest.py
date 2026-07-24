@@ -88,6 +88,46 @@ def gather_stats(conn) -> dict:
         """,
         (r"403|429|turnstile|captcha|cloudflare|just a moment",),
     ).fetchall()
+    field_completeness = conn.execute(
+        """
+        WITH future AS (
+            SELECT DISTINCT e.id, e.price_min, e.booking_url, e.inferred,
+                   e.expected_attendance
+            FROM event e
+            JOIN occurrence o ON o.event_id = e.id
+            WHERE o.status = 'scheduled'
+              AND coalesce(o.ends_at, o.starts_at) >= now()
+        )
+        SELECT count(*) AS future_events,
+               count(*) FILTER (WHERE price_min IS NOT NULL) AS stated_price,
+               count(*) FILTER (
+                   WHERE price_min IS NOT NULL
+                      OR inferred->'price'->>'min' IS NOT NULL
+               ) AS any_price,
+               count(*) FILTER (
+                   WHERE booking_url IS NOT NULL AND price_min IS NULL
+               ) AS booking_without_stated_price,
+               count(*) FILTER (
+                   WHERE expected_attendance IS NOT NULL
+               ) AS event_scale
+        FROM future
+        """
+    ).fetchone()
+    hydration = conn.execute(
+        """
+        SELECT count(*) FILTER (
+                   WHERE status IN ('pending', 'running')
+               ) AS unresolved,
+               min(created_at) FILTER (
+                   WHERE status IN ('pending', 'running')
+               ) AS oldest_unresolved,
+               count(*) FILTER (
+                   WHERE status = 'failed'
+                     AND finished_at >= now() - interval '24 hours'
+               ) AS failed_24h
+        FROM jobs WHERE kind = 'hydrate_event'
+        """
+    ).fetchone()
     return {
         "credit_parked": credit_parked,
         "openrouter_balance_usd": openrouter_balance(),
@@ -102,6 +142,8 @@ def gather_stats(conn) -> dict:
         "degraded_productive": degraded_productive,
         "budget_parked": budget_parked,
         "day_curve": day_curve,
+        "field_completeness": field_completeness,
+        "hydration": hydration,
     }
 
 
@@ -221,6 +263,35 @@ def render(stats: dict, now: datetime) -> str:
             lines.append(f"  {r['kind']}: {r['n']}")
     else:
         lines.append("  none")
+
+    fields = stats.get("field_completeness") or {}
+    total = fields.get("future_events") or 0
+    lines.append("future-event field completeness:")
+    if total:
+        stated = fields.get("stated_price") or 0
+        any_price = fields.get("any_price") or 0
+        scale = fields.get("event_scale") or 0
+        lines += [
+            f"  stated price: {stated}/{total} ({stated / total:.1%})",
+            f"  any price (stated or estimated): {any_price}/{total} "
+            f"({any_price / total:.1%})",
+            f"  event scale estimate: {scale}/{total} ({scale / total:.1%})",
+            "  booking URL without stated price: "
+            f"{fields.get('booking_without_stated_price') or 0}",
+        ]
+    else:
+        lines.append("  no future events")
+    hydration = stats.get("hydration") or {}
+    unresolved = hydration.get("unresolved") or 0
+    oldest = hydration.get("oldest_unresolved")
+    age = (
+        f", oldest {now - oldest} ago"
+        if oldest is not None else ""
+    )
+    lines.append(
+        f"  hydration jobs: {unresolved} unresolved{age}, "
+        f"{hydration.get('failed_24h') or 0} failed in 24h"
+    )
 
     anomalies = day_curve_anomalies(stats.get("day_curve", []))
     lines.append("day-curve anomalies (28d, capped-feed signature):")

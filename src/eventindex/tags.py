@@ -139,10 +139,14 @@ def public_for_event(tx, event_id: UUID) -> list[dict]:
     ).fetchall()
 
 
-def semantic_scores(
+def semantic_matches(
     tx, event_ids: Iterable[UUID], desired: list[str]
-) -> dict[UUID, float]:
-    """Best certainty-weighted relation per event; no tag-count reward."""
+) -> dict[UUID, dict]:
+    """Joint concept coverage with per-concept evidence for agent responses.
+
+    Every requested concept gets its own best event-tag match. Averaging those
+    concept scores makes ["dance", "elegant"] a composition rather than an OR.
+    """
     event_ids = list(dict.fromkeys(event_ids))
     desired = clean_desired(desired)
     if not event_ids or not desired:
@@ -163,9 +167,17 @@ def semantic_scores(
           "AND te.model = %(model)s WHERE et.event_id = ANY(%(event_ids)s)",
         params | {"model": embeddings.MODEL_VERSION},
     ).fetchall()
-    scores: dict[UUID, float] = {event_id: 0.0 for event_id in event_ids}
+    best: dict[UUID, list[dict]] = {
+        event_id: [
+            {
+                "query": query, "score": 0.0, "event_tag": None,
+                "tag_confidence": None, "relatedness": 0.0,
+            }
+            for query in desired
+        ]
+        for event_id in event_ids
+    }
     for row in rows:
-        best_relation = 0.0
         for index, query in enumerate(desired):
             if row["name"] == query:
                 relatedness = 1.0
@@ -173,10 +185,32 @@ def semantic_scores(
                 relatedness = 0.0
             else:
                 relatedness = embeddings.calibrated_relatedness(row[f"sim_{index}"])
-            best_relation = max(best_relation, relatedness)
-        score = float(row["confidence"]) * best_relation
-        scores[row["event_id"]] = max(scores[row["event_id"]], score)
-    return scores
+            score = float(row["confidence"]) * relatedness
+            if score > best[row["event_id"]][index]["score"]:
+                best[row["event_id"]][index] = {
+                    "query": query,
+                    "score": score,
+                    "event_tag": row["name"],
+                    "tag_confidence": float(row["confidence"]),
+                    "relatedness": relatedness,
+                }
+    return {
+        event_id: {
+            "score": sum(item["score"] for item in concepts) / len(concepts),
+            "concepts": concepts,
+        }
+        for event_id, concepts in best.items()
+    }
+
+
+def semantic_scores(
+    tx, event_ids: Iterable[UUID], desired: list[str]
+) -> dict[UUID, float]:
+    """Aggregate joint-concept scores for ranking and filtering."""
+    return {
+        event_id: match["score"]
+        for event_id, match in semantic_matches(tx, event_ids, desired).items()
+    }
 
 
 def semantic_threshold_sql(
@@ -215,12 +249,16 @@ def semantic_threshold_sql(
     match_key = f"{prefix}_min_match"
     params[model_key] = embeddings.MODEL_VERSION
     params[match_key] = min_match
+    concept_scores = [
+        f"coalesce(max(et.confidence * ({relation})), 0.0)"
+        for relation in relations
+    ]
     return (
-        "EXISTS (SELECT 1 FROM event_tag et "
+        "(SELECT (" + " + ".join(concept_scores) + f") / {len(relations)} "
+        "FROM event_tag et "
         "LEFT JOIN tag_embedding te ON te.name = et.name "
         f"AND te.model = %({model_key})s "
-        "WHERE et.event_id = e.id AND et.confidence * GREATEST("
-        + ", ".join(relations)
-        + f") >= %({match_key})s)",
+        "WHERE et.event_id = e.id) "
+        + f">= %({match_key})s",
         desired,
     )

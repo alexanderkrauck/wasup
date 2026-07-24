@@ -32,5 +32,5 @@ CREATE TABLE enrichment (
 );
 
 -- Extended inferred attributes beyond the typed §2 columns:
--- {language, kid_friendly, newcomer_friendly, outdoor, energy, vibe_tags, ...}
+-- {language, kid_friendly, newcomer_friendly, outdoor, energy, ...}
 ALTER TABLE event ADD COLUMN inferred jsonb;

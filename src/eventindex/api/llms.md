@@ -42,12 +42,13 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 
 `POST /v1/query?limit=20` - body: any subset of the filter fields (JSON).
 Browse-only agent (can only GET)? Same filters as query params:
-`GET /v1/query?include_terms=lauf,run&newcomer_friendly=true&importance=newcomer_friendly:1.0&limit=10`
+`GET /v1/query?name=ball&tags=dance,elegant&importance=tags:1.0&limit=10`
 Result-shape params (query string on GET and POST): `sort=starts_at` for
 chronological (default `relevance` = match_score x confidence, NOT
-chronological!), `distinct=event` for discovery questions ("what guided
-tours exist?" - one row per event instead of one per date), `offset=` to
-page through the ranked pool (<=2000).
+chronological!), `distinct=event` by default for discovery questions (one
+result per event, represented by its next relevant occurrence); set
+`distinct=occurrence` only when dates themselves are the requested result.
+`offset=` pages through the complete ranked candidate set.
 **No API key needed for reads** (query, occurrences, events/{id}, feed.ics,
 changes) - anonymous access is rate-limited to 60 req/min per IP; a key
 (header `X-API-Key` or `?api_key=`) lifts the limit. Keys are required only
@@ -56,8 +57,10 @@ for `/v1/search` (it spends the index's own LLM budget) and `POST
 
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna;
 a bare date in to_dt means the WHOLE day), `near`+`radius` (geo circle),
-`categories`, `exclude_categories`, `exclude_terms`, `include_terms`
-(literal title/venue/organizer lookup; word-boundary-aware), `max_price`,
+`categories`, `exclude_categories`, `exclude_terms`, `name`
+(literal event-title lookup; `ball` also matches compounds such as
+`Maturaball`), `organizer` and `venue` (literal substrings in their own
+fields), `source` (literal reporting-source name or URL), `max_price`,
 `is_free`, `required_attributes`, and `min_tag_match` when `tags` are present.
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
@@ -66,6 +69,7 @@ SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 (normal to attend alone), `interaction_structure` (built_in = the format
 FORCES interaction: rotation/teams/pair work; optional; none = silent
 attendance ok), `outdoor`, `energy` (low|medium|high), `language` (de|en),
+`preferred_max_price`, `participant_count_min`, `participant_count_max`,
 `sex_service_context` (true = the event happens at a commercial sex
 establishment - Bordell, strip club, swinger club - NOT mere 18+
 nightlife; send `false` BY DEFAULT so these rank out of innocent queries,
@@ -76,7 +80,9 @@ Optional `importance`: `{attribute: 0..1}` (default 1.0 each).
 Attribute names for `importance` and `required_attributes` are: `age` (note:
 one name for the age_min/age_max pair), `gender_split_min`, `kid_friendly`,
 `newcomer_friendly`, `outdoor`, `solo_friendly`, `interaction_structure`,
-`energy`, `language`, `sex_service_context`.
+`energy`, `language`, `sex_service_context`, `event_scale`; `importance`
+also accepts `price` and `tags`. Price becomes a hard exact-fact constraint
+through `max_price`/`is_free`, not `required_attributes`.
 
 Ranking combines **your importance x the stored certainty**, anchored at the
 coin flip: an event scores `0.5 + certainty/2` when it satisfies a
@@ -87,16 +93,25 @@ per-row `match_score` exposes the result. Add an attribute name to
 `required_attributes` to make it a hard filter instead (then unknowns are
 excluded - use sparingly, most events have estimated attributes only).
 
-`tags`: desired 1-3-word activity/topic/format concepts. They match the one
-confidence-bearing event-tag collection with a calibrated local multilingual
-model. They rank softly by default. Set `min_tag_match` only when the concept
-is a hard requirement; exact exclusions never use embeddings.
+`tags`: all jointly desired 1-3-word activity/topic/format/atmosphere concepts
+in one list. They match the one confidence-bearing event-tag collection with
+a calibrated local multilingual model. Each requested concept gets its own
+best match and the concept scores are averaged; one excellent tag cannot hide
+a missing second concept. They rank softly by default. Set `min_tag_match`
+only when the combined concepts are a hard requirement; exact exclusions
+never use embeddings.
 
 Fine print an agent should know:
 - Windows use overlap semantics: anything still running at `from` matches
   (flagged `ongoing`); a null `ends_at` is treated as ending at `starts_at`.
-- `price_min = 0` means stated-free; `price_min = null` means unknown (the
-  `is_free` filter matches only stated-free).
+- Every result carries `price={min,max,currency,confidence,basis,source_url}`.
+  `basis=stated` is an exact public fact and may satisfy `max_price`/`is_free`;
+  `basis=estimated` participates only in soft `preferred_max_price` ranking.
+  Unknown is represented by null min/max.
+- Every result carries
+  `event_scale={estimated_participants,plausible_min,plausible_max,band,
+  confidence,basis}`. Participant-count ranges are soft unless
+  `required_attributes=["event_scale"]`.
 - `match_score` orders results; it is NOT a percentage. Certainties are
   capped (0.8) and unknowns score a 0.45 prior, so an excellent real-world
   fit typically lands around 0.4-0.7. Compare within a result set.
@@ -105,8 +120,8 @@ Fine print an agent should know:
   `kind: "series"` distinguishes recurring events from one-offs. `booking_url` and
   `registration_required` appear when a source stated them.
 - Cursors (`next_cursor`) are opaque base64url strings - pass them back
-  verbatim. `/v1/occurrences` also takes `include_terms=` for exhaustive
-  text listings with cursor paging.
+  verbatim. `/v1/occurrences` also takes title-scoped `name=` for exhaustive
+  occurrence listings with cursor paging.
 
 Example - "tonight, no techno, mostly-female crowd matters a lot, kids ok":
 
@@ -143,7 +158,8 @@ queries are COMPOSITIONS you build at query time. Examples:
   labels anyone's event as a dating venue.
 - "where should business X show up / sponsor" -> filter the window, rank by
   audience fit: age/gender/energy matching X's customers, weight by
-  `expected_attendance` and confidence from the per-event payloads.
+  `event_scale.estimated_participants` and confidence from the per-event
+  payloads.
 
 ## Other endpoints
 
@@ -151,7 +167,10 @@ queries are COMPOSITIONS you build at query time. Examples:
 - `GET /v1/events/{id}` - sanitized public fields, occurrences, and source
   provenance; no raw claims/evidence.
 - `GET /v1/feed.ics?tags=dancing&min_tag_match=0.5...` - category and/or
-  semantic-tag calendar subscription;
+  semantic-tag calendar subscription. The MCP `get_calendar_link` tool accepts
+  the same filter object as `search_events`; feed membership cannot use
+  ranking-only preferences, so use explicit `min_tag_match`, exact
+  `max_price`/`is_free`, and required event-scale bounds.
   `exclude_sex_service_context=true` removes positively known commercial
   sex-service contexts while retaining unknowns. Set
   `include_time_unknown=false` for a quieter timed-events-only feed; the
@@ -167,5 +186,6 @@ queries are COMPOSITIONS you build at query time. Examples:
   false sex_service_context hard-excludes known true events; only explicit
   true on search_events/get_event permits them, while standard search/fetch
   and generated calendar links always exclude them. Generated calendar links
-  require a category or tags and omit unknown-time/all-day entries unless the user
-  explicitly asks to include them. Point your client at https://wasup.at/mcp
+  require a name, category, or tags and omit unknown-time/all-day entries
+  unless the user explicitly asks to include them. Point your client at
+  https://wasup.at/mcp

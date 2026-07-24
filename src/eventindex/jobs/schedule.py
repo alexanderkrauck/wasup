@@ -251,36 +251,47 @@ def enqueue_weekly_parity(conn) -> bool:
     return True
 
 
-TIMEFIX_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
+HYDRATE_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
 
 
-def enqueue_timefix(conn) -> int:
-    """Every future occurrence missing a start time (Alexander 2026-07-13,
-    audit A4) OR whose event has no location at all (venue contract,
-    Alexander 2026-07-14: anything findable without a login is ALWAYS
-    extracted) earns one detail-page re-fetch per 30 days."""
+def enqueue_hydration(conn) -> int:
+    """Missing public facts earn bounded detail + booking + web recovery.
+
+    This is event-scoped, so a large source's listing-page detail cap cannot
+    repeatedly strand later events.
+    """
     rows = conn.execute(
         """
-        SELECT DISTINCT e.id FROM event e
+        SELECT e.id, min(o.starts_at) AS next_start
+        FROM event e
         JOIN occurrence o ON o.event_id = e.id
-        WHERE (o.time_unknown OR (e.venue_id IS NULL AND e.geo IS NULL))
+        WHERE (
+               e.price_min IS NULL
+               OR e.booking_url IS NULL
+               OR o.time_unknown
+               OR (e.venue_id IS NULL AND e.geo IS NULL)
+              )
           AND o.status = 'scheduled'
-          AND o.starts_at >= now()
-          AND e.url IS NOT NULL AND e.url !~ '^https?://[^/]+/?$'
-          -- an event url identical to a registered source url is the
-          -- LISTING page, not a detail page - re-fetching it per event
-          -- burns an LLM extraction to learn nothing new (WKO class)
-          AND NOT EXISTS (SELECT 1 FROM source s2 WHERE s2.url = e.url)
+          AND coalesce(o.ends_at, o.starts_at) >= now()
           AND NOT EXISTS (
-            SELECT 1 FROM jobs j WHERE j.kind = 'timefix'
+            SELECT 1 FROM jobs j WHERE j.kind = 'hydrate_event'
               AND j.payload->>'event_id' = e.id::text
-              AND j.created_at > now() - interval '30 days')
+              AND (
+                  j.status IN ('pending', 'running')
+                  OR j.created_at > now() - interval '30 days'
+              )
+          )
+        GROUP BY e.id
+        ORDER BY (e.booking_url IS NOT NULL AND e.price_min IS NULL) DESC,
+                 (e.price_min IS NULL AND coalesce(e.description, '') ~*
+                    '(€|\\meur\\M|eintritt|ticket|preis|karte)') DESC,
+                 min(o.starts_at)
         LIMIT %s
         """,
-        (TIMEFIX_BATCH,),
+        (HYDRATE_BATCH,),
     ).fetchall()
     for r in rows:
-        enqueue(conn, "timefix", {"event_id": str(r["id"])})
+        enqueue(conn, "hydrate_event", {"event_id": str(r["id"])})
     return len(rows)
 
 
@@ -361,9 +372,9 @@ def schedule(conn) -> int:
         print(f"enqueued {retried} degraded-source repair sessions")
     if enqueue_weekly_parity(conn):
         print("enqueued the weekly human-parity audit")
-    fixed = enqueue_timefix(conn)
-    if fixed:
-        print(f"enqueued {fixed} timefix detail fetches (date-only events)")
+    hydrated = enqueue_hydration(conn)
+    if hydrated:
+        print(f"enqueued {hydrated} public event fact-recovery jobs")
     rows = conn.execute(
         """
         WITH proximate AS (

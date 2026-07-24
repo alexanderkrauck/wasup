@@ -94,6 +94,23 @@ def test_tools_carry_directory_required_annotations(client):
         assert t["description"].startswith("Use this when"), t["name"]
 
 
+def test_tool_metadata_teaches_one_call_composition_and_hard_soft_intent(client):
+    tools = {
+        tool["name"]: tool
+        for tool in _rpc(client, "tools/list")["result"]["tools"]
+    }
+    search_description = tools["search_events"]["description"]
+    assert '"name":"ball"' in search_description
+    assert '"tags":["dance","elegant"]' in search_description
+    assert '"source":"WKO"' in search_description
+    assert "one call" in search_description.lower()
+    assert "preferred_max_price" in search_description
+    assert "max_price" in search_description
+    calendar_description = tools["get_calendar_link"]["description"]
+    assert "same `filters` object" in calendar_description
+    assert "required_attributes" in calendar_description
+
+
 def test_search_events_runs_the_query_core(client):
     result = _call(client, "search_events",
                    {"filters": {"categories": ["nightlife"]}, "limit": 5})
@@ -137,22 +154,50 @@ def test_chatgpt_connector_search_fetch_contract(client):
 
 def test_get_calendar_link_builds_ics_url(client):
     out = _call(client, "get_calendar_link",
-                {"category": "dance", "from_dt": "2026-07-09T00:00:00"})
+                {"filters": {
+                    "categories": ["nightlife"],
+                    "from_dt": "2026-07-09T00:00:00",
+                }})
     assert "/v1/feed.ics?" in out["ics_url"]
-    assert "category=dance" in out["ics_url"]
+    assert "category=nightlife" in out["ics_url"]
     assert "exclude_sex_service_context=true" in out["ics_url"]
     assert "include_time_unknown=false" in out["ics_url"]
 
     with_unknown_times = _call(client, "get_calendar_link", {
-        "category": "dance", "include_time_unknown": True,
+        "filters": {"categories": ["nightlife"]},
+        "include_time_unknown": True,
     })
     assert "include_time_unknown=true" in with_unknown_times["ics_url"]
 
     semantic = _call(client, "get_calendar_link", {
-        "tags": ["salsa dancing"], "min_tag_match": 0.6,
+        "filters": {
+            "tags": ["salsa dancing"], "min_tag_match": 0.6,
+        },
     })
     assert "tags=salsa+dancing" in semantic["ics_url"]
     assert "min_tag_match=0.6" in semantic["ics_url"]
+
+    organizer = _call(client, "get_calendar_link", {
+        "filters": {"organizer": "WKO", "tags": ["startup"]},
+    })
+    assert "organizer=WKO" in organizer["ics_url"]
+    assert "tags=startup" in organizer["ics_url"]
+
+    source = _call(client, "get_calendar_link", {
+        "filters": {"source": "WKO", "tags": ["startup"]},
+    })
+    assert "source=WKO" in source["ics_url"]
+
+    large = _call(client, "get_calendar_link", {
+        "filters": {
+            "categories": ["music"],
+            "participant_count_min": 300,
+            "required_attributes": ["event_scale"],
+        },
+        "min_scale_confidence": 0.3,
+    })
+    assert "participant_count_min=300" in large["ics_url"]
+    assert "min_scale_confidence=0.3" in large["ics_url"]
 
 
 def test_get_calendar_link_rejects_an_unscoped_subscription(client):
@@ -161,7 +206,7 @@ def test_get_calendar_link_rejects_an_unscoped_subscription(client):
     })
     assert body["result"].get("isError") is True
     message = body["result"]["content"][0]["text"].lower()
-    assert "category" in message and "tag" in message
+    assert "categories" in message and "tags" in message
 
 
 def test_get_event_detail(conn, client):

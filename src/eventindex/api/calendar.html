@@ -131,7 +131,7 @@ function render(occurrences) {
     const meta = [
       o.venue_name, o.venue_address,
       (o.category || []).join(", "),
-      price(o.price_min, o.price_max),
+      price(o.price?.min, o.price?.max),
       o.confidence !== null
         ? "Konfidenz " + Math.round(o.confidence * 100) + " %" : null,
       o.tag_match !== null && o.tag_match !== undefined

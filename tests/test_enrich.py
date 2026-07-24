@@ -13,7 +13,14 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "age_min": {"value": 20, "confidence": age_conf, "evidence": "Studentenparty"},
         "age_max": {"value": 30, "confidence": age_conf, "evidence": "Studentenparty"},
         "gender_split": {"value": 0.5, "confidence": 0.3, "evidence": None},
-        "expected_attendance": {"value": None, "confidence": 0.0, "evidence": None},
+        "event_scale": {
+            "estimated_participants": 250,
+            "plausible_min": 150,
+            "plausible_max": 400,
+            "confidence": 0.35,
+            "basis": ["club capacity", "event format"],
+            "evidence": None,
+        },
         "language": {"value": "de", "confidence": 0.7, "evidence": "Studentenparty"},
         "kid_friendly": {"value": False, "confidence": 0.6, "evidence": "ab 18"},
         "newcomer_friendly": {"value": True, "confidence": 0.5, "evidence": None},
@@ -28,9 +35,9 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
             {"name": "loud", "confidence": 0.3, "evidence": None},
         ],
         "venue": {"value": "Kellerclub", "confidence": 0.8, "evidence": "im Kellerclub"},
-        "stated_price": {
+        "price": {
             "min": 12, "max": 12, "currency": "EUR", "confidence": 0.8,
-            "evidence": "12 EUR",
+            "basis": "stated", "evidence": "12 EUR",
         },
         "start_time": {"value": "23:00", "confidence": 0.3, "evidence": None},
     })
@@ -40,12 +47,15 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
 def event_row(conn):
     event_id = uuid.uuid4()
     conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'one_off', 'Studentenparty im Keller', '{nightlife}', 0.8, 'confirmed')",
+        "INSERT INTO event (id, kind, title, description, category, "
+        "confidence, status) VALUES (%s, 'one_off', "
+        "'Studentenparty im Keller', 'Eintritt 12 EUR', '{nightlife}', "
+        "0.8, 'confirmed')",
         (event_id,),
     )
     return {
-        "id": event_id, "title": "Studentenparty im Keller", "description": None,
+        "id": event_id, "title": "Studentenparty im Keller",
+        "description": "Eintritt 12 EUR",
         "category": ["nightlife"], "venue_name": "Kellerclub",
         "price_min": None, "price_max": None,
     }
@@ -77,7 +87,8 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
     apply_to_event(conn, event_row["id"], attrs)
     row = conn.execute(
         "SELECT expected_age_range, expected_age_range_confidence, inferred, "
-        "lang, price_min, price_max, venue_id "
+        "lang, price_min, price_max, venue_id, expected_attendance, "
+        "expected_attendance_confidence "
         "FROM event WHERE id = %s", (event_row["id"],),
     ).fetchone()
     assert row["expected_age_range"].lower == 20
@@ -87,6 +98,8 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
     assert row["inferred"]["language"]["value"] == "de"
     assert row["lang"] == "de"
     assert float(row["price_min"]) == float(row["price_max"]) == 12
+    assert row["expected_attendance"] == 250
+    assert row["expected_attendance_confidence"] == 0.35
     assert row["venue_id"] is not None
     tags = conn.execute(
         "SELECT name, confidence, origins FROM event_tag WHERE event_id = %s",
@@ -99,6 +112,8 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
 def test_content_key_changes_with_content(event_row):
     other = dict(event_row, title="Seniorencafé")
     assert content_key(event_row) != content_key(other)
+    assert content_key(dict(event_row, price_min=0, price_max=0)) != \
+        content_key(event_row)
 
 
 def test_flagged_venue_always_carries_sex_service_context(conn, event_row, monkeypatch):

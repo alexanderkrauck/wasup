@@ -700,7 +700,7 @@ def _self_validate(recipe: Recipe, sample_titles: list[str], source, tx, job_id,
         # venue contract (2026-07-14): this onboarding was escalated BECAUSE
         # events arrived location-less. The trimmed run never follows detail
         # pages, so a follow_detail recipe is judged on its per-item URLs
-        # (which the detail fetch and the timefix re-fetch both need).
+        # (which the generic event-hydration recovery also needs).
         n = len(payloads)
         with_url = sum(1 for p in payloads if (p.get("url") or {}).get("value"))
         with_venue = sum(

@@ -34,6 +34,12 @@ _PROVENANCE_SQL = """
     WHERE i.event_id = e.id AND s.kind <> 'internal'
 """
 
+_PRICE_SOURCE_SQL = """
+    SELECT coalesce(c.payload->'url'->>'value', s.url)
+    FROM event_claim c JOIN source s ON s.id = c.source_id
+    WHERE c.id = nullif(e.field_provenance->'price_min'->>'claim', '')::uuid
+"""
+
 # §7 staleness decay, computed at query time: each missed re-confirmation
 # cadence multiplies confidence by 0.9. A dead pipeline fades to an empty
 # feed instead of serving frozen confidence.
@@ -238,6 +244,94 @@ def _data_freshness(conn) -> datetime | None:
     ).fetchone()["ts"]
 
 
+def _scale_band(participants: int) -> str:
+    if participants < 30:
+        return "intimate"
+    if participants < 100:
+        return "small"
+    if participants < 300:
+        return "medium"
+    if participants < 1000:
+        return "large"
+    if participants < 5000:
+        return "very_large"
+    return "mass"
+
+
+def _public_price(row: dict, inferred: dict | None = None) -> dict:
+    inferred = inferred or row.get("inferred") or {}
+    if row.get("price_min") is not None:
+        confidence = (
+            (row.get("field_provenance") or {})
+            .get("price_min", {})
+            .get("confidence", 0.8)
+        )
+        return {
+            "min": float(row["price_min"]),
+            "max": float(
+                row["price_max"]
+                if row.get("price_max") is not None else row["price_min"]
+            ),
+            "currency": "EUR",
+            "confidence": float(confidence),
+            "basis": "stated",
+            "source_url": row.get("price_source_url") or row.get("url"),
+        }
+    estimate = inferred.get("price") or {}
+    return {
+        "min": estimate.get("min"),
+        "max": estimate.get("max"),
+        "currency": estimate.get("currency") or "EUR",
+        "confidence": estimate.get("confidence"),
+        "basis": estimate.get("basis") or "unknown",
+        "source_url": None,
+    }
+
+
+def _public_event_scale(row: dict, inferred: dict | None = None) -> dict:
+    inferred = inferred or row.get("inferred") or {}
+    scale = inferred.get("event_scale") or {}
+    participants = (
+        row.get("expected_attendance")
+        if row.get("expected_attendance") is not None
+        else scale.get("estimated_participants")
+    )
+    if participants is None:
+        return {
+            "estimated_participants": None,
+            "plausible_min": None,
+            "plausible_max": None,
+            "band": None,
+            "confidence": None,
+            "basis": [],
+        }
+    participants = int(participants)
+    return {
+        "estimated_participants": participants,
+        "plausible_min": int(scale.get("plausible_min", participants)),
+        "plausible_max": int(scale.get("plausible_max", participants)),
+        "band": _scale_band(participants),
+        "confidence": (
+            row.get("expected_attendance_confidence")
+            if row.get("expected_attendance_confidence") is not None
+            else scale.get("confidence")
+        ),
+        "basis": list(scale.get("basis") or ["event estimate"]),
+    }
+
+
+def _attach_public_price_and_scale(row: dict) -> dict:
+    inferred = row.pop("inferred", None) or {}
+    row["price"] = _public_price(row, inferred)
+    row["event_scale"] = _public_event_scale(row, inferred)
+    for key in (
+        "price_min", "price_max", "price_source_url", "field_provenance",
+        "expected_attendance", "expected_attendance_confidence",
+    ):
+        row.pop(key, None)
+    return row
+
+
 def _parse_radius(radius: str) -> float:
     m = re.fullmatch(r"([\d.]+)\s*(km|m)?", radius.strip())
     if not m:
@@ -267,7 +361,8 @@ def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
 
 def _occurrence_filters(
     from_, to, near, radius, bbox, category, min_confidence,
-    include_terms=None, exclude_sex_service_context: bool = False,
+    name=None, organizer=None, venue=None, source=None,
+    exclude_sex_service_context: bool = False,
 ) -> tuple[list[str], dict]:
     """The shared filter set of /v1/occurrences and /v1/feed.ics."""
     from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER
@@ -331,23 +426,28 @@ def _occurrence_filters(
     if min_confidence is not None:
         conditions.append(f"({_EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
         params["min_conf"] = min_confidence
-    if include_terms:
-        # same word-boundary + hyphen/compound semantics as /v1/query, so
-        # exhaustive text listings can page with the cursor (audit B5)
-        alts = []
-        for i, term in enumerate(
-            t.strip() for t in include_terms.split(",") if t.strip()
-        ):
-            key = f"inc_term_{i}"
-            pat = r"[-\s]?".join(re.escape(tok) for tok in term.split())
-            alts.append(
-                f"e.title ~* %({key})s "
-                f"OR coalesce(v.name ~* %({key})s, false) "
-                f"OR coalesce(e.organizer ~* %({key})s, false)"
-            )
-            params[key] = rf"\m{pat}|{pat}\M"
-        if alts:
-            conditions.append("(" + " OR ".join(alts) + ")")
+    if name:
+        # Same event-title scope and German compound-suffix behavior as the
+        # structured query core.
+        pat = r"[-\s]?".join(re.escape(tok) for tok in name.split())
+        conditions.append("e.title ~* %(event_name)s")
+        params["event_name"] = rf"{pat}\M"
+    if organizer:
+        conditions.append("e.organizer ILIKE %(organizer_name)s")
+        params["organizer_name"] = f"%{organizer}%"
+    if venue:
+        conditions.append("v.name ILIKE %(venue_name)s")
+        params["venue_name"] = f"%{venue}%"
+    if source:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM identity src_i "
+            "JOIN event_claim src_c ON src_c.fingerprint = src_i.fingerprint "
+            "JOIN source src_s ON src_s.id = src_c.source_id "
+            "WHERE src_i.event_id = e.id AND src_s.kind <> 'internal' "
+            "AND (src_s.name ILIKE %(source_name)s "
+            "OR src_s.url ILIKE %(source_name)s))"
+        )
+        params["source_name"] = f"%{source}%"
     if exclude_sex_service_context:
         # Keep unknown classifications: the MCP safety policy suppresses
         # only events positively identified as commercial sex services.
@@ -368,9 +468,13 @@ def occurrences(
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
     min_confidence: float | None = Query(None, ge=0, le=1),
-    include_terms: str | None = Query(
-        None, description="comma-separated synonyms; at least one must "
-        "match title/venue/organizer (word-boundary aware)"),
+    name: str | None = Query(
+        None, description="literal event-title search; German compound "
+        "suffixes such as Maturaball match name=ball"),
+    organizer: str | None = Query(None, description="literal organizer name"),
+    venue: str | None = Query(None, description="literal venue name"),
+    source: str | None = Query(
+        None, description="literal reporting-source name or URL"),
     tags: str | None = Query(
         None, description="comma-separated semantic event tags; supplying "
         "tags makes this chronological listing a certainty-weighted filter"),
@@ -382,7 +486,8 @@ def occurrences(
     matches), keyset-paginated. For importance x certainty ranking over
     audience attributes use POST /v1/query."""
     conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence, include_terms
+        from_, to, near, radius, bbox, category, min_confidence,
+        name, organizer, venue, source,
     )
     desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
     if desired_tags:
@@ -408,6 +513,9 @@ def occurrences(
                e.title, e.category, e.price_min, e.price_max, e.url,
                e.kind, e.organizer, e.status AS event_status,
                e.booking_url, e.registration_required,
+               e.inferred, e.field_provenance,
+               e.expected_attendance, e.expected_attendance_confidence,
+               ({_PRICE_SOURCE_SQL}) AS price_source_url,
                v.name AS venue_name, v.address AS venue_address,
                ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
@@ -431,6 +539,7 @@ def occurrences(
             for row in rows:
                 row["tag_match"] = round(tag_scores[row["event_id"]], 4)
             rows = rows[:limit]
+        rows = [_attach_public_price_and_scale(row) for row in rows]
         freshness = _data_freshness(conn)
 
     next_cursor = None
@@ -454,7 +563,18 @@ def feed_ics(
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
     min_confidence: float | None = Query(None, ge=0, le=1),
-    include_terms: str | None = Query(None, description="comma-separated"),
+    name: str | None = Query(None, description="literal event-title search"),
+    organizer: str | None = Query(None, description="literal organizer name"),
+    venue: str | None = Query(None, description="literal venue name"),
+    source: str | None = Query(
+        None, description="literal reporting-source name or URL"),
+    max_price: float | None = Query(
+        None, ge=0, description="hard maximum stated EUR price"),
+    is_free: bool | None = Query(
+        None, description="true requires an explicitly free event"),
+    participant_count_min: int | None = Query(None, ge=1),
+    participant_count_max: int | None = Query(None, ge=1),
+    min_scale_confidence: float = Query(0, ge=0, le=1),
     tags: str | None = Query(
         None, description="comma-separated semantic event tags"),
     min_tag_match: float = Query(
@@ -476,11 +596,43 @@ def feed_ics(
     from icalendar import Calendar, Event as ICalEvent
 
     conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence, include_terms,
+        from_, to, near, radius, bbox, category, min_confidence,
+        name, organizer, venue, source,
         exclude_sex_service_context,
     )
+    if (
+        participant_count_min is not None
+        and participant_count_max is not None
+        and participant_count_min > participant_count_max
+    ):
+        raise HTTPException(
+            422, "participant_count_min is greater than participant_count_max"
+        )
     if not include_time_unknown:
         conditions.append("NOT o.time_unknown")
+    if is_free:
+        conditions.append("e.price_min = 0")
+    elif max_price is not None:
+        conditions.append("e.price_min <= %(feed_max_price)s")
+        params["feed_max_price"] = max_price
+    if participant_count_min is not None:
+        conditions.append(
+            "e.expected_attendance >= %(feed_scale_min)s AND "
+            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
+        )
+        params.update(
+            feed_scale_min=participant_count_min,
+            feed_scale_conf=min_scale_confidence,
+        )
+    if participant_count_max is not None:
+        conditions.append(
+            "e.expected_attendance <= %(feed_scale_max)s AND "
+            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
+        )
+        params.update(
+            feed_scale_max=participant_count_max,
+            feed_scale_conf=min_scale_confidence,
+        )
     desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
     if desired_tags:
         try:
@@ -541,27 +693,21 @@ def _run_filters(filters, limit: int,
                  sort: str = "relevance", distinct: bool = False,
                  offset: int = 0,
                  exclude_sex_service_context: bool = False,
-                 include_tag_terms: bool = True,
                  ) -> dict:
-    """The deterministic search core shared by /v1/search and /v1/query:
-    guarantees as set logic in SQL; soft attribute preferences scored as
-    importance x certainty; unified tags rank or explicitly threshold."""
+    """The deterministic search core shared by /v1/search and /v1/query.
+
+    Discovery selects one relevant occurrence per event before ranking and
+    limiting, so recurring events cannot crowd later one-offs out of the
+    candidate set.
+    """
     from eventindex.api.search import attribute_select, build_sql, rank
 
     with db.connect() as conn:
         where, params = build_sql(
             filters,
             exclude_sex_service_context=exclude_sex_service_context,
-            include_tag_terms=include_tag_terms,
         )
-        # soft preferences reorder, so the pool must cover the WHOLE window -
-        # a small pool ordered by starts_at would only ever score the first
-        # days (bit us live: a 14-day running query missed day-3 events). At
-        # Linz scale a full window fits; the flag below keeps us honest.
-        pool = 2000
-        params["limit"] = pool + 1
-        rows = conn.execute(
-            f"""
+        select = f"""
             SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.status,
                    o.projected, o.time_unknown,
                    (o.starts_at < %(from)s) AS ongoing,
@@ -572,6 +718,9 @@ def _run_filters(filters, limit: int,
                    e.booking_url, e.registration_required,
                    v.name AS venue_name, v.address AS venue_address,
                    e.expected_age_range AS age_range,
+                   e.inferred, e.field_provenance,
+                   e.expected_attendance, e.expected_attendance_confidence,
+                   ({_PRICE_SOURCE_SQL}) AS price_source_url,
                    ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                    ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
                    ({_PROVENANCE_SQL}) AS provenance_summary,
@@ -579,36 +728,42 @@ def _run_filters(filters, limit: int,
             FROM occurrence o JOIN event e ON e.id = o.event_id
             LEFT JOIN venue v ON v.id = e.venue_id
             WHERE {where}
-            ORDER BY o.starts_at LIMIT %(limit)s
-            """,
-            params,
-        ).fetchall()
-        tag_scores = tag_store.semantic_scores(
+        """
+        if distinct:
+            sql = (
+                "WITH event_candidates AS ("
+                "SELECT DISTINCT ON (event_id) * FROM ("
+                + select
+                + ") eligible "
+                "ORDER BY event_id, ongoing, starts_at, id"
+                ") SELECT * FROM event_candidates ORDER BY starts_at, id"
+            )
+        else:
+            sql = select + " ORDER BY o.starts_at, o.id"
+        rows = conn.execute(sql, params).fetchall()
+        tag_matches = tag_store.semantic_matches(
             conn, [row["event_id"] for row in rows], filters.tags
         ) if filters.tags else {}
+        tag_scores = {
+            event_id: match["score"]
+            for event_id, match in tag_matches.items()
+        }
         freshness = _data_freshness(conn)
-    truncated = len(rows) > pool
-    rows = rows[:pool]
     for r in rows:
         r["age_range"] = str(r["age_range"]) if r["age_range"] else None
+        r["tag_matches"] = (
+            tag_matches.get(r["event_id"], {}).get("concepts", [])
+            if filters.tags else []
+        )
     ranked = rank(rows, filters, importance, tag_scores)
-    if distinct:
-        # one row per EVENT (its best-ranked occurrence): a recurring event
-        # filled 6 of 10 slots of a discovery query (audit B1)
-        seen_events: set = set()
-        ranked = [r for r in ranked
-                  if not (r["event_id"] in seen_events
-                          or seen_events.add(r["event_id"]))]
     if sort == "starts_at":
         ranked = sorted(ranked, key=lambda r: r["starts_at"])
+    ranked = [_attach_public_price_and_scale(row) for row in ranked]
     return {
         "data_freshness": freshness,
         "parsed_filters": filters.model_dump(),
         "importance": importance or {},
-        # true = the window holds more rows than the ranking pool; results
-        # beyond the first `pool` by start time were not scored - narrow the
-        # window or add hard filters
-        "pool_truncated": truncated,
+        "pool_truncated": False,
         "occurrences": ranked[offset:offset + limit],
     }
 
@@ -631,11 +786,11 @@ def query_get(
     limit: int = Query(20, le=100, ge=1),
     offset: int = Query(0, ge=0, le=2000),
     sort: Literal["relevance", "starts_at"] = "relevance",
-    distinct: Literal["event", "occurrence"] = "occurrence",
+    distinct: Literal["event", "occurrence"] = "event",
 ):
     """GET variant of /v1/query for browse-only agents (ChatGPT's browsing
     tool cannot POST). Same filters as query params: lists comma-separated
-    (include_terms=lauf,run), importance as importance=attr:0.9,attr2:0.4.
+    (name=ball), importance as importance=attr:0.9,attr2:0.4.
     """
     from eventindex.api.search import FILTER_DEFAULTS
 
@@ -673,7 +828,7 @@ def query(
     body: QueryBody,
     limit: Annotated[int, Query(le=100, ge=1)] = 20,
     offset: Annotated[int, Query(
-        ge=0, le=2000, description="skip N ranked rows (pool is 2000)",
+        ge=0, le=2000, description="skip N ranked rows",
     )] = 0,
     sort: Annotated[Literal["relevance", "starts_at"], Query(
         description="relevance = match_score x confidence (the default, NOT "
@@ -682,7 +837,7 @@ def query(
     distinct: Annotated[Literal["event", "occurrence"], Query(
         description="event = one row per event (its best occurrence) for "
         "discovery queries; occurrence = every date separately",
-    )] = "occurrence",
+    )] = "event",
 ):
     """Structured search for agents: send SearchFilters fields directly
     (all optional - see /llms.txt) and NO LLM runs on the index side.
@@ -719,14 +874,9 @@ def _safe_estimates(inferred: dict | None) -> dict:
     """
     safe: dict = {}
     for name, value in (inferred or {}).items():
-        if name == "stated_price" and isinstance(value, dict):
-            safe[name] = {
-                "min": value.get("min"),
-                "max": value.get("max"),
-                "currency": value.get("currency"),
-                "confidence": value.get("confidence"),
-            }
-        elif isinstance(value, dict):
+        if name in {"price", "event_scale", "stated_price"}:
+            continue
+        if isinstance(value, dict):
             safe[name] = {
                 "value": value.get("value"),
                 "confidence": value.get("confidence"),
@@ -750,7 +900,9 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
                    e.expected_gender_split,
                    e.expected_gender_split_confidence,
                    e.expected_attendance, e.expected_attendance_confidence,
-                   e.inferred, e.confidence, e.status,
+                   e.inferred, e.field_provenance,
+                   ({_PRICE_SOURCE_SQL}) AS price_source_url,
+                   e.confidence, e.status,
                    e.first_seen, e.last_seen, e.updated_at, e.organizer,
                    v.name AS venue_name, v.address AS venue_address,
                    v.sex_service AS venue_sex_service,
@@ -768,6 +920,13 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
         sex_service_context = row.pop("venue_sex_service") is True or (
             inferred.get("sex_service_context", {}).get("value") is True
         )
+        row["price"] = _public_price(row, inferred)
+        row["event_scale"] = _public_event_scale(row, inferred)
+        for key in (
+            "price_min", "price_max", "price_source_url", "field_provenance",
+            "expected_attendance", "expected_attendance_confidence",
+        ):
+            row.pop(key, None)
         row["estimates"] = _safe_estimates(inferred)
         row["tags"] = tag_store.public_for_event(conn, event_id)
         if row.get("expected_age_range") is not None:

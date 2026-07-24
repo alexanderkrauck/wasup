@@ -86,6 +86,28 @@ def test_semantic_score_combines_calibrated_relation_and_tag_certainty(
     assert scores[exact_id] == 0.7  # exact tag equality is always relation 1
 
 
+def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch):
+    both_id = _event(conn, "Elegant Dance Ball")
+    dance_only_id = _event(conn, "Basic Dance Training")
+    tags.upsert(conn, both_id, "dance", 0.8, "inferred")
+    tags.upsert(conn, both_id, "elegant", 0.7, "inferred")
+    tags.upsert(conn, dance_only_id, "dance", 0.9, "inferred")
+    # Exact-name branches make embeddings irrelevant while still exercising
+    # per-query aggregation.
+    monkeypatch.setattr(
+        embeddings, "embed_tags",
+        lambda values: np.zeros((len(values), embeddings.DIMENSIONS), dtype=np.float32),
+    )
+    matches = tags.semantic_matches(
+        conn, [both_id, dance_only_id], ["dance", "elegant"]
+    )
+    assert matches[both_id]["score"] == 0.75
+    assert matches[dance_only_id]["score"] == 0.45
+    assert [m["query"] for m in matches[both_id]["concepts"]] == [
+        "dance", "elegant"
+    ]
+
+
 def test_semantic_threshold_runs_before_sql_limit(conn, monkeypatch):
     salsa_id = _event(conn, "Salsa Social")
     startup_id = _event(conn, "Startup Meetup")

@@ -61,9 +61,10 @@ class _TextEst(BaseModel):
 
 class _PriceEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    min: float | None
-    max: float | None
-    currency: Literal["EUR"] | None
+    min: float
+    max: float
+    currency: Literal["EUR"]
+    basis: Literal["stated", "estimated"]
     confidence: float
     evidence: str | None
 
@@ -75,6 +76,16 @@ class _TagEst(BaseModel):
     evidence: str | None
 
 
+class _EventScaleEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    estimated_participants: int
+    plausible_min: int
+    plausible_max: int
+    confidence: float
+    basis: list[str]
+    evidence: str | None
+
+
 class Enrichment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # descriptions live in the prompt: strict schema mode forbids
@@ -82,7 +93,7 @@ class Enrichment(BaseModel):
     age_min: _Est
     age_max: _Est
     gender_split: _Est
-    expected_attendance: _Est
+    event_scale: _EventScaleEst
     language: _LanguageEst
     kid_friendly: _BoolEst
     newcomer_friendly: _BoolEst
@@ -95,20 +106,26 @@ class Enrichment(BaseModel):
         description="6-12 useful event concepts, each 1-3 lowercase words "
         "with its own confidence; no synonyms, translations, or commentary")
     venue: _TextEst
-    stated_price: _PriceEst
+    price: _PriceEst
     start_time: _TimeEst
 
 
 # bump when the Enrichment schema gains fields: old cache rows lack them, so
 # a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+DESCRIPTION_CHARS = 6000
 
 
 def content_key(event: dict) -> str:
+    def present(value) -> str:
+        return "" if value is None else str(value)
+
     parts = "|".join([
         f"v{SCHEMA_VERSION}",
-        event.get("title") or "", (event.get("description") or "")[:500],
+        event.get("title") or "",
+        (event.get("description") or "")[:DESCRIPTION_CHARS],
         ",".join(event.get("category") or []), str(event.get("venue_name") or ""),
+        present(event.get("price_min")), present(event.get("price_max")),
     ])
     return hashlib.md5(parts.encode()).hexdigest()
 
@@ -137,6 +154,27 @@ def venue_override(event: dict, attributes: dict) -> dict:
     return attributes
 
 
+def exact_price_override(event: dict, attributes: dict) -> dict:
+    """A canonical stated price always outranks a fresh model estimate."""
+    if event.get("price_min") is not None:
+        attributes["price"] = {
+            "min": float(event["price_min"]),
+            "max": float(
+                event["price_max"]
+                if event.get("price_max") is not None else event["price_min"]
+            ),
+            "currency": "EUR",
+            "basis": "stated",
+            "confidence": CONFIDENCE_CAP,
+            "evidence": "canonical stated price",
+        }
+    return attributes
+
+
+def _live_overrides(event: dict, attributes: dict) -> dict:
+    return exact_price_override(event, venue_override(event, attributes))
+
+
 def enrich_event(tx, event: dict, job_id=None) -> dict:
     """Compute (or fetch cached) inferred attributes for one canonical event.
     Returns the attributes dict."""
@@ -145,7 +183,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "SELECT attributes FROM enrichment WHERE content_key = %s", (key,)
     ).fetchone()
     if cached:
-        return venue_override(event, cached["attributes"])
+        return _live_overrides(event, cached["attributes"])
 
     prior = _prior_for(tx, event.get("category") or [])
     result = llm.complete(
@@ -167,6 +205,12 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "silent throughout (concert, cinema, lecture). "
         "language: infer the language attendees will need from the event text "
         "and context, with confidence like every other estimate. "
+        "event_scale: ALWAYS estimate the number of participants plus a "
+        "plausible low/high range. Use explicit attendance/capacity/registration "
+        "evidence first, then venue capacity, past editions, organizer draw, "
+        "and finally event-format world knowledge. Put short basis labels in "
+        "basis; confidence ~0.2 for a pure guess, ~0.35 for a normal type/venue "
+        "estimate, and up to 0.8 only for explicit text. "
         "tags: provide 6-12 distinct, useful concepts covering activity/topic, "
         "format, audience, and setting. Each tag is 1-3 lowercase words. "
         "Do not emit generic tags like 'event' or 'linz', commentary, duplicate "
@@ -174,9 +218,12 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "knowledge at low confidence; quote evidence when explicit. "
         "venue: only a public venue/organization name explicitly present in "
         "TITLE or DESCRIPTION; never guess and never return an address. "
-        "stated_price: only a price explicitly present in TITLE or DESCRIPTION; "
-        "use EUR and min=max for a single price, 0 for explicitly free, and "
-        "null values when unstated. Never estimate a typical price. "
+        "price: ALWAYS return the best EUR admission-price range. If TITLE, "
+        "DESCRIPTION, or PRICE explicitly states it, basis='stated' and quote "
+        "the exact evidence. Otherwise basis='estimated', infer a plausible "
+        "range from event type/venue/past editions, use low confidence, and "
+        "leave evidence null. A likely free event is 0-0 with basis estimated "
+        "unless free entry is explicit. "
         "start_time: the typical LOCAL start time (HH:MM) for this kind of "
         "event - used only when the source stated no time; estimate from "
         "the event type (Sunday mass ~09:30, club night ~23:00, "
@@ -190,7 +237,7 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "do not qualify.\n\n"
         f"CATEGORY PRIOR: {prior}\n"
         f"TITLE: {event.get('title')}\n"
-        f"DESCRIPTION: {(event.get('description') or '')[:1200]}\n"
+        f"DESCRIPTION: {(event.get('description') or '')[:DESCRIPTION_CHARS]}\n"
         f"CATEGORY: {event.get('category')}\nVENUE: {event.get('venue_name')}\n"
         f"PRICE: {event.get('price_min')}-{event.get('price_max')}",
         Enrichment,
@@ -200,19 +247,25 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
     for entry in attributes.values():  # the cap is code, not model discipline
         if isinstance(entry, dict) and "confidence" in entry:
             entry["confidence"] = min(entry["confidence"], CONFIDENCE_CAP)
-    _sanity_clamp(attributes)
+    _sanity_clamp(
+        attributes,
+        " ".join([
+            event.get("title") or "",
+            (event.get("description") or "")[:DESCRIPTION_CHARS],
+        ]),
+    )
     tx.execute(
         "INSERT INTO enrichment (content_key, attributes, model) VALUES (%s, %s, %s) "
         "ON CONFLICT (content_key) DO NOTHING",
         (key, Jsonb(attributes), config.MODEL_MINI),
     )
-    return venue_override(event, attributes)
+    return _live_overrides(event, attributes)
 
 
 _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 
-def _sanity_clamp(attributes: dict) -> None:
+def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
     """Deterministic guards (audit A11: age range [18,7251), attendance 0,
     LLM commentary leaking into tags). Estimates stay estimates, but
     impossible values become unknown."""
@@ -221,9 +274,19 @@ def _sanity_clamp(attributes: dict) -> None:
     if lo is not None and hi is not None and not (0 <= lo <= hi <= 100):
         attributes["age_min"]["value"] = None
         attributes["age_max"]["value"] = None
-    att = attributes.get("expected_attendance", {})
-    if att.get("value") is not None and att["value"] < 1:
-        att["value"] = None
+    scale = attributes.get("event_scale", {})
+    estimate = scale.get("estimated_participants")
+    low, high = scale.get("plausible_min"), scale.get("plausible_max")
+    if (
+        not all(isinstance(v, int) for v in (estimate, low, high))
+        or not (1 <= low <= estimate <= high <= 1_000_000)
+    ):
+        raise ValueError("invalid event_scale range")
+    scale["basis"] = [
+        str(item).strip()[:80]
+        for item in scale.get("basis", [])
+        if str(item).strip()
+    ][:5] or ["event format"]
     attributes["tags"] = tag_store.clean_estimates(attributes.get("tags", []))
     for tag in attributes["tags"]:
         tag["confidence"] = min(tag["confidence"], CONFIDENCE_CAP)
@@ -235,16 +298,27 @@ def _sanity_clamp(attributes: dict) -> None:
         venue["value"] = str(venue["value"]).strip()[:120] or None
         if venue.get("evidence") is None:
             venue["value"] = None
-    price = attributes.get("stated_price", {})
+    price = attributes.get("price", {})
     lo, hi = price.get("min"), price.get("max")
     if (
-        price.get("evidence") is None
-        or price.get("currency") not in {"EUR", None}
-        or (lo is not None and (lo < 0 or lo > 5000))
-        or (hi is not None and (hi < 0 or hi > 5000))
-        or (lo is not None and hi is not None and lo > hi)
+        price.get("currency") != "EUR"
+        or lo is None or hi is None
+        or lo < 0 or lo > 5000
+        or hi < 0 or hi > 5000
+        or lo > hi
     ):
-        price.update(min=None, max=None, currency=None)
+        raise ValueError("invalid price range")
+    evidence = str(price.get("evidence") or "").strip()
+    if price.get("basis") == "stated" and (
+        not evidence or evidence.casefold() not in source_text.casefold()
+    ):
+        # A number without quoted source support remains useful as a low-
+        # confidence estimate, but must never become an exact price fact.
+        price["basis"] = "estimated"
+        price["confidence"] = min(price.get("confidence", 0), GUESS_CONFIDENCE)
+        price["evidence"] = None
+    if price.get("basis") == "estimated":
+        price["confidence"] = min(price.get("confidence", 0), 0.35)
     st = attributes.get("start_time", {})
     if st.get("value") is not None and not _TIME_RE.match(str(st["value"])):
         st["value"] = None
@@ -267,7 +341,8 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
         from eventindex.resolve.venues import VenueResolver
 
         venue_id = VenueResolver(tx).resolve(venue["value"])
-    price = attributes.get("stated_price", {})
+    price = attributes.get("price", {})
+    scale = attributes.get("event_scale", {})
     language = attributes.get("language", {})
     tx.execute(
         """
@@ -294,20 +369,18 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
             "age_conf": age_conf,
             "gender": attributes.get("gender_split", {}).get("value"),
             "gender_conf": attributes.get("gender_split", {}).get("confidence"),
-            "attendance": (
-                int(a) if (a := attributes.get("expected_attendance", {}).get("value"))
-                is not None else None
-            ),
-            "attendance_conf": attributes.get("expected_attendance", {}).get("confidence"),
+            "attendance": scale.get("estimated_participants"),
+            "attendance_conf": scale.get("confidence"),
             "language": language.get("value"),
             "venue_id": venue_id,
-            "price_min": price.get("min"),
-            "price_max": price.get("max") if price.get("max") is not None else price.get("min"),
+            "price_min": price.get("min") if price.get("basis") == "stated" else None,
+            "price_max": price.get("max") if price.get("basis") == "stated" else None,
             "inferred": Jsonb({
                 k: attributes[k] for k in
                 ("language", "kid_friendly", "newcomer_friendly", "outdoor",
                  "solo_friendly", "interaction_structure", "energy",
-                 "sex_service_context", "venue", "stated_price", "start_time")
+                 "sex_service_context", "venue", "price", "event_scale",
+                 "start_time")
                 if k in attributes
             }),
         },

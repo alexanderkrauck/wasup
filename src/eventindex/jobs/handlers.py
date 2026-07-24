@@ -747,73 +747,123 @@ def discover(job: dict, tx) -> list[dict]:
     return []
 
 
-def _detail_claims_worth_keeping(payloads: list[dict], needs_venue: bool) -> list[dict]:
-    """A detail-page claim earns insertion when it carries information the
-    canon lacks: a real time-of-day (not the 00:00 placeholder - and not
-    via endswith('00:00'), which also matched real on-the-hour starts), or,
-    for events with no location at all, a venue string (venue contract,
-    Alexander 2026-07-14)."""
-    kept = []
-    for p in payloads:
-        v = str(p.get("starts_at", {}).get("value") or "").replace(" ", "T")
-        timed = "T" in v and not v.split("T", 1)[1].startswith("00:00")
-        has_venue = bool((p.get("venue") or {}).get("value"))
-        if timed or (needs_venue and has_venue):
-            kept.append(p)
-    return kept
+def hydrate_event(job: dict, tx) -> list[dict]:
+    """Recover missing exact facts from public detail, booking, and web pages.
 
-
-def timefix(job: dict, tx) -> list[dict]:
-    """Audit A4 (Alexander 2026-07-13: find the real time) + venue contract
-    (2026-07-14): re-fetch the detail page of an event whose future
-    occurrences are date-only or whose location is unknown; the cascade's
-    claims replace midnight placeholders / attach the venue at the next
-    rebuild (occurrence folding keys date-only claims by local day)."""
-    import re as _re
-
-    from eventindex.fetch import FETCHED, fetch_source
+    The result is an append-only claim on the event's existing fingerprint.
+    Canon remains a pure resolver projection.
+    """
+    from eventindex.discovery.sweep import search_web
+    from eventindex.enrich.facts import extract_facts, fetch_pages
 
     event_id = job["payload"]["event_id"]
     row = tx.execute(
-        "SELECT e.url, s.id, s.name, "
-        "       (e.venue_id IS NULL AND e.geo IS NULL) AS needs_venue, "
-        "       ST_Y(s.geo) AS lat, ST_X(s.geo) AS lon "
-        "FROM event e "
-        "JOIN identity i ON i.event_id = e.id "
-        "JOIN event_claim c ON c.fingerprint = i.fingerprint "
-        "JOIN source s ON s.id = c.source_id "
-        "WHERE e.id = %s AND s.kind <> 'internal' "
-        "ORDER BY s.trust DESC LIMIT 1",
+        """
+        SELECT e.id AS event_id, e.title, e.url, e.booking_url, e.organizer,
+               e.price_min, e.venue_id, e.geo,
+               v.name AS venue_name,
+               o.starts_at, o.time_unknown,
+               i.fingerprint, c.source_id
+        FROM event e
+        JOIN occurrence o ON o.event_id = e.id
+        JOIN identity i ON i.event_id = e.id
+        JOIN event_claim c ON c.fingerprint = i.fingerprint
+        JOIN source s ON s.id = c.source_id
+        LEFT JOIN venue v ON v.id = e.venue_id
+        WHERE e.id = %s AND o.status = 'scheduled'
+          AND coalesce(o.ends_at, o.starts_at) >= now()
+          AND s.kind <> 'internal'
+        ORDER BY o.starts_at, s.trust DESC, c.extracted_at DESC
+        LIMIT 1
+        """,
         (event_id,),
     ).fetchone()
-    if not row or not row["url"] or _re.match(r"^https?://[^/]+/?$", row["url"]):
+    if row is None:
         return []
-    # detail pages are HTML regardless of how the SOURCE is normally
-    # consumed (the linztermine feed is XML, its event pages are not)
-    source = dict(row) | {
-        "url": row["url"], "kind": "website", "last_content_hash": None,
-        "http_etag": None, "http_last_modified": None,
-    }
-    result = fetch_source(source)
-    if result.status != FETCHED:
-        return []
-    method, payloads = extract(source, result, tx, job_id=job["id"])
-    kept = _detail_claims_worth_keeping(payloads, row["needs_venue"])
-    if kept:
-        _insert_claims(tx, source, None, kept)
-    tx.execute(
-        "INSERT INTO crawl_log (job_id, source_id, finished_at, status, detail) "
-        "VALUES (%s, %s, now(), 'ok', %s)",
-        (job["id"], source["id"],
-         f"timefix[{method}]: {len(kept)} claims kept"),
+
+    urls = [
+        url for url in (row.get("url"), row.get("booking_url"))
+        if url and url.startswith(("http://", "https://"))
+    ]
+    pages = fetch_pages(urls)
+    payload, raw_excerpt = extract_facts(tx, row, pages, job_id=job["id"])
+    searched = False
+
+    needs_price = row["price_min"] is None and "price_min" not in payload
+    needs_venue = (
+        row["venue_id"] is None and row["geo"] is None
+        and "venue_name" not in payload
     )
-    return []
+    needs_time = row["time_unknown"] and "starts_at" not in payload
+    needs_booking = row["booking_url"] is None and "booking_url" not in payload
+    if needs_price or needs_venue or needs_time or needs_booking:
+        local_date = row["starts_at"].date().isoformat()
+        query = " ".join(filter(None, [
+            f'"{row["title"]}"',
+            local_date,
+            row.get("venue_name"),
+            row.get("organizer"),
+            "Tickets Preis Eintritt Anmeldung",
+        ]))
+        hits = search_web(tx, query, job_id=job["id"])
+        known = {page.url for page in pages} | set(urls)
+        extra_pages = fetch_pages([url for url in hits if url not in known])
+        if extra_pages:
+            searched = True
+            extra_payload, extra_raw = extract_facts(
+                tx, row, pages + extra_pages, job_id=job["id"]
+            )
+            recovered_price = (
+                "price_min" not in payload and "price_min" in extra_payload
+            )
+            for key, value in extra_payload.items():
+                payload.setdefault(key, value)
+            if recovered_price and "url" in extra_payload:
+                # The canonical price provenance must point at the page that
+                # actually states the price, not an earlier venue-only page.
+                payload["url"] = extra_payload["url"]
+            raw_excerpt = " | ".join(filter(None, [
+                raw_excerpt, extra_raw
+            ]))[:2000] or None
+
+    if payload:
+        payload.setdefault(
+            "title", {"value": row["title"], "confidence": 0.9}
+        )
+        payload.setdefault(
+            "starts_at",
+            {"value": row["starts_at"].isoformat(), "confidence": 0.9},
+        )
+        tx.execute(
+            "INSERT INTO event_claim (source_id, fingerprint, raw_excerpt, payload) "
+            "VALUES (%s, %s, %s, %s)",
+            (
+                row["source_id"], row["fingerprint"], raw_excerpt,
+                Jsonb(payload),
+            ),
+        )
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, source_id, finished_at, status, "
+        "events_found, detail) VALUES (%s, %s, now(), 'ok', %s, %s)",
+        (
+            job["id"], row["source_id"], 1 if payload else 0,
+            f"hydrate_event: pages={len(pages)} web_search={searched} "
+            f"fields={sorted(payload)}",
+        ),
+    )
+    if not payload:
+        return []
+    pending = tx.execute(
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+    ).fetchone()
+    return [] if pending else [{"kind": "resolve", "payload": {}}]
 
 
 HANDLERS = {
     "crawl": crawl, "resolve": resolve, "enrich": enrich,
     "embed_tags": embed_tags,
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
-    "discover": discover, "qa_check": qa_check, "timefix": timefix,
+    "discover": discover, "qa_check": qa_check,
+    "hydrate_event": hydrate_event,
     "parity_audit": parity_audit,
 }

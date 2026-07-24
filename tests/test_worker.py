@@ -162,7 +162,7 @@ def test_final_onboard_failure_degrades_recipeless_source(conn, monkeypatch):
 
 
 def test_every_handler_follows_the_worker_calling_convention():
-    """run_job calls HANDLERS[kind](job, tx) - timefix shipped as
+    """run_job calls HANDLERS[kind](job, tx) - a detail handler once shipped as
     (tx, job) and burned its whole job backlog before ever running."""
     import inspect
 
@@ -175,13 +175,13 @@ def test_every_handler_follows_the_worker_calling_convention():
 
 def test_ghost_target_handlers_noop_and_survive_their_imports(conn):
     """Handlers with a missing-row no-op path must reach it: this executes
-    their function-local imports, which a signature check cannot (timefix
+    their function-local imports, which a signature check cannot (the old detail
     imported a `fetch` that never existed - found live 2026-07-13 after
     700 failed jobs)."""
     import uuid
 
     ghost = str(uuid.uuid4())
-    for kind in ("enrich", "timefix"):
+    for kind in ("enrich", "hydrate_event"):
         job = {"id": uuid.uuid4(), "kind": kind, "payload": {"event_id": ghost}}
         assert handlers.HANDLERS[kind](job, conn) == []
 
@@ -227,24 +227,6 @@ def test_embed_tags_handler_fills_missing_names(conn, monkeypatch):
     )
     assert handlers.embed_tags({"id": uuid.uuid4(), "payload": {}}, conn) == []
     assert captured == ["salsa dancing"]
-
-
-def test_detail_claims_kept_for_time_or_missing_venue():
-    payloads = [
-        {"title": {"value": "A"}, "starts_at": {"value": "2030-01-01 19:00:00"}},
-        {"title": {"value": "B"}, "starts_at": {"value": "2030-01-01 00:00:00"},
-         "venue": {"value": "Palais Kaufmännischer Verein"}},
-        {"title": {"value": "C"}, "starts_at": {"value": "2030-01-01"}},
-    ]
-    # event already has a location: only the truly timed claim is news
-    kept = handlers._detail_claims_worth_keeping(payloads, needs_venue=False)
-    assert [p["title"]["value"] for p in kept] == ["A"]
-    # event has no location: the venue-bearing date-only claim is news too
-    kept = handlers._detail_claims_worth_keeping(payloads, needs_venue=True)
-    assert [p["title"]["value"] for p in kept] == ["A", "B"]
-    # on-the-hour starts are real times, not midnight placeholders
-    assert handlers._detail_claims_worth_keeping(
-        [{"starts_at": {"value": "2030-01-01T20:00"}}], needs_venue=False)
 
 
 def test_failed_agent_session_notes_survive_the_rollback(conn, monkeypatch):

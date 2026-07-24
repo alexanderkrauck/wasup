@@ -293,10 +293,19 @@ def test_query_endpoint_exposes_semantic_tag_score(conn, client, monkeypatch):
     }
     monkeypatch.setattr(
         app_mod.tag_store,
-        "semantic_scores",
+        "semantic_matches",
         lambda tx, event_ids, desired: {
-            ids["Nearby Concert"]: 0.1,
-            ids["Unknown Location Talk"]: 0.8,
+            ids["Nearby Concert"]: {
+                "score": 0.1, "concepts": [],
+            },
+            ids["Unknown Location Talk"]: {
+                "score": 0.8,
+                "concepts": [{
+                    "query": "learning", "score": 0.8,
+                    "event_tag": "learning", "tag_confidence": 0.8,
+                    "relatedness": 1.0,
+                }],
+            },
         },
     )
     rows = client.post(

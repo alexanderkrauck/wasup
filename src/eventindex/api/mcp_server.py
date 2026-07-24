@@ -431,7 +431,9 @@ def search_events(
     Do not put `dance` in name, do not call once for dance and again for
     elegant, and do not call get_event repeatedly merely to compare prices or
     scale: every result already returns those fields, their confidence/basis,
-    and per-requested-tag match evidence.
+    and per-requested-tag match evidence. When tags and secondary preferences
+    are combined, semantic fit leads by default; use `importance` only when
+    the user's wording clearly assigns a different relative priority.
 
     Returns one row per event with its next relevant occurrence. Omitted or
     false sex_service_context excludes known commercial sex-service contexts;

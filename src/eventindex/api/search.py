@@ -292,8 +292,10 @@ QueryBody = create_model(
        for name, f in SearchFilters.model_fields.items()},
     importance=(dict[str, float], Field(
         {}, description="0..1 weight per soft attribute, including tags, "
-        "price, and event_scale; default 1.0 for every preference the request "
-        "actually supplies. Stored certainty is always part of match_score")),
+        "price, and event_scale. Tags default to 1.0. When tags are present, "
+        "secondary preferences default to 0.35; otherwise supplied "
+        "preferences default to 1.0. Explicit values always override these "
+        "defaults. Stored certainty is always part of match_score")),
 )
 
 
@@ -637,6 +639,11 @@ def rank(
 ) -> list[dict]:
     """Rank the allowed set by certainty-aware preferences and unified tags."""
     tag_scores = tag_scores or {}
+    # Activity/topic intent should lead when tags are present. A secondary
+    # "ideally cheap/large/..." preference can refine the result, but must not
+    # make a free irrelevant event outrank the requested kind of event. An
+    # explicit importance entry always wins.
+    secondary_default = 0.35 if f.tags else 1.0
 
     soft_attributes = {
         name: wanted for name, wanted in _wanted(f).items()
@@ -646,7 +653,7 @@ def rank(
     def score(row) -> float:
         weighted_scores: list[tuple[float, float]] = []
         for name, want in soft_attributes.items():
-            weight = (importance or {}).get(name, 1.0)
+            weight = (importance or {}).get(name, secondary_default)
             if weight > 0:
                 weighted_scores.append(
                     (weight, _satisfaction(row, name, want))

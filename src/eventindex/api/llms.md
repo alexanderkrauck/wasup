@@ -106,6 +106,12 @@ visible. They rank softly by default. Set `min_tag_match` only when the
 combined concepts are a hard requirement; exact exclusions never use
 embeddings.
 
+When tags are combined with secondary soft preferences such as
+`preferred_max_price` or estimated crowd size, semantic fit leads by default;
+the secondary fields refine it. Use `importance` to override that balance only
+when the user's wording clearly makes another preference equally or more
+important.
+
 Fine print an agent should know:
 - Windows use overlap semantics: anything still running at `from` matches
   (flagged `ongoing`); a null `ends_at` is treated as ending at `starts_at`.

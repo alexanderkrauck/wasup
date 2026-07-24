@@ -253,6 +253,36 @@ def test_stronger_query_fit_beats_higher_whole_event_confidence():
     assert ranked[0]["match_score"] == 0.8
 
 
+def test_tag_intent_leads_secondary_preferences_unless_importance_overrides():
+    f = _filters(tags=["dance"], preferred_max_price=20)
+    dance_id, free_talk_id = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        {
+            "event_id": dance_id, "title": "Dance Night", "confidence": 0.8,
+            "price__value": 35, "price__conf": 0.8,
+        },
+        {
+            "event_id": free_talk_id, "title": "Free Lecture",
+            "confidence": 0.9, "price__value": 0, "price__conf": 0.8,
+        },
+    ]
+    scores = {dance_id: 0.8, free_talk_id: 0.2}
+
+    ranked = rank(rows, f, tag_scores=scores)
+    assert [row["title"] for row in ranked] == [
+        "Dance Night", "Free Lecture",
+    ]
+
+    price_first = rank(
+        rows, f,
+        importance={"tags": 0.1, "price": 1.0},
+        tag_scores=scores,
+    )
+    assert [row["title"] for row in price_first] == [
+        "Free Lecture", "Dance Night",
+    ]
+
+
 def test_min_tag_match_is_an_explicit_hard_filter():
     f = _filters(tags=["dance"], min_tag_match=0.6)
     salsa_id, chess_id = uuid.uuid4(), uuid.uuid4()

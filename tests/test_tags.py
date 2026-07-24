@@ -110,7 +110,9 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
     # missing desired concept score zero instead of letting "dance" substitute
     # for "elegant"; absent joint context applies only its bounded 10% penalty.
     harmonic = 2 / (1 / 0.8 + 1 / 0.7)
-    assert matches[both_id]["score"] == pytest.approx(0.9 * harmonic)
+    assert matches[both_id]["score"] == pytest.approx(
+        0.9 * harmonic * (0.7 / 0.8)
+    )
     assert matches[dance_only_id]["score"] == 0
     assert [m["query"] for m in matches[both_id]["concepts"]] == [
         "dance", "elegant", "dance + elegant"

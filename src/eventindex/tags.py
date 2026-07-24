@@ -270,8 +270,11 @@ def semantic_matches(
         elif any(score <= 0 for score in individual_scores):
             semantic_score = 0.0
         else:
-            coverage = len(individual_scores) / sum(
+            harmonic = len(individual_scores) / sum(
                 1.0 / score for score in individual_scores
+            )
+            coverage = harmonic * (
+                min(individual_scores) / max(individual_scores)
             )
             if len(specs) > len(desired):
                 joint_score = concepts[-1]["score"]
@@ -371,9 +374,14 @@ def semantic_threshold_sql(
         reciprocal_sum = " + ".join(
             f"(1.0 / ({score}))" for score in individual_scores
         )
+        harmonic = f"{len(desired)}::float / ({reciprocal_sum})"
+        balance = (
+            "least(" + ", ".join(individual_scores) + ") / "
+            "greatest(" + ", ".join(individual_scores) + ")"
+        )
         coverage = (
-            f"CASE WHEN {any_zero} THEN 0.0 ELSE "
-            f"{len(desired)}::float / ({reciprocal_sum}) END"
+            f"CASE WHEN {any_zero} THEN 0.0 "
+            f"ELSE ({harmonic}) * ({balance}) END"
         )
         if len(specs) > len(desired):
             joint_score = concept_scores[-1]

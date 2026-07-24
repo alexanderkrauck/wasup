@@ -293,7 +293,7 @@ QueryBody = create_model(
     importance=(dict[str, float], Field(
         {}, description="0..1 weight per soft attribute, including tags, "
         "price, and event_scale. Tags default to 1.0. When tags are present, "
-        "secondary preferences default to 0.2; otherwise supplied "
+        "secondary preferences default to 0.1; otherwise supplied "
         "preferences default to 1.0. Explicit values always override these "
         "defaults. Stored certainty is always part of match_score")),
 )
@@ -643,7 +643,7 @@ def rank(
     # "ideally cheap/large/..." preference can refine the result, but must not
     # make a free irrelevant event outrank the requested kind of event. An
     # explicit importance entry always wins.
-    secondary_default = 0.2 if f.tags else 1.0
+    secondary_default = 0.1 if f.tags else 1.0
 
     soft_attributes = {
         name: wanted for name, wanted in _wanted(f).items()

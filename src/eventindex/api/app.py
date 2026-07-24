@@ -11,6 +11,7 @@ Run: uv run uvicorn eventindex.api.app:app
 
 import base64
 import json
+import math
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -306,16 +307,36 @@ def _public_event_scale(row: dict, inferred: dict | None = None) -> dict:
             "basis": [],
         }
     participants = int(participants)
+    confidence = (
+        row.get("expected_attendance_confidence")
+        if row.get("expected_attendance_confidence") is not None
+        else scale.get("confidence")
+    )
+    plausible_min = scale.get("plausible_min")
+    plausible_max = scale.get("plausible_max")
+    if (
+        plausible_min is None
+        or plausible_max is None
+        or (
+            plausible_min == plausible_max
+            and (confidence is None or confidence < 0.5)
+        )
+    ):
+        # A low-certainty point estimate is not an exact crowd count. Older
+        # enrichment rows only stored the point, and models occasionally
+        # repeat it as both bounds. Derive an honest confidence-scaled
+        # interval for presentation; never narrow a real supplied range.
+        uncertainty = max(0.15, 0.5 * (1 - float(confidence or 0)))
+        plausible_min = max(1, math.floor(participants * (1 - uncertainty)))
+        plausible_max = max(
+            plausible_min, math.ceil(participants * (1 + uncertainty))
+        )
     return {
         "estimated_participants": participants,
-        "plausible_min": int(scale.get("plausible_min", participants)),
-        "plausible_max": int(scale.get("plausible_max", participants)),
+        "plausible_min": int(plausible_min),
+        "plausible_max": int(plausible_max),
         "band": _scale_band(participants),
-        "confidence": (
-            row.get("expected_attendance_confidence")
-            if row.get("expected_attendance_confidence") is not None
-            else scale.get("confidence")
-        ),
+        "confidence": confidence,
         "basis": list(scale.get("basis") or ["event estimate"]),
     }
 

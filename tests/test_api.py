@@ -52,6 +52,35 @@ def _titles(resp):
     return [o["title"] for o in resp.json()["occurrences"]]
 
 
+def test_low_confidence_scale_never_presents_an_exact_range():
+    from eventindex.api.app import _public_event_scale
+
+    scale = _public_event_scale({
+        "expected_attendance": 50,
+        "expected_attendance_confidence": 0.2,
+        "inferred": {},
+    })
+    assert scale["estimated_participants"] == 50
+    assert scale["plausible_min"] == 30
+    assert scale["plausible_max"] == 70
+    assert scale["confidence"] == 0.2
+
+    explicit = _public_event_scale({
+        "expected_attendance": 50,
+        "expected_attendance_confidence": 0.2,
+        "inferred": {
+            "event_scale": {
+                "estimated_participants": 50,
+                "plausible_min": 20,
+                "plausible_max": 120,
+                "confidence": 0.2,
+                "basis": ["venue"],
+            },
+        },
+    })
+    assert (explicit["plausible_min"], explicit["plausible_max"]) == (20, 120)
+
+
 def test_default_excludes_past_and_gates_to_linz(client):
     titles = _titles(client.get("/v1/occurrences"))
     assert "Already Happened" not in titles

@@ -57,7 +57,8 @@ for `/v1/search` (it spends the index's own LLM budget) and `POST
 /v1/reports`.
 
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna;
-a bare date in to_dt means the WHOLE day), `near`+`radius` (geo circle),
+a bare date in to_dt means the WHOLE day), `weekdays` (local day names such
+as `thursday`/`friday`), `near`+`radius` (geo circle),
 `categories`, `exclude_categories`, `exclude_terms`, `name`
 (literal event-title lookup; `ball` also matches compounds such as
 `Maturaball`), `organizer` and `venue` (literal substrings in their own
@@ -171,7 +172,9 @@ queries are COMPOSITIONS you build at query time. Examples:
   semantic-tag calendar subscription. The MCP `get_calendar_link` tool accepts
   the same filter object as `search_events`; feed membership cannot use
   ranking-only preferences, so use explicit `min_tag_match`, exact
-  `max_price`/`is_free`, and required event-scale bounds.
+  `max_price`/`is_free`, and required event-scale bounds. When preserving
+  accepted search results, set `min_tag_match` at or below the weakest
+  accepted result's `tag_match`; there is no implicit threshold.
   `exclude_sex_service_context=true` removes positively known commercial
   sex-service contexts while retaining unknowns. Set
   `include_time_unknown=false` for a quieter timed-events-only feed; the

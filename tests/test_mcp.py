@@ -109,6 +109,7 @@ def test_tool_metadata_teaches_one_call_composition_and_hard_soft_intent(client)
     calendar_description = tools["get_calendar_link"]["description"]
     assert "same `filters` object" in calendar_description
     assert "required_attributes" in calendar_description
+    assert "weakest accepted result" in calendar_description
 
 
 def test_search_events_runs_the_query_core(client):
@@ -178,15 +179,22 @@ def test_get_calendar_link_builds_ics_url(client):
     assert "min_tag_match=0.6" in semantic["ics_url"]
 
     organizer = _call(client, "get_calendar_link", {
-        "filters": {"organizer": "WKO", "tags": ["startup"]},
+        "filters": {
+            "organizer": "WKO", "tags": ["startup"], "min_tag_match": 0.2,
+        },
     })
     assert "organizer=WKO" in organizer["ics_url"]
     assert "tags=startup" in organizer["ics_url"]
 
     source = _call(client, "get_calendar_link", {
-        "filters": {"source": "WKO", "tags": ["startup"]},
+        "filters": {
+            "source": "WKO", "tags": ["startup"], "min_tag_match": 0.2,
+            "weekdays": ["thursday", "friday"],
+        },
     })
     assert "source=WKO" in source["ics_url"]
+    assert "min_tag_match=0.2" in source["ics_url"]
+    assert "weekdays=thursday%2Cfriday" in source["ics_url"]
 
     large = _call(client, "get_calendar_link", {
         "filters": {
@@ -207,6 +215,17 @@ def test_get_calendar_link_rejects_an_unscoped_subscription(client):
     assert body["result"].get("isError") is True
     message = body["result"]["content"][0]["text"].lower()
     assert "categories" in message and "tags" in message
+
+
+def test_get_calendar_link_requires_explicit_semantic_membership(client):
+    body = _rpc(client, "tools/call", {
+        "name": "get_calendar_link",
+        "arguments": {"filters": {"source": "WKO", "tags": ["startup"]}},
+    })
+    assert body["result"].get("isError") is True
+    message = body["result"]["content"][0]["text"].lower()
+    assert "min_tag_match" in message
+    assert "weakest accepted result" in message
 
 
 def test_get_event_detail(conn, client):

@@ -19,7 +19,8 @@ taxonomy, examples). Everything below is the short version.
 user's natural language into filters - the index runs no LLM for this.
 
 - Hard guarantees: `from_dt`/`to_dt` (ISO, naive = Europe/Vienna),
-  `categories`, `exclude_categories`, `exclude_terms`, `max_price`,
+  `weekdays` (local names such as `thursday`/`friday`), `categories`,
+  `exclude_categories`, `exclude_terms`, `max_price`,
   `is_free`, `required_attributes`.
 - Soft preferences (ranked by `importance` x stored certainty, unknowns stay
   visible): `age_min`+`age_max`, `gender_split_min`, `kid_friendly`,
@@ -39,7 +40,9 @@ Details per event: `GET /v1/events/{id}` (sanitized public fields,
 occurrences, and source provenance; never raw claim payloads). Calendar:
 `/v1/feed.ics?tags=dancing&min_tag_match=0.5&exclude_sex_service_context=true&include_time_unknown=false`
 for a quiet, safe timed-events default; include date-only events only when the
-user explicitly asks for unknown-time/all-day entries.
+user explicitly asks for unknown-time/all-day entries. When converting
+accepted search results into a feed, choose `min_tag_match` at or below the
+weakest accepted result; do not assume the example's 0.5.
 Wrong/cancelled data: `POST /v1/reports`.
 
 Prefer a connector? The same read surface is an MCP server at

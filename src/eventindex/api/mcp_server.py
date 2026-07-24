@@ -506,17 +506,24 @@ def get_calendar_link(
     """Use this when the user wants a read-only .ics subscription URL for
     public Linz-area events. This only builds a link; it does not subscribe,
     create entries, or invite anyone. Pass the same `filters` object used by
-    search_events. A feed needs membership rules rather than ranking: tags use
-    min_tag_match (0.5 when omitted), max_price/is_free use stated prices, and
+    search_events. A feed needs membership rules rather than ranking: tags
+    require an explicit min_tag_match, max_price/is_free use stated prices, and
     participant_count_min/max require
     required_attributes=["event_scale"]. Ranking-only preferred_max_price,
     audience preferences, and importance weights are rejected with a
     correction message.
 
+    When converting accepted search results into a subscription, set
+    min_tag_match at or below the weakest accepted result's tag_match. Do not
+    assume 0.5: for example, a WKO/startup search may warrant
+    filters={"source":"WKO","tags":["startup"],"min_tag_match":0.2}.
     Example: filters={"name":"ball","tags":["dance","elegant"],
     "min_tag_match":0.5}. Example large-event feed:
     filters={"categories":["music"],"participant_count_min":300,
     "required_attributes":["event_scale"]}.
+    Named-day subscriptions use the same hard weekday filter, for example
+    filters={"tags":["salsa dancing"],"weekdays":["thursday","friday"],
+    "min_tag_match":0.4}.
 
     The feed defaults to timed events only and always excludes known
     commercial sex-service contexts while retaining unknown classifications."""
@@ -529,6 +536,12 @@ def get_calendar_link(
             "A calendar subscription requires name, organizer, venue, source, "
             "categories, or tags so it does not silently create a broad "
             "truncated feed."
+        )
+    if parsed.tags and parsed.min_tag_match is None:
+        raise ValueError(
+            "Calendar tag filters require an explicit min_tag_match membership "
+            "threshold. When preserving accepted search results, set it at or "
+            "below the weakest accepted result's tag_match; do not assume 0.5."
         )
     soft_fields = [
         name for name in (
@@ -574,6 +587,7 @@ def get_calendar_link(
             ("organizer", parsed.organizer),
             ("venue", parsed.venue),
             ("source", parsed.source),
+            ("weekdays", ",".join(parsed.weekdays)),
             ("from", parsed.from_dt),
             ("to", parsed.to_dt),
             ("min_confidence", min_confidence),
@@ -587,9 +601,7 @@ def get_calendar_link(
     }
     if parsed.tags:
         params["tags"] = ",".join(parsed.tags)
-        params["min_tag_match"] = (
-            parsed.min_tag_match if parsed.min_tag_match is not None else 0.5
-        )
+        params["min_tag_match"] = parsed.min_tag_match
     params["exclude_sex_service_context"] = "true"
     params["include_time_unknown"] = (
         "true" if include_time_unknown else "false"

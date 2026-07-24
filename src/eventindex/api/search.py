@@ -28,6 +28,19 @@ from pydantic import (
 from eventindex import config, llm
 
 VIENNA = ZoneInfo(config.TIMEZONE)
+WEEKDAY_NUMBERS = {
+    "monday": 1,
+    "tuesday": 2,
+    "wednesday": 3,
+    "thursday": 4,
+    "friday": 5,
+    "saturday": 6,
+    "sunday": 7,
+}
+Weekday = Literal[
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday",
+]
 
 # the index is Linz: queries default to this circle unless the caller sends
 # near=/radius= (radius="any" disables). Events with UNKNOWN location always
@@ -69,6 +82,10 @@ class SearchFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
     from_dt: str | None = Field(description="ISO datetime, start of wanted window")
     to_dt: str | None = Field(description="ISO datetime, end of wanted window")
+    weekdays: list[Weekday] = Field(
+        description="local Europe/Vienna weekdays that may match; hard "
+        "occurrence filter. Example: ['thursday','friday']"
+    )
 
     @field_validator("from_dt", "to_dt")
     @classmethod
@@ -251,7 +268,7 @@ class SearchFilters(BaseModel):
 # output for the internal parser). External callers of POST /v1/query send
 # partial bodies; these defaults fill the gaps.
 FILTER_DEFAULTS: dict = {
-    "from_dt": None, "to_dt": None, "categories": None,
+    "from_dt": None, "to_dt": None, "weekdays": [], "categories": None,
     "exclude_categories": [], "exclude_terms": [], "name": None,
     "organizer": None, "venue": None, "source": None,
     "age_min": None,
@@ -410,7 +427,9 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         f"(Europe/Vienna).\nTaxonomy: {', '.join(config.CATEGORIES)}\n"
         'Time words: "heute abend"/"tonight" = today 17:00-23:59; "morgen '
         'abend" = tomorrow 17:00-23:59; "am wochenende" = next Sat 00:00 - Sun '
-        "23:59. No time mentioned = from now, no end.\n"
+        "23:59. Put named recurring weekdays such as Thursday or Friday in "
+        "weekdays; use from_dt/to_dt for the overall horizon. No time "
+        "mentioned = from now, no end.\n"
         "Only set a filter the query actually implies; everything else null/empty. "
         "Negations (nicht/kein/ohne X) go to exclude_*. When the user wants "
         "a literal event title, put it in name; literal organizer, venue, and "
@@ -449,6 +468,12 @@ def build_sql(
     if f.to_dt:
         conditions.append("o.starts_at <= %(to)s")
         params["to"] = datetime.fromisoformat(f.to_dt)
+    if f.weekdays:
+        conditions.append(
+            "extract(isodow from o.starts_at AT TIME ZONE 'Europe/Vienna')::int "
+            "= ANY(%(weekdays)s)"
+        )
+        params["weekdays"] = [WEEKDAY_NUMBERS[day] for day in f.weekdays]
 
     radius_any = (f.radius or "").strip().lower() == "any"
     if f.near is not None or (f.radius is not None and not radius_any):

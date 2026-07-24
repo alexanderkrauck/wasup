@@ -135,6 +135,15 @@ def test_window_strings_validated_and_vienna_pinned():
         _filters(from_dt="morgen abend")  # non-ISO never reaches the DB
 
 
+def test_weekdays_are_a_local_hard_occurrence_filter():
+    f = _filters(weekdays=["thursday", "friday"])
+    where, params = build_sql(f)
+    assert "AT TIME ZONE 'Europe/Vienna'" in where
+    assert params["weekdays"] == [4, 5]
+    with pytest.raises(ValidationError):
+        _filters(weekdays=["freitag"])
+
+
 def test_free_filter(conn):
     _add(conn, "Gratis Konzert", price=0)
     _add(conn, "Teures Konzert", price=40)

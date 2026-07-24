@@ -140,6 +140,14 @@ def test_feed_ics_serves_filtered_calendar(client):
     only_music = client.get("/v1/feed.ics", params={"category": "learning"})
     assert b"Unknown Location Talk" in only_music.content
     assert b"Nearby Concert" not in only_music.content
+    local_day = (NOW + timedelta(days=1)).astimezone(
+        ZoneInfo("Europe/Vienna")
+    ).strftime("%A").lower()
+    by_weekday = client.get("/v1/feed.ics", params={"weekdays": local_day})
+    assert b"Nearby Concert" in by_weekday.content
+    assert client.get(
+        "/v1/feed.ics", params={"weekdays": "freitag"}
+    ).status_code == 422
 
 
 def test_feed_semantic_tags_filter_before_calendar_membership(
@@ -499,6 +507,45 @@ def test_distinct_event_and_sort_starts_at(client, conn):
     rows = client.post("/v1/query?sort=starts_at", json={}).json()["occurrences"]
     starts = [r["starts_at"] for r in rows]
     assert starts == sorted(starts)  # B2
+
+
+def test_weekday_filter_selects_the_matching_series_occurrence(client, conn):
+    vienna = ZoneInfo("Europe/Vienna")
+    local_now = datetime.now(vienna)
+
+    def next_day(isoweekday):
+        delta = (isoweekday - local_now.isoweekday()) % 7 or 7
+        return (local_now + timedelta(days=delta)).replace(
+            hour=20, minute=0, second=0, microsecond=0
+        )
+
+    eid = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, category, confidence, status) "
+        "VALUES (%s, 'series', 'Weekday Dance Series', '{nightlife}', "
+        "0.9, 'confirmed')",
+        (eid,),
+    )
+    for starts in (next_day(1), next_day(5)):
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
+            (eid, starts),
+        )
+    conn.commit()
+
+    rows = client.post(
+        "/v1/query?distinct=event",
+        json={"weekdays": ["thursday", "friday"]},
+    ).json()["occurrences"]
+    series = next(row for row in rows if row["title"] == "Weekday Dance Series")
+    assert datetime.fromisoformat(series["starts_at"]).astimezone(
+        vienna
+    ).isoweekday() == 5
+    assert all(
+        datetime.fromisoformat(row["starts_at"]).astimezone(vienna).isoweekday()
+        in {4, 5}
+        for row in rows
+    )
 
 
 def test_to_dt_bare_date_covers_the_whole_day(client, conn):

@@ -568,6 +568,8 @@ def feed_ics(
     venue: str | None = Query(None, description="literal venue name"),
     source: str | None = Query(
         None, description="literal reporting-source name or URL"),
+    weekdays: str | None = Query(
+        None, description="comma-separated local weekdays, e.g. thursday,friday"),
     max_price: float | None = Query(
         None, ge=0, description="hard maximum stated EUR price"),
     is_free: bool | None = Query(
@@ -600,6 +602,26 @@ def feed_ics(
         name, organizer, venue, source,
         exclude_sex_service_context,
     )
+    if weekdays:
+        from eventindex.api.search import WEEKDAY_NUMBERS
+
+        desired_weekdays = [
+            day.strip().lower() for day in weekdays.split(",") if day.strip()
+        ]
+        unknown_weekdays = set(desired_weekdays) - set(WEEKDAY_NUMBERS)
+        if unknown_weekdays:
+            raise HTTPException(
+                422,
+                f"unknown weekdays {sorted(unknown_weekdays)}; "
+                f"valid: {sorted(WEEKDAY_NUMBERS)}",
+            )
+        conditions.append(
+            "extract(isodow from o.starts_at AT TIME ZONE 'Europe/Vienna')::int "
+            "= ANY(%(feed_weekdays)s)"
+        )
+        params["feed_weekdays"] = [
+            WEEKDAY_NUMBERS[day] for day in desired_weekdays
+        ]
     if (
         participant_count_min is not None
         and participant_count_max is not None

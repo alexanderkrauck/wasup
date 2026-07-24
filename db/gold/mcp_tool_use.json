@@ -1,7 +1,7 @@
 [
   {"task":"Find balls in the coming months, ideally suitable for dancing and elegant, and include prices.","expected_tool":"search_events","critical_args":{"name":"ball","tags":["dance","elegant"]},"forbidden_tools":["search","get_event"],"max_calls":1},
   {"task":"Are there any Maturaballs coming up?","expected_tool":"search_events","critical_args":{"name":"maturaball"},"forbidden_tools":["search"],"max_calls":1},
-  {"task":"Where can I dance salsa on Thursday or Friday?","expected_tool":"search_events","critical_args":{"tags":["salsa dancing"],"date_window":"Thursday through Friday"},"forbidden_tools":["search"],"max_calls":1},
+  {"task":"Where can I dance salsa on Thursday or Friday?","expected_tool":"search_events","critical_args":{"tags":["salsa dancing"],"weekdays":["thursday","friday"],"date_window":"requested horizon"},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Find WKO startup events in the next two months.","expected_tool":"search_events","critical_args":{"source":"WKO","tags":["startup"],"date_window":"next two months"},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Find a concert ideally under 30 euros.","expected_tool":"search_events","critical_args":{"tags":["concert"],"preferred_max_price":30},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Find a concert that must cost at most 30 euros.","expected_tool":"search_events","critical_args":{"tags":["concert"],"max_price":30},"forbidden_tools":["search"],"max_calls":1},
@@ -18,7 +18,7 @@
   {"task":"Tell me all details for Wasup event id 123 after I selected it.","expected_tool":"get_event","critical_args":{"event_id":"123"},"forbidden_tools":["search","search_events"],"max_calls":1},
   {"task":"Compare the prices and likely crowd sizes of upcoming balls.","expected_tool":"search_events","critical_args":{"name":"ball"},"forbidden_tools":["get_event"],"max_calls":1},
   {"task":"Create a calendar subscription for salsa dancing.","expected_tool":"get_calendar_link","critical_args":{"filters":{"tags":["salsa dancing"],"min_tag_match":"membership threshold"}},"forbidden_tools":["search"],"max_calls":1},
-  {"task":"Create a calendar feed for balls that are dancing and elegant.","expected_tool":"get_calendar_link","critical_args":{"filters":{"name":"ball","tags":["dance","elegant"]}},"forbidden_tools":["search"],"max_calls":1},
+  {"task":"Create a calendar feed for balls that are dancing and elegant.","expected_tool":"get_calendar_link","critical_args":{"filters":{"name":"ball","tags":["dance","elegant"],"min_tag_match":"membership threshold"}},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Create a feed for stated-price concerts under 20 euros.","expected_tool":"get_calendar_link","critical_args":{"filters":{"tags":["concert"],"max_price":20}},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Create a feed for music events with at least 500 participants.","expected_tool":"get_calendar_link","critical_args":{"filters":{"categories":["music"],"participant_count_min":500,"required_attributes":["event_scale"]}},"forbidden_tools":["search"],"max_calls":1},
   {"task":"Subscribe to preferably cheap concerts.","expected_tool":"get_calendar_link","critical_args":{"recovery":"reject ranking-only preferred_max_price and ask for exact max_price"},"forbidden_tools":["search"],"max_calls":1},

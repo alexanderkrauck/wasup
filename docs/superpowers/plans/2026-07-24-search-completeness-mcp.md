@@ -15,10 +15,10 @@ Date: 2026-07-24
   `tags=["startup"]` even when the event omitted its organizer.
 - Desired tags are a composition, not alternatives. Every desired concept
   retains certainty-weighted evidence. Multi-concept queries average two
-  supporting tags per concept and devote half the score to an order-invariant
-  joint phrase, preventing one embedding hub from dominating and resolving
-  word senses such as salsa food versus salsa dance. `min_tag_match` is the
-  explicit hard threshold over that aggregate.
+  supporting tags per concept, combine concepts with a monotonic harmonic
+  mean, and use a bounded order-invariant joint phrase to resolve word senses
+  such as salsa food versus salsa dance. `min_tag_match` is the explicit hard
+  threshold over that aggregate.
 - Public, non-login facts that a human can find are pipeline requirements.
   Missing price, venue, booking link, or confirmed time triggers generic detail
   and public-web recovery. Recovered facts remain append-only claims with the
@@ -59,22 +59,35 @@ candidate core.
 For each desired concept `q` in a multi-concept request:
 
 ```text
-concept_score(q) = mean(top 2 (
-    event_tag_confidence × calibrated_relatedness(q, event_tag)))
+retrieval_relatedness = calibrated_relatedness²
 
-joint_score = mean(top 2 (
-    event_tag_confidence × calibrated_relatedness(
-        sorted desired concepts as one phrase, event_tag)))
+concept_score(q) = max(
+    exact matching tag confidence,
+    mean(top 2 (
+        event_tag_confidence × retrieval_relatedness(q, event_tag))))
 
-tag_match = 0.5 × mean(concept_score(q)) + 0.5 × joint_score
+coverage = harmonic_mean(concept_score(q) for every desired concept)
+
+joint_context = min(
+    coverage,
+    mean(top 2 (
+        event_tag_confidence × retrieval_relatedness(
+            sorted desired concepts as one phrase, event_tag))))
+
+tag_match = 0.9 × coverage + 0.1 × joint_context
 ```
 
-The joint phrase applies to two or three desired concepts. Single-concept
-requests retain the original best-match behavior; longer lists retain
-per-concept composition without truncating their intent. The existing
-monotonic sigmoid remains the nonlinear cosine calibration. It widens the
-model's compressed similarity range without changing its ordering. Exact tag
-equality remains relatedness 1.
+The focused relatedness is the nonlinear similarity behavior the live data
+justified: a very close concept can beat a broad neighbour with somewhat
+higher extraction certainty. The harmonic mean makes a weak requested concept
+matter without violating monotonicity: improving evidence for any requested
+concept can never lower the final score.
+The joint phrase applies to two or three desired concepts and may confirm or
+reduce coverage, never inflate it. Single-concept requests retain the original
+best-match behavior; longer lists retain per-concept composition without
+truncating their intent. The sigmoid calibration and square are monotonic and
+therefore do not change the embedding model's ordering. Exact tag equality
+remains relatedness 1 and keeps its full stored certainty.
 
 Soft price and scale fields join the existing importance × certainty model.
 Hard price uses `max_price`/`is_free`; hard scale uses a stated participant
@@ -171,6 +184,10 @@ MCP descriptions are executable guidance, not ancillary documentation:
   a threshold no higher than the weakest accepted search result.
 - The deployed `tools/list` schema is tested directly so connector metadata
   cannot silently drift from the runtime.
+- Every tool publishes a closed top-level input object and enforces it at
+  runtime. If a calling model accidentally flattens `name`, `tags`, or another
+  nested filter, the tool fails with a corrective message instead of silently
+  dropping the fields and running a broad query.
 
 ## Evaluation gates
 
@@ -225,8 +242,8 @@ contract and is re-tested before completion.
 
 ## Implementation and acceptance notes
 
-The implementation shipped as five coordinated production increments:
-`9b8fdac`, `9cfd00f`, `d98395e`, `944dacf`, and `fa45f7c`.
+The implementation shipped as coordinated production increments through
+`e39c16d`.
 
 - The deployed MCP schema exposes `name`, unified `tags`, `weekdays`, hard and
   soft price/scale controls, and the same filter object for calendar links.
@@ -237,6 +254,30 @@ The implementation shipped as five coordinated production increments:
 - A real WKO/startup task exposed that a calendar silently choosing the old
   default semantic threshold could omit accepted search results. Calendar link
   generation now requires the caller to transfer an explicit threshold.
+- A fresh salsa/dance task exposed three ranking interactions that unit
+  examples had missed: an exact low-confidence tag masking stronger semantic
+  support, the MCP safety exclusion also acting as a hidden ranking
+  preference, and several secondary preferences collectively outweighing the
+  requested activity. The matcher now retains the stronger of exact and
+  semantic evidence, composes all desired concepts with a harmonic mean, and
+  treats secondary preferences as refinements unless `importance` explicitly
+  says otherwise.
+- The real WKO/startup rerun showed why the proposed nonlinear similarity is
+  useful. A high-certainty but broad `technology` tag outranked the closer
+  `entrepreneurship`/`startup` evidence. Squared calibrated relatedness now
+  separates close concepts from broad neighbours without changing their
+  semantic ordering or adding a vocabulary rule. The resulting live order is
+  Gründer:innen-Workshop (`0.5000`) before Talent Space (`0.4650`).
+- A subsequent ball run exposed that multiplying the harmonic mean by a
+  min/max balance ratio was non-monotonic: stronger dance evidence could lower
+  a result whose elegance evidence stayed fixed. Removing that redundant
+  factor produced the clean live boundary of 15 genuine ball/dance events
+  followed by sports results, while keeping the harmonic weak-concept penalty.
+- That task also selected date-only search rows for a timed-only calendar.
+  Search and feed weekday SQL were already both Europe/Vienna-correct; the
+  missing rows had `time_unknown=true`. MCP guidance now tells callers to
+  exclude those rows from a timed accepted set or transfer
+  `include_time_unknown=true`.
 - Deployment monitoring exposed the OpenAI SDK's hidden two-retry layer and
   600-second default read timeout beneath Wasup's own retries. The shared LLM
   client now uses one explicit 90-second timeout, disables SDK retries, and
@@ -246,8 +287,55 @@ The implementation shipped as five coordinated production increments:
   Freistadt Maturaball it found only prior-year or otherwise unsupported public
   price evidence and correctly refused to label that as a current stated
   price; enrichment remains responsible for a confidence-labeled estimate.
+- Prices were originally absent for three independent, generic reasons:
+  listing claims often stopped before the detail/booking page containing the
+  fact, the old detail repair only recovered missing time, and the old
+  enrichment/search projection had no confidence-labeled price fallback.
+  `hydrate_event`, schema-current enrichment, and the public result model now
+  close those three gaps respectively. A stated price still requires quoted
+  evidence from a public URL; otherwise the value is labeled `estimated`.
+- The v7 enrichment contract emits one confidence-bearing tag set with 6-12
+  useful concepts spanning core activity/topic, format, audience,
+  atmosphere/style, and setting. It explicitly retains a title-stated core
+  format and useful broader parent, generically; there are no WKO, ball, dance,
+  or other website-specific extraction rules.
+- The final live ball call returned 31 unique events in 2.314 seconds. All six
+  Maturaballs ranked in the genuine-event block (ranks 4, 6, 7, 10, 12, 13);
+  rank 15 was Boogie & Swing Ball and rank 16 the first sports false positive.
+  Price and event-scale coverage were both 31/31 (7 stated prices, 24
+  estimates).
+- The final WKO task returned the direct startup workshop before the broader
+  technology result, with price and event scale on both. Its calendar link
+  preserved the weakest accepted threshold exactly (`0.4650`).
+- The final Thursday/Friday salsa+dance task accepted seven timed events, all
+  with price and event scale. A stated EUR 190 salsa workshop remained above
+  cheaper weaker semantic matches, proving price was a refinement rather than
+  a hidden hard filter. The timed calendar preserved exactly those seven
+  identities at the weakest score (`0.5606`); a qualifying date-only event was
+  explicitly reported and excluded through `include_time_unknown=false`.
+- Final verification: 343 non-live tests passed (53 live tests deselected);
+  the 60-pair multilingual relation gate retained AUC 1.000, zero unrelated
+  pairs over 0.5, and batch delta 0. Production runs `e39c16d`; the API and
+  three workers are active. The targeted WKO and dance v7 batches are 26/26
+  done and all four recent tag-embedding jobs completed. Spend was EUR 6.03
+  of the EUR 15 daily cap. Two resolve jobs remain correctly parked until
+  2026-07-31 22:05 UTC by their source-month budget, with no cap bypass.
 - The first independent agent using the installed Codex connector saw the
   connector metadata cached when this task started. Direct calls to the
   authoritative live MCP endpoint saw the new schema immediately. Refreshing
   that host-side connector cache is an app lifecycle concern, not grounds for a
   second legacy tag API in Wasup.
+
+## Framework decision
+
+Do not add an external search framework. At Wasup's scale, PostgreSQL already
+provides the hard candidate filters, event-first distinct selection,
+confidence-aware ranking inputs, and exact calendar membership; the pinned
+local multilingual model only embeds a small deduplicated vocabulary of
+one-to-three-word tags. The difficult work was the product scoring contract
+and tool semantics, which an additional framework would not supply. The live
+ball, WKO, and dance gates show that this architecture can compose literal,
+semantic, price, scale, weekday, safety, and subscription intent in one tool
+surface with sub-second to low-single-second latency. Reconsider a separate
+engine only if measured PostgreSQL query latency or corpus scale crosses an
+explicit operational threshold.

@@ -268,8 +268,26 @@ def resolve(job: dict, tx) -> list[dict]:
             "AND payload ? 'event_id'"
         )
     }
+    next_starts = {
+        str(row["event_id"]): row["next_start"].isoformat()
+        for row in tx.execute(
+            "SELECT event_id, min(starts_at) AS next_start FROM occurrence "
+            "WHERE event_id = ANY(%s) AND status = 'scheduled' "
+            "AND coalesce(ends_at, starts_at) >= now() GROUP BY event_id",
+            (pending,),
+        )
+    } if pending else {}
     jobs = [
-        {"kind": "enrich", "payload": {"event_id": str(eid)}}
+        {
+            "kind": "enrich",
+            "payload": {
+                "event_id": str(eid),
+                **(
+                    {"next_start": next_starts[str(eid)]}
+                    if str(eid) in next_starts else {}
+                ),
+            },
+        }
         for eid in pending if str(eid) not in already_queued
     ]
     jobs.append({"kind": "embed_tags", "payload": {}})

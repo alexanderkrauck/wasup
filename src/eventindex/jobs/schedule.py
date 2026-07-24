@@ -72,7 +72,10 @@ def enqueue_enrichment(conn) -> int:
         },
     ).fetchall()
     for row in rows:
-        enqueue(conn, "enrich", {"event_id": str(row["id"])})
+        enqueue(conn, "enrich", {
+            "event_id": str(row["id"]),
+            "next_start": row["next_start"].isoformat(),
+        })
     return len(rows)
 
 

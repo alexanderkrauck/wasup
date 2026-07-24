@@ -16,10 +16,14 @@ def test_search_readiness_jobs_outrank_older_acquisition_work(conn):
             "INSERT INTO jobs (kind, payload, run_after) VALUES "
             "('crawl', '{}', now() - interval '1 day'), "
             "('embed_tags', '{}', now() - interval '2 days'), "
-            "('enrich', '{}', now())"
+            "('enrich', '{\"next_start\":\"2099-02-01T00:00:00Z\"}', now()), "
+            "('enrich', '{\"next_start\":\"2099-01-01T00:00:00Z\"}', now())"
         )
 
     assert claim_next(conn)["kind"] == "enrich"
+    claimed = claim_next(conn)
+    assert claimed["kind"] == "enrich"
+    assert claimed["payload"]["next_start"].startswith("2099-02")
     assert claim_next(conn)["kind"] == "embed_tags"
     assert claim_next(conn)["kind"] == "crawl"
 

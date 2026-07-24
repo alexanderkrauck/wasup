@@ -53,7 +53,14 @@ def claim_next(conn) -> dict | None:
                     WHEN 'enrich' THEN 0
                     WHEN 'embed_tags' THEN 1
                     ELSE 2
-                END, run_after
+                END,
+                CASE WHEN kind = 'enrich' THEN
+                    coalesce(
+                        (payload->>'next_start')::timestamptz,
+                        'infinity'::timestamptz
+                    )
+                END,
+                run_after
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )

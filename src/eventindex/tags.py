@@ -14,7 +14,10 @@ MAX_TAG_LENGTH = 60
 MULTI_CONCEPT_SUPPORTS = 2
 MAX_JOINT_CONCEPTS = 3
 JOINT_CONTEXT_WEIGHT = 0.1
-TITLE_EVIDENCE_CONFIDENCE = 0.8
+# This is not an inferred event attribute: it is certainty that the literal
+# requested concept is present in the event's own title. Keep it above broad
+# embedding neighbours so "Yoga am See" cannot rank below "dance training".
+TITLE_EVIDENCE_CONFIDENCE = 1.0
 MIN_COMPOUND_FRAGMENT_LENGTH = 4
 
 

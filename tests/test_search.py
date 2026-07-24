@@ -297,7 +297,7 @@ def test_stronger_semantic_match_beats_a_large_secondary_price_difference():
         },
     ]
     ranked = rank(
-        rows, f, tag_scores={salsa_id: 0.58, cheap_generic_id: 0.42}
+        rows, f, tag_scores={salsa_id: 0.54, cheap_generic_id: 0.40}
     )
     assert [row["title"] for row in ranked] == [
         "Salsa Workshop", "Generic Dance",

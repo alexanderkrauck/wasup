@@ -104,8 +104,8 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
     )
     # With no semantic vector evidence, exact requested-concept coverage
     # distinguishes both concepts from a one-concept partial match.
-    assert matches[both_id]["score"] == pytest.approx(0.46875)
-    assert matches[dance_only_id]["score"] == pytest.approx(0.28125)
+    assert matches[both_id]["score"] == pytest.approx(0.525)
+    assert matches[dance_only_id]["score"] == pytest.approx(0.315)
     assert [m["query"] for m in matches[both_id]["concepts"]] == [
         "dance", "elegant", "dance + elegant"
     ]

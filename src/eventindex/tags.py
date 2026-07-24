@@ -245,10 +245,11 @@ def semantic_matches(
                 exact_confidences[event_id][index]
                 if not spec["joint"] else 0.0
             )
-            score = exact or (
+            semantic_support = (
                 sum(item["score"] for item in supports) / len(supports)
                 if supports else 0.0
             )
+            score = max(exact, semantic_support)
             best = supports[0] if supports else {
                 "event_tag": None, "tag_confidence": None, "relatedness": 0.0,
             }
@@ -359,7 +360,7 @@ def semantic_threshold_sql(
             f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
         )
         concept_scores.append(
-            f"CASE WHEN exact_{index} > 0 THEN exact_{index} ELSE {averaged} END"
+            f"greatest(exact_{index}, {averaged})"
             if index < len(desired) else averaged
         )
     if len(desired) == 1:

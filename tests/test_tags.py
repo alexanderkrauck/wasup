@@ -64,9 +64,12 @@ def test_semantic_score_combines_calibrated_relation_and_tag_certainty(
     salsa_id = _event(conn, "Salsa Social")
     startup_id = _event(conn, "Startup Meetup")
     exact_id = _event(conn, "Dance Workshop")
+    mixed_id = _event(conn, "Low-confidence Exact Plus Strong Relation")
     tags.upsert(conn, salsa_id, "salsa", 0.8, "inferred")
     tags.upsert(conn, startup_id, "startup", 0.8, "inferred")
     tags.upsert(conn, exact_id, "dancing", 0.7, "source")
+    tags.upsert(conn, mixed_id, "dancing", 0.3, "inferred")
+    tags.upsert(conn, mixed_id, "salsa", 0.8, "inferred")
     with conn.cursor() as cursor:
         cursor.executemany(
             "INSERT INTO tag_embedding (name, embedding, model) "
@@ -80,11 +83,12 @@ def test_semantic_score_combines_calibrated_relation_and_tag_certainty(
     query[0, 0] = 1
     monkeypatch.setattr(embeddings, "embed_tags", lambda values: query)
     scores = tags.semantic_scores(
-        conn, [salsa_id, startup_id, exact_id], ["dancing"]
+        conn, [salsa_id, startup_id, exact_id, mixed_id], ["dancing"]
     )
     assert scores[salsa_id] > 0.7
     assert scores[startup_id] < 0.1
     assert scores[exact_id] == 0.7  # exact tag equality is always relation 1
+    assert scores[mixed_id] > 0.7  # weak exact evidence cannot mask stronger support
 
 
 def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch):

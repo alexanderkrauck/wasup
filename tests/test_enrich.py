@@ -65,13 +65,15 @@ def test_enrich_caches_and_never_pays_twice(conn, event_row, monkeypatch):
     calls = []
 
     def fake_complete(tx, prompt, schema, **kw):
-        calls.append(1)
+        calls.append(prompt)
         return _fake_enrichment()
 
     monkeypatch.setattr(en.llm, "complete", fake_complete)
     first = enrich_event(conn, event_row)
     second = enrich_event(conn, event_row)
     assert len(calls) == 1  # second hit came from the cache
+    assert "core named activity or event format" in calls[0]
+    assert "atmosphere/style" in calls[0]
     assert first == second
 
 

@@ -104,15 +104,16 @@ class Enrichment(BaseModel):
     sex_service_context: _BoolEst
     tags: list[_TagEst] = Field(
         description="6-12 useful event concepts, each 1-3 lowercase words "
-        "with its own confidence; no synonyms, translations, or commentary")
+        "with its own confidence, including the core named format and useful "
+        "atmosphere/style; no synonyms, translations, or commentary")
     venue: _TextEst
     price: _PriceEst
     start_time: _TimeEst
 
 
-# bump when the Enrichment schema gains fields: old cache rows lack them, so
-# a version change re-enriches the corpus (cheap: ~EUR 0.0003/event)
-SCHEMA_VERSION = 6
+# Bump when the schema or extraction contract changes: old cache rows either
+# lack fields or embody the old prompt, so a version change re-enriches them.
+SCHEMA_VERSION = 7
 DESCRIPTION_CHARS = 6000
 
 
@@ -212,7 +213,11 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "basis; confidence ~0.2 for a pure guess, ~0.35 for a normal type/venue "
         "estimate, and up to 0.8 only for explicit text. "
         "tags: provide 6-12 distinct, useful concepts covering activity/topic, "
-        "format, audience, and setting. Each tag is 1-3 lowercase words. "
+        "format, audience, atmosphere/style, and setting. Always include the "
+        "core named activity or event format when the title states it; explicit "
+        "title evidence may have confidence 0.8. Also include a broader parent "
+        "activity when it is useful for retrieval and not merely a synonym. "
+        "Each tag is 1-3 lowercase words. "
         "Do not emit generic tags like 'event' or 'linz', commentary, duplicate "
         "synonyms, or translations of the same concept. A tag may use world "
         "knowledge at low confidence; quote evidence when explicit. "

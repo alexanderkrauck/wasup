@@ -41,6 +41,7 @@ The primary discovery call is intentionally compact:
     "name": "ball",
     "from_dt": "2026-07-24T00:00:00+02:00",
     "tags": ["dance", "elegant"],
+    "weekdays": ["thursday", "friday"],
     "importance": {"tags": 1.0}
   },
   "sort": "relevance"
@@ -69,6 +70,11 @@ Soft price and scale fields join the existing importance × certainty model.
 Hard price uses `max_price`/`is_free`; hard scale uses a stated participant
 range plus `required_attributes=["event_scale"]`. Null remains unknown and
 never satisfies a hard constraint.
+
+`weekdays` is a hard occurrence filter shared by search and calendar feeds.
+It is applied before one occurrence is selected to represent each event, so a
+recurring event remains discoverable when its next overall occurrence is on a
+different weekday but a later occurrence is on Thursday or Friday.
 
 ## Generic fact recovery
 
@@ -150,7 +156,9 @@ MCP descriptions are executable guidance, not ancillary documentation:
   repeatedly just to compare prices or scale.
 - `get_calendar_link` accepts the same filter model. It rejects ranking-only
   preferences that cannot define feed membership and explains how to convert
-  them into explicit thresholds.
+  them into explicit thresholds. Semantic tag membership therefore requires an
+  explicit `min_tag_match`; the validation response tells the caller to choose
+  a threshold no higher than the weakest accepted search result.
 - The deployed `tools/list` schema is tested directly so connector metadata
   cannot silently drift from the runtime.
 
@@ -204,3 +212,28 @@ contract and is re-tested before completion.
    coverage, scale coverage, API latency, and the real query gates.
 6. Run independent MCP agents, repair any observed failure, redeploy, and
    repeat until every gate passes.
+
+## Implementation and acceptance notes
+
+The implementation shipped as five coordinated production increments:
+`9b8fdac`, `9cfd00f`, `d98395e`, `944dacf`, and `fa45f7c`.
+
+- The deployed MCP schema exposes `name`, unified `tags`, `weekdays`, hard and
+  soft price/scale controls, and the same filter object for calendar links.
+  The removed `vibe_terms` concept was not retained as a compatibility alias.
+- A real Friday salsa task exposed the missing weekday control and misleading
+  point-like low-confidence attendance ranges. The generic weekday filter and
+  confidence-scaled public range rendering were added and deployed.
+- A real WKO/startup task exposed that a calendar silently choosing the old
+  default semantic threshold could omit accepted search results. Calendar link
+  generation now requires the caller to transfer an explicit threshold.
+- Live generic hydration recovered exact public prices with quoted evidence for
+  the Debütantenball Wels and other unrelated event types. For the current
+  Freistadt Maturaball it found only prior-year or otherwise unsupported public
+  price evidence and correctly refused to label that as a current stated
+  price; enrichment remains responsible for a confidence-labeled estimate.
+- The first independent agent using the installed Codex connector saw the
+  connector metadata cached when this task started. Direct calls to the
+  authoritative live MCP endpoint saw the new schema immediately. Refreshing
+  that host-side connector cache is an app lifecycle concern, not grounds for a
+  second legacy tag API in Wasup.

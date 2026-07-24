@@ -173,9 +173,9 @@ def semantic_matches(
     Non-exact concepts average the two strongest supporting event tags instead
     of trusting one accidental embedding neighbour; exact evidence keeps its
     full certainty. Requested concepts combine with a harmonic mean, which
-    nonlinearly penalizes a weak concept instead of letting another substitute
-    for it. Joint-phrase context can confirm or reduce that coverage, never
-    inflate it.
+    nonlinearly penalizes a weak concept while remaining monotonic: stronger
+    evidence for any concept can never reduce the result. Joint-phrase context
+    can confirm or reduce that coverage, never inflate it.
     """
     event_ids = list(dict.fromkeys(event_ids))
     desired = clean_desired(desired)
@@ -273,9 +273,7 @@ def semantic_matches(
             harmonic = len(individual_scores) / sum(
                 1.0 / score for score in individual_scores
             )
-            coverage = harmonic * (
-                min(individual_scores) / max(individual_scores)
-            )
+            coverage = harmonic
             if len(specs) > len(desired):
                 joint_score = concepts[-1]["score"]
                 semantic_score = (
@@ -376,13 +374,9 @@ def semantic_threshold_sql(
             f"(1.0 / ({score}))" for score in individual_scores
         )
         harmonic = f"{len(desired)}::float / ({reciprocal_sum})"
-        balance = (
-            "least(" + ", ".join(individual_scores) + ") / "
-            "greatest(" + ", ".join(individual_scores) + ")"
-        )
         coverage = (
             f"CASE WHEN {any_zero} THEN 0.0 "
-            f"ELSE ({harmonic}) * ({balance}) END"
+            f"ELSE ({harmonic}) END"
         )
         if len(specs) > len(desired):
             joint_score = concept_scores[-1]

@@ -148,13 +148,38 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
     # for "elegant"; absent joint context applies only its bounded 10% penalty.
     harmonic = 2 / (1 / 0.8 + 1 / 0.7)
     assert matches[both_id]["score"] == pytest.approx(
-        0.9 * harmonic * (0.7 / 0.8)
+        0.9 * harmonic
     )
     assert matches[dance_only_id]["score"] == 0
     assert [m["query"] for m in matches[both_id]["concepts"]] == [
         "dance", "elegant", "dance + elegant"
     ]
     assert matches[both_id]["concepts"][-1]["joint"] is True
+
+
+def test_multi_concept_score_is_monotonic_as_one_concept_improves(
+    conn, monkeypatch,
+):
+    balanced_weak_id = _event(conn, "Two Weak Concepts")
+    stronger_dance_id = _event(conn, "One Improved Concept")
+    for event_id, dance_confidence in [
+        (balanced_weak_id, 0.2),
+        (stronger_dance_id, 0.8),
+    ]:
+        tags.upsert(conn, event_id, "dance", dance_confidence, "inferred")
+        tags.upsert(conn, event_id, "elegant", 0.2, "inferred")
+    monkeypatch.setattr(
+        embeddings, "embed_tags",
+        lambda values: np.zeros(
+            (len(values), embeddings.DIMENSIONS), dtype=np.float32
+        ),
+    )
+
+    scores = tags.semantic_scores(
+        conn, [balanced_weak_id, stronger_dance_id], ["dance", "elegant"]
+    )
+
+    assert scores[stronger_dance_id] > scores[balanced_weak_id]
 
 
 def test_joint_context_rejects_embedding_hubs_and_word_sense(conn):

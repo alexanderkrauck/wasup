@@ -129,8 +129,10 @@ def test_focused_relatedness_beats_a_broader_higher_confidence_neighbour(
 
 
 def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch):
-    both_id = _event(conn, "Elegant Dance Ball")
-    dance_only_id = _event(conn, "Basic Dance Training")
+    # Neutral titles isolate stored-tag aggregation from the independent
+    # explicit-title evidence path.
+    both_id = _event(conn, "Two Concepts")
+    dance_only_id = _event(conn, "One Concept")
     tags.upsert(conn, both_id, "dance", 0.8, "inferred")
     tags.upsert(conn, both_id, "elegant", 0.7, "inferred")
     tags.upsert(conn, dance_only_id, "dance", 0.9, "inferred")
@@ -273,6 +275,42 @@ def test_semantic_threshold_runs_before_sql_limit(conn, monkeypatch):
     ).fetchall()
     assert desired == ["dancing"]
     assert {row["id"] for row in rows} == {salsa_id, exact_id}
+
+
+def test_literal_title_concepts_cover_generic_compounds_before_enrichment(
+    conn, monkeypatch,
+):
+    yoga_id = _event(conn, "Yogakurse im Sommer")
+    ball_id = _event(conn, "Linzer Maturaball")
+    unrelated_id = _event(conn, "Startup Training")
+    monkeypatch.setattr(
+        embeddings,
+        "embed_tags",
+        lambda values: np.zeros(
+            (len(values), embeddings.DIMENSIONS), dtype=np.float32
+        ),
+    )
+
+    yoga = tags.semantic_matches(
+        conn, [yoga_id, unrelated_id], ["yoga"]
+    )
+    ball = tags.semantic_matches(
+        conn, [ball_id, unrelated_id], ["ball"]
+    )
+
+    assert yoga[yoga_id]["score"] == tags.TITLE_EVIDENCE_CONFIDENCE
+    assert yoga[yoga_id]["concepts"][0]["origin"] == "title"
+    assert yoga[unrelated_id]["score"] == 0
+    assert ball[ball_id]["score"] == tags.TITLE_EVIDENCE_CONFIDENCE
+
+    params = {}
+    condition, _ = tags.semantic_threshold_sql(
+        ["yoga"], 0.8, params, prefix="title_tag"
+    )
+    rows = conn.execute(
+        f"SELECT e.id FROM event e WHERE {condition}", params
+    ).fetchall()
+    assert {row["id"] for row in rows} == {yoga_id}
 
 
 def test_tag_sanity_rejects_commentary_and_merges_duplicates():

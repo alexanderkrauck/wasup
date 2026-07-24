@@ -24,15 +24,18 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
         "language": {"value": "de", "confidence": 0.7, "evidence": "Studentenparty"},
         "kid_friendly": {"value": False, "confidence": 0.6, "evidence": "ab 18"},
         "newcomer_friendly": {"value": True, "confidence": 0.5, "evidence": None},
-        "outdoor": {"value": None, "confidence": 0.0, "evidence": None},
+        "outdoor": {"value": False, "confidence": 0.2, "evidence": None},
         "solo_friendly": {"value": True, "confidence": 0.4, "evidence": None},
         "interaction_structure": "optional",
         "energy": "high",
-        "sex_service_context": {"value": None, "confidence": 0.0, "evidence": None},
+        "sex_service_context": {"value": False, "confidence": 0.2, "evidence": None},
         "tags": [
             {"name": "techno", "confidence": 0.9, "evidence": "Studentenparty"},
             {"name": "student nightlife", "confidence": 0.6, "evidence": "Studentenparty"},
             {"name": "loud", "confidence": 0.3, "evidence": None},
+            {"name": "dance", "confidence": 0.3, "evidence": None},
+            {"name": "night out", "confidence": 0.3, "evidence": None},
+            {"name": "indoor", "confidence": 0.3, "evidence": None},
         ],
         "venue": {"value": "Kellerclub", "confidence": 0.8, "evidence": "im Kellerclub"},
         "price": {
@@ -107,7 +110,9 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
         "SELECT name, confidence, origins FROM event_tag WHERE event_id = %s",
         (event_row["id"],),
     ).fetchall()
-    assert {tag["name"] for tag in tags} == {"techno", "student nightlife", "loud"}
+    assert {tag["name"] for tag in tags} == {
+        "techno", "student nightlife", "loud", "dance", "night out", "indoor",
+    }
     assert next(tag for tag in tags if tag["name"] == "techno")["confidence"] == 0.8
 
 
@@ -119,7 +124,8 @@ def test_content_key_changes_with_content(event_row):
 
 
 def test_flagged_venue_always_carries_sex_service_context(conn, event_row, monkeypatch):
-    """The LLM said unknown, the curated venue flag wins - and it wins on
+    """The LLM's low-certainty false estimate is overridden by curated facts,
+    and the override wins on
     the cache-hit path too (flagging a venue must not wait for re-enrichment)."""
     monkeypatch.setattr(en.llm, "complete", lambda *a, **k: _fake_enrichment())
     flagged = dict(event_row, venue_sex_service=True)
@@ -131,11 +137,11 @@ def test_flagged_venue_always_carries_sex_service_context(conn, event_row, monke
     }
     # the cache row stays the pure LLM verdict: the override is live, not baked
     cached = conn.execute("SELECT attributes FROM enrichment").fetchone()
-    assert cached["attributes"]["sex_service_context"]["value"] is None
+    assert cached["attributes"]["sex_service_context"]["value"] is False
     # cache-hit path (same content, e.g. after a rebuild) is overridden too
     assert enrich_event(conn, flagged)["sex_service_context"]["value"] is True
     # an unflagged venue keeps the LLM verdict untouched
-    assert enrich_event(conn, event_row)["sex_service_context"]["value"] is None
+    assert enrich_event(conn, event_row)["sex_service_context"]["value"] is False
 
 
 def test_rebuild_reapply_keeps_venue_override(conn, event_row, monkeypatch):

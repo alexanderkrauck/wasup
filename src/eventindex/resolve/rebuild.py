@@ -1414,7 +1414,12 @@ def _apply_enrichment(tx) -> list:
     for row in rows:
         key = content_key(row)
         if key in cached:
-            apply_to_event(tx, row["id"], venue_override(row, dict(cached[key])))
+            apply_to_event(
+                tx,
+                row["id"],
+                venue_override(row, dict(cached[key])),
+                enrichment_key=key,
+            )
         else:
             pending.append(row["id"])
     return pending

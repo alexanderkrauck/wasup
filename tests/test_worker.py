@@ -10,6 +10,20 @@ def test_claim_on_empty_queue(conn):
     assert claim_next(conn) is None
 
 
+def test_search_readiness_jobs_outrank_older_acquisition_work(conn):
+    with conn.transaction():
+        conn.execute(
+            "INSERT INTO jobs (kind, payload, run_after) VALUES "
+            "('crawl', '{}', now() - interval '1 day'), "
+            "('embed_tags', '{}', now() - interval '2 days'), "
+            "('enrich', '{}', now())"
+        )
+
+    assert claim_next(conn)["kind"] == "enrich"
+    assert claim_next(conn)["kind"] == "embed_tags"
+    assert claim_next(conn)["kind"] == "crawl"
+
+
 def test_success_marks_done_and_enqueues_returned_jobs(conn, monkeypatch):
     def ok_handler(job, tx):
         return [{"kind": "test_kind", "payload": {"child": True}}]

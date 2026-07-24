@@ -20,6 +20,60 @@ from eventindex.jobs.worker import enqueue
 DORMANT_MIN_CRAWLS = 5
 DORMANT_YIELD_EMA = 0.05
 MAX_ENQUEUE_PER_RUN = 100  # the envelope: least valuable work falls off first
+ENRICH_BATCH = 200
+
+
+def enqueue_enrichment(conn) -> int:
+    """Continuously enforce rich-search readiness for every future event.
+
+    Resolve already enqueues cache misses. This independent bounded sweep is
+    the repair invariant: it catches interrupted resolves, schema upgrades,
+    and accidentally removed inferred tags without relying on another crawl.
+    """
+    from eventindex.enrich import MIN_INFERRED_TAGS, SCHEMA_VERSION
+
+    rows = conn.execute(
+        """
+        SELECT e.id, min(o.starts_at) AS next_start
+        FROM event e
+        JOIN occurrence o ON o.event_id = e.id
+        WHERE o.status = 'scheduled'
+          AND coalesce(o.ends_at, o.starts_at) >= now()
+          AND (
+            coalesce(
+              (e.inferred->'_enrichment'->>'schema_version')::int, 0
+            ) <> %(schema_version)s
+            OR NOT (coalesce(e.inferred, '{}'::jsonb)
+                    ->'newcomer_friendly' ? 'value')
+            OR coalesce(
+              (e.inferred->'newcomer_friendly'->>'confidence')::float, 0
+            ) <= 0
+            OR (
+              SELECT count(*) FROM event_tag et
+              WHERE et.event_id = e.id
+                AND et.origin_confidences ? 'inferred'
+                AND et.confidence > 0
+            ) < %(min_tags)s
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.kind = 'enrich'
+              AND j.status IN ('pending', 'running')
+              AND j.payload->>'event_id' = e.id::text
+          )
+        GROUP BY e.id
+        ORDER BY min(o.starts_at), e.id
+        LIMIT %(batch)s
+        """,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "min_tags": MIN_INFERRED_TAGS,
+            "batch": ENRICH_BATCH,
+        },
+    ).fetchall()
+    for row in rows:
+        enqueue(conn, "enrich", {"event_id": str(row["id"])})
+    return len(rows)
 
 
 def park_dormant(conn) -> int:
@@ -350,6 +404,9 @@ def venue_escalation(conn) -> int:
 
 
 def schedule(conn) -> int:
+    enriching = enqueue_enrichment(conn)
+    if enriching:
+        print(f"enqueued {enriching} missing/stale event enrichments")
     flagged = completeness_escalation(conn)
     if flagged:
         print(f"completeness escalation: {flagged} capped sources sent to onboarding")

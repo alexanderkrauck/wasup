@@ -1,8 +1,8 @@
 from psycopg.types.json import Jsonb
 
 from eventindex.jobs.schedule import (
-    completeness_escalation, enqueue_nightly_qa, escalate_broken, park_dormant,
-    schedule,
+    completeness_escalation, enqueue_enrichment, enqueue_nightly_qa,
+    escalate_broken, park_dormant, schedule,
 )
 
 
@@ -124,6 +124,53 @@ def test_nightly_qa_enqueued_once_per_day(conn):
         "SELECT count(*) AS n FROM jobs WHERE kind = 'qa_check'"
     ).fetchone()
     assert n["n"] == 1
+
+
+def test_enrichment_sweep_repairs_every_stale_future_event_once(conn):
+    import uuid
+
+    from eventindex import enrich, tags
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, confidence, status, inferred) "
+        "VALUES (%s, 'one_off', 'Yogakurse', 0.8, 'confirmed', %s)",
+        (
+            event_id,
+            Jsonb({
+                "_enrichment": {"schema_version": enrich.SCHEMA_VERSION - 1},
+                "newcomer_friendly": {
+                    "value": None, "confidence": 0, "evidence": None,
+                },
+            }),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '3 days', 'scheduled')",
+        (event_id,),
+    )
+    conn.commit()
+
+    assert enqueue_enrichment(conn) == 1
+    assert enqueue_enrichment(conn) == 0
+
+    conn.execute("DELETE FROM jobs WHERE kind = 'enrich'")
+    conn.execute(
+        "UPDATE event SET inferred = %s WHERE id = %s",
+        (
+            Jsonb({
+                "_enrichment": {"schema_version": enrich.SCHEMA_VERSION},
+                "newcomer_friendly": {
+                    "value": True, "confidence": 0.2, "evidence": None,
+                },
+            }),
+            event_id,
+        ),
+    )
+    for index in range(enrich.MIN_INFERRED_TAGS):
+        tags.upsert(conn, event_id, f"concept {index}", 0.2, "inferred")
+    assert enqueue_enrichment(conn) == 0
 
 
 def test_yieldless_sources_park_dormant_with_monthly_pulse(conn):

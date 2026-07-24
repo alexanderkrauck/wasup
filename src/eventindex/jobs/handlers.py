@@ -278,7 +278,7 @@ def resolve(job: dict, tx) -> list[dict]:
 
 def enrich(job: dict, tx) -> list[dict]:
     """§8/H5: infer audience attributes for one event (cached by content)."""
-    from eventindex.enrich import apply_to_event, enrich_event
+    from eventindex.enrich import apply_to_event, content_key, enrich_event
 
     row = tx.execute(
         "SELECT e.id, e.title, e.description, e.category, e.price_min, "
@@ -289,7 +289,7 @@ def enrich(job: dict, tx) -> list[dict]:
     if row is None:
         return []  # event resolved away since; the next rebuild re-enqueues
     attributes = enrich_event(tx, row, job_id=job["id"])
-    apply_to_event(tx, row["id"], attributes)
+    apply_to_event(tx, row["id"], attributes, enrichment_key=content_key(row))
     # Debounced derived-cache convergence: the current batch may finish while
     # more enrichment jobs create new tags, so a later enrichment re-arms it.
     pending = tx.execute(

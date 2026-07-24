@@ -13,7 +13,7 @@ import hashlib
 from typing import Literal
 
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from eventindex import config, llm, tags as tag_store
 
@@ -26,64 +26,88 @@ GUESS_CONFIDENCE = 0.2
 
 class _Est(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    value: float | None
-    confidence: float
+    value: float
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None = Field(description="verbatim text snippet, or null if prior only")
 
 
 class _BoolEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    value: bool | None
-    confidence: float
+    value: bool
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None
 
 
 class _TimeEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: str | None = Field(description="HH:MM, 24h local, or null")
-    confidence: float
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None
 
 
 class _LanguageEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    value: Literal["de", "en", "other"] | None
-    confidence: float
+    value: Literal["de", "en", "other"]
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None
 
 
 class _TextEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: str | None
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
     evidence: str | None
 
 
 class _PriceEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    min: float
-    max: float
+    min: float = Field(ge=0, le=5000)
+    max: float = Field(ge=0, le=5000)
     currency: Literal["EUR"]
     basis: Literal["stated", "estimated"]
-    confidence: float
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None
+
+    @model_validator(mode="after")
+    def ordered_range(self):
+        if self.min > self.max:
+            raise ValueError("price min must not exceed max")
+        return self
 
 
 class _TagEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
-    confidence: float
+    confidence: float = Field(gt=0, le=1)
     evidence: str | None
+
+    @field_validator("name")
+    @classmethod
+    def useful_short_name(cls, value: str) -> str:
+        clean = tag_store.clean_name(value)
+        if clean is None:
+            raise ValueError("tag must be a useful 1-3 word concept")
+        return clean
 
 
 class _EventScaleEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    estimated_participants: int
-    plausible_min: int
-    plausible_max: int
-    confidence: float
+    estimated_participants: int = Field(ge=1, le=1_000_000)
+    plausible_min: int = Field(ge=1, le=1_000_000)
+    plausible_max: int = Field(ge=1, le=1_000_000)
+    confidence: float = Field(gt=0, le=1)
     basis: list[str]
     evidence: str | None
+
+    @model_validator(mode="after")
+    def ordered_range(self):
+        if not (
+            self.plausible_min
+            <= self.estimated_participants
+            <= self.plausible_max
+        ):
+            raise ValueError("participant estimate must be inside plausible range")
+        return self
 
 
 class Enrichment(BaseModel):
@@ -99,10 +123,12 @@ class Enrichment(BaseModel):
     newcomer_friendly: _BoolEst
     outdoor: _BoolEst
     solo_friendly: _BoolEst
-    interaction_structure: Literal["none", "optional", "built_in"] | None
-    energy: Literal["low", "medium", "high"] | None
+    interaction_structure: Literal["none", "optional", "built_in"]
+    energy: Literal["low", "medium", "high"]
     sex_service_context: _BoolEst
     tags: list[_TagEst] = Field(
+        min_length=6,
+        max_length=12,
         description="6-12 useful event concepts, each 1-3 lowercase words "
         "with its own confidence, including the core named format and useful "
         "atmosphere/style; no synonyms, translations, or commentary")
@@ -110,10 +136,21 @@ class Enrichment(BaseModel):
     price: _PriceEst
     start_time: _TimeEst
 
+    @model_validator(mode="after")
+    def coherent_query_attributes(self):
+        if not (0 <= self.age_min.value <= self.age_max.value <= 100):
+            raise ValueError("age estimates must satisfy 0 <= min <= max <= 100")
+        if not 0 <= self.gender_split.value <= 1:
+            raise ValueError("gender_split must be between 0 and 1")
+        if len({tag.name for tag in self.tags}) < 6:
+            raise ValueError("tags must contain at least 6 distinct concepts")
+        return self
+
 
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
 
@@ -190,7 +227,9 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
     result = llm.complete(
         tx,
         "Estimate audience attributes for this Linz event. ALWAYS give your "
-        "best estimate - null only if an attribute is truly inapplicable. "
+        "best estimate. Every queryable audience attribute must have a value "
+        "and every estimate/tag must have confidence greater than zero; never "
+        "use null or zero confidence to mean 'not sure'. "
         "Confidence encodes how much it is a guess: "
         f"~{GUESS_CONFIDENCE} = pure world-knowledge guess, ~0.35 = typical "
         "for this kind of event (use the category prior if given), up to "
@@ -273,12 +312,11 @@ _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
     """Deterministic guards (audit A11: age range [18,7251), attendance 0,
     LLM commentary leaking into tags). Estimates stay estimates, but
-    impossible values become unknown."""
+    impossible values are rejected rather than silently becoming unknown."""
     lo = attributes.get("age_min", {}).get("value")
     hi = attributes.get("age_max", {}).get("value")
-    if lo is not None and hi is not None and not (0 <= lo <= hi <= 100):
-        attributes["age_min"]["value"] = None
-        attributes["age_max"]["value"] = None
+    if lo is None or hi is None or not (0 <= lo <= hi <= 100):
+        raise ValueError("invalid age range")
     scale = attributes.get("event_scale", {})
     estimate = scale.get("estimated_participants")
     low, high = scale.get("plausible_min"), scale.get("plausible_max")
@@ -293,6 +331,10 @@ def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
         if str(item).strip()
     ][:5] or ["event format"]
     attributes["tags"] = tag_store.clean_estimates(attributes.get("tags", []))
+    if len(attributes["tags"]) < MIN_INFERRED_TAGS:
+        raise ValueError(
+            f"enrichment must contain at least {MIN_INFERRED_TAGS} distinct tags"
+        )
     for tag in attributes["tags"]:
         tag["confidence"] = min(tag["confidence"], CONFIDENCE_CAP)
     language = attributes.get("language", {})
@@ -329,7 +371,9 @@ def _sanity_clamp(attributes: dict, source_text: str = "") -> None:
         st["value"] = None
 
 
-def apply_to_event(tx, event_id, attributes: dict) -> None:
+def apply_to_event(
+    tx, event_id, attributes: dict, *, enrichment_key: str | None = None
+) -> None:
     """Write attributes into the typed §2 columns + the inferred jsonb."""
     age_min = attributes.get("age_min", {}).get("value")
     age_max = attributes.get("age_max", {}).get("value")
@@ -380,14 +424,21 @@ def apply_to_event(tx, event_id, attributes: dict) -> None:
             "venue_id": venue_id,
             "price_min": price.get("min") if price.get("basis") == "stated" else None,
             "price_max": price.get("max") if price.get("basis") == "stated" else None,
-            "inferred": Jsonb({
-                k: attributes[k] for k in
-                ("language", "kid_friendly", "newcomer_friendly", "outdoor",
-                 "solo_friendly", "interaction_structure", "energy",
-                 "sex_service_context", "venue", "price", "event_scale",
-                 "start_time")
-                if k in attributes
-            }),
+            "inferred": Jsonb(
+                {
+                    k: attributes[k] for k in
+                    ("language", "kid_friendly", "newcomer_friendly", "outdoor",
+                     "solo_friendly", "interaction_structure", "energy",
+                     "sex_service_context", "venue", "price", "event_scale",
+                     "start_time")
+                    if k in attributes
+                } | {
+                    "_enrichment": {
+                        "schema_version": SCHEMA_VERSION,
+                        "content_key": enrichment_key,
+                    }
+                }
+            ),
         },
     )
     tag_store.replace_inferred(tx, event_id, attributes.get("tags", []))

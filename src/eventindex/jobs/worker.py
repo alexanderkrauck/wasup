@@ -45,7 +45,15 @@ def claim_next(conn) -> dict | None:
             WITH next AS (
                 SELECT id FROM jobs
                 WHERE status = 'pending' AND run_after <= now()
-                ORDER BY run_after
+                -- Search readiness is derived data on already collected
+                -- events. Drain it ahead of slower acquisition so a large
+                -- crawl/hydration backlog cannot publish tagless events for
+                -- days. This is kind-generic, never source/site-specific.
+                ORDER BY CASE kind
+                    WHEN 'enrich' THEN 0
+                    WHEN 'embed_tags' THEN 1
+                    ELSE 2
+                END, run_after
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )

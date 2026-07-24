@@ -14,6 +14,8 @@ MAX_TAG_LENGTH = 60
 MULTI_CONCEPT_SUPPORTS = 2
 MAX_JOINT_CONCEPTS = 3
 JOINT_CONTEXT_WEIGHT = 0.1
+TITLE_EVIDENCE_CONFIDENCE = 0.8
+MIN_COMPOUND_FRAGMENT_LENGTH = 4
 
 
 def clean_name(value: str) -> str | None:
@@ -65,6 +67,49 @@ def clean_desired(values: Iterable[str]) -> list[str]:
     if len(cleaned) > MAX_DESIRED_TAGS:
         raise ValueError(f"at most {MAX_DESIRED_TAGS} tag concepts are allowed")
     return cleaned
+
+
+def _words(value: str) -> list[str]:
+    """Unicode-aware mechanical tokenization, without a language vocabulary."""
+    words: list[str] = []
+    current: list[str] = []
+    for character in value.casefold():
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            words.append("".join(current))
+            current = []
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def _title_evidence(title: str, concept: str) -> str | None:
+    """Return explicit title evidence for a literal concept.
+
+    Exact token sequences always count. A single concept of four or more
+    characters may also be the prefix or suffix of a title word, which
+    handles compounds generically (Yogakurse, Maturaball) without a
+    site-, language-, or activity-specific vocabulary.
+    """
+    title_words = _words(title)
+    concept_words = _words(concept)
+    if not title_words or not concept_words:
+        return None
+    width = len(concept_words)
+    for index in range(len(title_words) - width + 1):
+        window = title_words[index:index + width]
+        if window == concept_words:
+            return " ".join(window)
+    if width == 1 and len(concept_words[0]) >= MIN_COMPOUND_FRAGMENT_LENGTH:
+        concept_word = concept_words[0]
+        for title_word in title_words:
+            if (
+                title_word.startswith(concept_word)
+                or title_word.endswith(concept_word)
+            ):
+                return title_word
+    return None
 
 
 def _query_specs(desired: list[str]) -> list[dict]:
@@ -209,6 +254,24 @@ def semantic_matches(
     exact_confidences: dict[UUID, list[float]] = {
         event_id: [0.0 for _ in desired] for event_id in event_ids
     }
+    titles = {
+        row["id"]: row["title"]
+        for row in tx.execute(
+            "SELECT id, title FROM event WHERE id = ANY(%s)", (event_ids,)
+        )
+    }
+    for event_id, title in titles.items():
+        for index, concept in enumerate(desired):
+            title_word = _title_evidence(title or "", concept)
+            if title_word is None:
+                continue
+            evidence[event_id][index].append({
+                "score": TITLE_EVIDENCE_CONFIDENCE,
+                "event_tag": title_word,
+                "tag_confidence": TITLE_EVIDENCE_CONFIDENCE,
+                "relatedness": 1.0,
+                "origin": "title",
+            })
     for row in rows:
         for index, spec in enumerate(specs):
             if row["name"] == spec["embedding_text"]:
@@ -230,6 +293,7 @@ def semantic_matches(
                 "event_tag": row["name"],
                 "tag_confidence": float(row["confidence"]),
                 "relatedness": relatedness,
+                "origin": "event_tag",
             })
 
     support_limit = 1 if len(desired) == 1 else MULTI_CONCEPT_SUPPORTS
@@ -252,6 +316,7 @@ def semantic_matches(
             score = max(exact, semantic_support)
             best = supports[0] if supports else {
                 "event_tag": None, "tag_confidence": None, "relatedness": 0.0,
+                "origin": None,
             }
             concepts.append({
                 "query": spec["query"],
@@ -259,6 +324,7 @@ def semantic_matches(
                 "event_tag": best["event_tag"],
                 "tag_confidence": best["tag_confidence"],
                 "relatedness": best["relatedness"],
+                "origin": best["origin"],
                 "supports": supports,
                 "joint": spec["joint"],
             })
@@ -317,6 +383,7 @@ def semantic_threshold_sql(
         spec["embedding_text"] for spec in specs
     ])
     relations = []
+    title_scores = []
     for index, (spec, vector) in enumerate(zip(specs, vectors)):
         name_key = f"{prefix}_name_{index}"
         vector_key = f"{prefix}_vector_{index}"
@@ -335,6 +402,32 @@ def semantic_threshold_sql(
                 power=embeddings.RELATEDNESS_FOCUS_POWER,
             )
         )
+        if index < len(desired):
+            title_key = f"{prefix}_title_{index}"
+            params[title_key] = spec["embedding_text"]
+            if " " in spec["embedding_text"]:
+                # Literal phrase evidence. This deliberately does not attempt
+                # linguistic semantics; the LLM supplies semantic tags.
+                matched = (
+                    f"position(%({title_key})s in lower(e.title)) > 0"
+                )
+            else:
+                # regexp_split is only mechanical Unicode word separation.
+                # Prefix/suffix matching makes compounds searchable while the
+                # four-character floor avoids short accidental fragments.
+                matched = (
+                    "EXISTS (SELECT 1 FROM regexp_split_to_table("
+                    "lower(e.title), '[^[:alnum:]]+') AS title_word "
+                    f"WHERE title_word = %({title_key})s OR ("
+                    f"length(%({title_key})s) >= {MIN_COMPOUND_FRAGMENT_LENGTH} "
+                    f"AND (starts_with(title_word, %({title_key})s) "
+                    f"OR right(title_word, length(%({title_key})s)) "
+                    f"= %({title_key})s)))"
+                )
+            title_scores.append(
+                f"CASE WHEN {matched} THEN {TITLE_EVIDENCE_CONFIDENCE} "
+                "ELSE 0.0 END"
+            )
     model_key = f"{prefix}_model"
     match_key = f"{prefix}_min_match"
     params[model_key] = embeddings.MODEL_VERSION
@@ -362,7 +455,7 @@ def semantic_threshold_sql(
             f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
         )
         concept_scores.append(
-            f"greatest(exact_{index}, {averaged})"
+            f"greatest(exact_{index}, {averaged}, {title_scores[index]})"
             if index < len(desired) else averaged
         )
     if len(desired) == 1:

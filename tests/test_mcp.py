@@ -88,6 +88,7 @@ def test_tools_carry_directory_required_annotations(client):
         assert t["annotations"]["readOnlyHint"] is True, t["name"]
         assert t["annotations"]["destructiveHint"] is False, t["name"]
         assert t["annotations"]["openWorldHint"] is False, t["name"]
+        assert t["inputSchema"].get("additionalProperties") is False, t["name"]
         assert t["outputSchema"]["type"] == "object", t["name"]
         assert t["outputSchema"].get("additionalProperties") is False, t["name"]
         assert t["outputSchema"].get("properties"), t["name"]
@@ -125,6 +126,23 @@ def test_search_events_rejects_unknown_filters(client):
         "name": "search_events", "arguments": {"filters": {"bogus": 1}},
     })
     assert "error" in body or body["result"].get("isError")
+
+
+def test_search_events_rejects_flattened_filters_instead_of_searching_broadly(
+    client,
+):
+    body = _rpc(client, "tools/call", {
+        "name": "search_events",
+        "arguments": {
+            "name": "ball",
+            "tags": ["dance", "elegant"],
+            "limit": 100,
+        },
+    })
+    assert body["result"].get("isError") is True
+    message = body["result"]["content"][0]["text"]
+    assert "Unknown top-level arguments" in message
+    assert "name" in message and "tags" in message
 
 
 def test_chatgpt_connector_search_fetch_contract(client):

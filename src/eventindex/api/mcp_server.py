@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,7 +32,37 @@ _READ_ONLY = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, openWorldHint=False
 )
 
-mcp = FastMCP(
+
+class _StrictToolInputsFastMCP(FastMCP):
+    """Publish and enforce closed top-level argument objects for every tool.
+
+    FastMCP's generated argument models intentionally ignore unknown fields
+    for backwards compatibility. That is unsafe for discovery: a client that
+    accidentally flattens ``filters`` could otherwise receive a broad query
+    while believing its constraints were applied.
+    """
+
+    def add_tool(self, fn, name=None, **kwargs) -> None:
+        super().add_tool(fn, name=name, **kwargs)
+        tool = self._tool_manager.get_tool(name or fn.__name__)
+        if tool is not None:
+            tool.parameters["additionalProperties"] = False
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            allowed = set(tool.parameters.get("properties", {}))
+            unknown = sorted(set(arguments) - allowed)
+            if unknown:
+                raise ToolError(
+                    f"Unknown top-level arguments for {name}: {unknown}. "
+                    "Follow the published input schema and keep structured "
+                    "fields inside their documented object."
+                )
+        return await super().call_tool(name, arguments)
+
+
+mcp = _StrictToolInputsFastMCP(
     "Wasup - Linz Event Index",
     instructions=(
         "Find public events in Linz and roughly 25 km around it. TOOL CHOICE: "

@@ -639,7 +639,16 @@ def rank(
             / sum(weight for weight, _ in weighted_scores)
             if weighted_scores else 1.0
         )
-        s = preference * (row["confidence"] or 0.0)
+        # The preference values already include field/tag certainty. Multiplying
+        # by whole-event confidence again let a fresh but weak semantic match
+        # outrank a strong match (live: Quadball above dance balls). With an
+        # actual preference, relevance leads and event confidence only breaks
+        # ties; without preferences, confidence remains the ranking signal.
+        s = (
+            preference
+            if weighted_scores
+            else float(row["confidence"] or 0.0)
+        )
         row["match_score"] = round(s, 4)  # exposed: consumers see the weighting
         return s
 
@@ -654,6 +663,7 @@ def rank(
             scored,
             key=lambda pair: (
                 -pair[0],
+                -float(pair[1].get("confidence") or 0.0),
                 pair[1].get("starts_at")
                 or datetime.max.replace(tzinfo=VIENNA),
                 str(pair[1]["event_id"]),

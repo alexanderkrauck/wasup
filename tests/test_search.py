@@ -232,6 +232,18 @@ def test_tags_rank_but_never_exclude_or_exceed_one():
     assert all(0 <= r["match_score"] <= 1 for r in ranked)
 
 
+def test_stronger_query_fit_beats_higher_whole_event_confidence():
+    f = _filters(tags=["dance"])
+    strong_id, weak_id = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        {"event_id": strong_id, "title": "Dance Ball", "confidence": 0.4},
+        {"event_id": weak_id, "title": "Ball Sport", "confidence": 0.95},
+    ]
+    ranked = rank(rows, f, tag_scores={strong_id: 0.8, weak_id: 0.4})
+    assert [row["title"] for row in ranked] == ["Dance Ball", "Ball Sport"]
+    assert ranked[0]["match_score"] == 0.8
+
+
 def test_min_tag_match_is_an_explicit_hard_filter():
     f = _filters(tags=["dance"], min_tag_match=0.6)
     salsa_id, chess_id = uuid.uuid4(), uuid.uuid4()

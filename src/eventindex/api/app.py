@@ -831,8 +831,9 @@ def query(
         ge=0, le=2000, description="skip N ranked rows",
     )] = 0,
     sort: Annotated[Literal["relevance", "starts_at"], Query(
-        description="relevance = match_score x confidence (the default, NOT "
-        "chronological); starts_at = chronological",
+        description="relevance = certainty-aware match_score, with whole-event "
+        "confidence as a tie-break (the default, NOT chronological); "
+        "starts_at = chronological",
     )] = "relevance",
     distinct: Annotated[Literal["event", "occurrence"], Query(
         description="event = one row per event (its best occurrence) for "

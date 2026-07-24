@@ -44,8 +44,9 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 Browse-only agent (can only GET)? Same filters as query params:
 `GET /v1/query?name=ball&tags=dance,elegant&importance=tags:1.0&limit=10`
 Result-shape params (query string on GET and POST): `sort=starts_at` for
-chronological (default `relevance` = match_score x confidence, NOT
-chronological!), `distinct=event` by default for discovery questions (one
+chronological (default `relevance` = certainty-aware match_score, NOT
+chronological; whole-event confidence only breaks ties), `distinct=event` by
+default for discovery questions (one
 result per event, represented by its next relevant occurrence); set
 `distinct=occurrence` only when dates themselves are the requested result.
 `offset=` pages through the complete ranked candidate set.

@@ -20,6 +20,7 @@ from eventindex.budget import BudgetExceeded, check_budget, record_spend
 S = TypeVar("S", bound=BaseModel)
 
 _client: OpenAI | None = None
+PROVIDER_TIMEOUT_SECONDS = 90.0
 
 
 def _get_client() -> OpenAI:
@@ -28,7 +29,13 @@ def _get_client() -> OpenAI:
         if not config.OPENROUTER_API_KEY:
             raise RuntimeError("OPENROUTER_API_KEY is not set (see .env.example)")
         _client = OpenAI(
-            base_url=config.OPENROUTER_BASE_URL, api_key=config.OPENROUTER_API_KEY
+            base_url=config.OPENROUTER_BASE_URL,
+            api_key=config.OPENROUTER_API_KEY,
+            timeout=PROVIDER_TIMEOUT_SECONDS,
+            # _create owns the retry policy. The SDK defaults to two hidden
+            # retries with a ten-minute read timeout, which multiplied one
+            # slow OpenRouter response into tens of minutes.
+            max_retries=0,
         )
     return _client
 

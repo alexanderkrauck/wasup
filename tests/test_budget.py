@@ -66,6 +66,25 @@ def test_llm_create_retries_provider_json_blips(monkeypatch):
     assert calls["n"] == 3
 
 
+def test_llm_client_has_one_bounded_retry_layer(monkeypatch):
+    from eventindex import llm
+
+    seen = {}
+
+    def fake_openai(**kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(llm, "_client", None)
+    monkeypatch.setattr(llm, "OpenAI", fake_openai)
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "test-key")
+
+    llm._get_client()
+
+    assert seen["timeout"] == llm.PROVIDER_TIMEOUT_SECONDS
+    assert seen["max_retries"] == 0
+
+
 def test_llm_credit_outage_becomes_budget_signal(monkeypatch):
     """Resolver fallbacks re-raise BudgetExceeded; a raw 402 must use that
     path or one rebuild makes a rejected request for every uncached event."""

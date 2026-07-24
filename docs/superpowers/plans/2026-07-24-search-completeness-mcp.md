@@ -227,6 +227,10 @@ The implementation shipped as five coordinated production increments:
 - A real WKO/startup task exposed that a calendar silently choosing the old
   default semantic threshold could omit accepted search results. Calendar link
   generation now requires the caller to transfer an explicit threshold.
+- Deployment monitoring exposed the OpenAI SDK's hidden two-retry layer and
+  600-second default read timeout beneath Wasup's own retries. The shared LLM
+  client now uses one explicit 90-second timeout, disables SDK retries, and
+  keeps the existing schema-validation-aware retry loop as the sole policy.
 - Live generic hydration recovered exact public prices with quoted evidence for
   the Debütantenball Wels and other unrelated event types. For the current
   Freistadt Maturaball it found only prior-year or otherwise unsupported public

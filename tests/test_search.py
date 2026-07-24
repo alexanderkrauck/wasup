@@ -283,6 +283,27 @@ def test_tag_intent_leads_secondary_preferences_unless_importance_overrides():
     ]
 
 
+def test_stronger_semantic_match_beats_a_large_secondary_price_difference():
+    f = _filters(tags=["salsa", "dance"], preferred_max_price=20)
+    salsa_id, cheap_generic_id = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        {
+            "event_id": salsa_id, "title": "Salsa Workshop",
+            "confidence": 0.8, "price__value": 190, "price__conf": 0.9,
+        },
+        {
+            "event_id": cheap_generic_id, "title": "Generic Dance",
+            "confidence": 0.8, "price__value": 10, "price__conf": 0.3,
+        },
+    ]
+    ranked = rank(
+        rows, f, tag_scores={salsa_id: 0.58, cheap_generic_id: 0.42}
+    )
+    assert [row["title"] for row in ranked] == [
+        "Salsa Workshop", "Generic Dance",
+    ]
+
+
 def test_min_tag_match_is_an_explicit_hard_filter():
     f = _filters(tags=["dance"], min_tag_match=0.6)
     salsa_id, chess_id = uuid.uuid4(), uuid.uuid4()

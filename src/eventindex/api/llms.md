@@ -112,6 +112,11 @@ the secondary fields refine it. Use `importance` to override that balance only
 when the user's wording clearly makes another preference equally or more
 important.
 
+When transferring accepted search results to `get_calendar_link`, inspect
+`time_unknown`. Either leave such rows out of the accepted set or explicitly
+set `include_time_unknown=true`; the default timed-only feed cannot contain
+date-only rows.
+
 Fine print an agent should know:
 - Windows use overlap semantics: anything still running at `from` matches
   (flagged `ongoing`); a null `ends_at` is treated as ending at `starts_at`.

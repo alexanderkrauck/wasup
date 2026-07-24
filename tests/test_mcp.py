@@ -297,6 +297,43 @@ def test_adult_context_is_default_denied_but_explicitly_available(conn, client):
     assert venue_denied["result"]["isError"] is True
 
 
+def test_safety_exclusion_does_not_become_a_hidden_ranking_preference(
+    conn, client,
+):
+    known_safe = _add_event(
+        conn, "Safety Ranking Known",
+        starts=NOW + timedelta(days=1), lat=48.30, lon=14.29,
+        category=["community"],
+    )
+    unknown = _add_event(
+        conn, "Safety Ranking Unknown",
+        starts=NOW + timedelta(days=2), lat=48.30, lon=14.29,
+        category=["community"],
+    )
+    conn.execute(
+        "UPDATE event SET confidence = 0.4, inferred = %s WHERE id = %s",
+        (Jsonb({"sex_service_context": {
+            "value": False, "confidence": 0.8, "evidence": "ordinary venue",
+        }}), known_safe),
+    )
+    conn.execute(
+        "UPDATE event SET confidence = 0.95, inferred = NULL WHERE id = %s",
+        (unknown,),
+    )
+    conn.commit()
+
+    out = _call(client, "search_events", {
+        "filters": {
+            "name": "Safety Ranking",
+            "sex_service_context": False,
+        },
+        "limit": 10,
+    })
+    assert [uuid.UUID(row["event_id"]) for row in out["occurrences"]] == [
+        unknown, known_safe,
+    ]
+
+
 def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
     future_id = _add_event(
         conn, "HWYD Social Run", starts=NOW + timedelta(days=3),

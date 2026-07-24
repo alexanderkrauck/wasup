@@ -532,6 +532,9 @@ def get_calendar_link(
     min_tag_match at or below the weakest accepted result's tag_match. Do not
     assume 0.5: for example, a WKO/startup search may warrant
     filters={"source":"WKO","tags":["startup"],"min_tag_match":0.2}.
+    If an accepted search row has time_unknown=true, either omit that row from
+    the accepted set or pass include_time_unknown=true; the default timed-only
+    feed intentionally cannot preserve it.
     Example: filters={"name":"ball","tags":["dance","elegant"],
     "min_tag_match":0.5}. Example large-event feed:
     filters={"categories":["music"],"participant_count_min":300,

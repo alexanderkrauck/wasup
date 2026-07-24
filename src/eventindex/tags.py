@@ -13,6 +13,8 @@ MAX_TAG_WORDS = 3
 MAX_TAG_LENGTH = 60
 MULTI_CONCEPT_SUPPORTS = 2
 MAX_JOINT_CONCEPTS = 3
+MULTI_SEMANTIC_WEIGHT = 0.75
+MULTI_EXACT_COVERAGE_WEIGHT = 0.25
 
 
 def clean_name(value: str) -> str | None:
@@ -171,8 +173,10 @@ def semantic_matches(
 
     Every requested concept retains its own confidence-bearing evidence.
     Multi-concept queries average the two strongest supporting event tags
-    instead of trusting one accidental embedding neighbour, then devote half
-    the score to an order-invariant joint phrase that disambiguates word sense.
+    instead of trusting one accidental embedding neighbour. The semantic
+    composition is blended with exact requested-concept coverage: symmetric
+    embeddings know that salsa and dance are related, but exact evidence is
+    what distinguishes "salsa" from an arbitrary kind of dance.
     """
     event_ids = list(dict.fromkeys(event_ids))
     desired = clean_desired(desired)
@@ -203,10 +207,18 @@ def semantic_matches(
         ]
         for event_id in event_ids
     }
+    exact_confidences: dict[UUID, list[float]] = {
+        event_id: [0.0 for _ in desired] for event_id in event_ids
+    }
     for row in rows:
         for index, spec in enumerate(specs):
             if row["name"] == spec["embedding_text"]:
                 relatedness = 1.0
+                if not spec["joint"]:
+                    exact_confidences[row["event_id"]][index] = max(
+                        exact_confidences[row["event_id"]][index],
+                        float(row["confidence"]),
+                    )
             elif row[f"sim_{index}"] is None:
                 relatedness = 0.0
             else:
@@ -247,11 +259,17 @@ def semantic_matches(
                 "joint": spec["joint"],
             })
         total_weight = sum(spec["weight"] for spec in specs)
+        semantic_score = sum(
+            concept["score"] * spec["weight"]
+            for concept, spec in zip(concepts, specs)
+        ) / total_weight
+        exact_coverage = sum(exact_confidences[event_id]) / len(desired)
         result[event_id] = {
-            "score": sum(
-                concept["score"] * spec["weight"]
-                for concept, spec in zip(concepts, specs)
-            ) / total_weight,
+            "score": (
+                MULTI_SEMANTIC_WEIGHT * semantic_score
+                + MULTI_EXACT_COVERAGE_WEIGHT * exact_coverage
+                if len(desired) > 1 else semantic_score
+            ),
             "concepts": concepts,
         }
     return result
@@ -316,6 +334,12 @@ def semantic_threshold_sql(
         )
         for index, relation in enumerate(relations)
     ]
+    exact_columns = [
+        "coalesce(max(et.confidence) FILTER "
+        f"(WHERE et.name = %({prefix}_name_{index})s), 0.0) "
+        f"AS exact_{index}"
+        for index in range(len(desired))
+    ]
     concept_scores = [
         "coalesce((SELECT avg(value) FROM "
         f"unnest(scores_{index}[1:{support_limit}]) AS support(value)), 0.0)"
@@ -326,9 +350,22 @@ def semantic_threshold_sql(
         for score, spec in zip(concept_scores, specs)
     )
     total_weight = sum(spec["weight"] for spec in specs)
+    semantic_score = f"(({weighted_score}) / {total_weight})"
+    if len(desired) > 1:
+        exact_coverage = (
+            "(" + " + ".join(
+                f"exact_{index}" for index in range(len(desired))
+            ) + f") / {len(desired)}"
+        )
+        final_score = (
+            f"{MULTI_SEMANTIC_WEIGHT} * {semantic_score} + "
+            f"{MULTI_EXACT_COVERAGE_WEIGHT} * ({exact_coverage})"
+        )
+    else:
+        final_score = semantic_score
     return (
-        "(SELECT round(((" + weighted_score + f") / {total_weight})::numeric, 4) "
-        "FROM (SELECT " + ", ".join(score_arrays) + " "
+        "(SELECT round((" + final_score + ")::numeric, 4) "
+        "FROM (SELECT " + ", ".join(score_arrays + exact_columns) + " "
         "FROM event_tag et LEFT JOIN tag_embedding te ON te.name = et.name "
         f"AND te.model = %({model_key})s WHERE et.event_id = e.id) ranked) "
         + f">= %({match_key})s",

@@ -798,7 +798,16 @@ def _run_filters(filters, limit: int,
             tag_matches.get(r["event_id"], {}).get("concepts", [])
             if filters.tags else []
         )
-    ranked = rank(rows, filters, importance, tag_scores)
+    # The MCP safety policy already enforces known commercial-sex exclusion
+    # in SQL. Do not also reward a positive "known safe" classification over
+    # unknown rows: that hidden preference can dilute the activity/topic the
+    # caller actually requested.
+    ranking_filters = (
+        filters.model_copy(update={"sex_service_context": None})
+        if exclude_sex_service_context and filters.sex_service_context is not True
+        else filters
+    )
+    ranked = rank(rows, ranking_filters, importance, tag_scores)
     if sort == "starts_at":
         ranked = sorted(ranked, key=lambda r: r["starts_at"])
     ranked = [_attach_public_price_and_scale(row) for row in ranked]

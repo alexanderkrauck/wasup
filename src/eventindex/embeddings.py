@@ -32,6 +32,11 @@ TAG_SEQUENCE_LENGTH = 32
 # relation-set ranking/false-positive gate is separate.
 CALIBRATION_CENTER = 0.366
 CALIBRATION_TEMPERATURE = 0.098
+# Retrieval should prefer a very close semantic relation over a merely broad
+# neighbour even when the latter tag has somewhat higher extraction
+# confidence. Squaring the calibrated 0..1 value expands that distinction
+# without changing ordering or adding a content-specific vocabulary.
+RELATEDNESS_FOCUS_POWER = 2.0
 
 
 def normalize_tag(value: str) -> str:
@@ -91,6 +96,11 @@ def calibrated_relatedness(cosine: float) -> float:
         return 1.0 / (1.0 + math.exp(-z))
     ez = math.exp(z)
     return ez / (1.0 + ez)
+
+
+def retrieval_relatedness(cosine: float) -> float:
+    """Nonlinearly separate close concepts from broad semantic neighbours."""
+    return calibrated_relatedness(cosine) ** RELATEDNESS_FOCUS_POWER
 
 
 def vector_literal(vector: np.ndarray) -> str:

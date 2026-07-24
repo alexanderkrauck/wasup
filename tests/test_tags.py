@@ -91,6 +91,43 @@ def test_semantic_score_combines_calibrated_relation_and_tag_certainty(
     assert scores[mixed_id] > 0.7  # weak exact evidence cannot mask stronger support
 
 
+def test_focused_relatedness_beats_a_broader_higher_confidence_neighbour(
+    conn, monkeypatch,
+):
+    close_id = _event(conn, "Direct Topic")
+    broad_id = _event(conn, "Broad Topic")
+    tags.upsert(conn, close_id, "entrepreneurship", 0.6, "inferred")
+    tags.upsert(conn, broad_id, "technology", 0.8, "inferred")
+    with conn.cursor() as cursor:
+        cursor.executemany(
+            "INSERT INTO tag_embedding (name, embedding, model) "
+            "VALUES (%s, %s::vector, %s)",
+            [
+                (
+                    "entrepreneurship",
+                    embeddings.vector_literal(_vector(0.59)),
+                    embeddings.MODEL_VERSION,
+                ),
+                (
+                    "technology",
+                    embeddings.vector_literal(_vector(0.48)),
+                    embeddings.MODEL_VERSION,
+                ),
+            ],
+        )
+    query = np.zeros((1, embeddings.DIMENSIONS), dtype=np.float32)
+    query[0, 0] = 1
+    monkeypatch.setattr(embeddings, "embed_tags", lambda values: query)
+
+    matches = tags.semantic_matches(
+        conn, [close_id, broad_id], ["startup"]
+    )
+
+    assert matches[close_id]["score"] > matches[broad_id]["score"]
+    assert matches[close_id]["concepts"][0]["relatedness"] > 0.8
+    assert matches[broad_id]["concepts"][0]["relatedness"] < 0.6
+
+
 def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch):
     both_id = _event(conn, "Elegant Dance Ball")
     dance_only_id = _event(conn, "Basic Dance Training")

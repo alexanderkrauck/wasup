@@ -221,7 +221,7 @@ def semantic_matches(
             elif row[f"sim_{index}"] is None:
                 relatedness = 0.0
             else:
-                relatedness = embeddings.calibrated_relatedness(row[f"sim_{index}"])
+                relatedness = embeddings.retrieval_relatedness(row[f"sim_{index}"])
             score = float(row["confidence"]) * relatedness
             if score <= 0:
                 continue
@@ -327,13 +327,14 @@ def semantic_threshold_sql(
         relations.append(
             "CASE WHEN et.name = %({name})s THEN 1.0 "
             "WHEN te.embedding IS NULL THEN 0.0 ELSE "
-            "1.0 / (1.0 + exp(({center} - "
+            "power(1.0 / (1.0 + exp(({center} - "
             "(1.0 - (te.embedding <=> %({vector})s::vector))) "
-            "/ {temperature})) END".format(
+            "/ {temperature})), {power}) END".format(
                 name=name_key,
                 vector=vector_key,
                 center=embeddings.CALIBRATION_CENTER,
                 temperature=embeddings.CALIBRATION_TEMPERATURE,
+                power=embeddings.RELATEDNESS_FOCUS_POWER,
             )
         )
     model_key = f"{prefix}_model"

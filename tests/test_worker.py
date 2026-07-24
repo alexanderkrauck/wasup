@@ -207,6 +207,35 @@ def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeyp
     assert jobs[-1] == {"kind": "embed_tags", "payload": {}}
 
 
+def test_followup_resolve_does_not_duplicate_enrichment_jobs(conn, monkeypatch):
+    """Crawls may correctly queue a follow-up while a rebuild is running; its
+    cache misses must not duplicate the first rebuild's still-pending work."""
+    import uuid
+
+    from psycopg.types.json import Jsonb
+
+    pending = [uuid.uuid4(), uuid.uuid4()]
+    monkeypatch.setattr(
+        handlers,
+        "rebuild",
+        lambda tx: {
+            "claims": 1, "events": 2, "occurrences": 2,
+            "venues_created": 0, "enrich_pending": pending,
+        },
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload) VALUES ('enrich', %s)",
+        (Jsonb({"event_id": str(pending[0])}),),
+    )
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind) VALUES ('resolve') RETURNING id"
+    ).fetchone()["id"]
+    jobs = handlers.resolve({"id": job_id, "payload": {}}, conn)
+    assert [
+        job["payload"]["event_id"] for job in jobs if job["kind"] == "enrich"
+    ] == [str(pending[1])]
+
+
 def test_embed_tags_handler_fills_missing_names(conn, monkeypatch):
     import uuid
 

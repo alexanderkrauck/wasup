@@ -260,9 +260,17 @@ def resolve(job: dict, tx) -> list[dict]:
          f"{stats['occurrences']} occurrences, {stats['venues_created']} new venues, "
          f"{len(pending)} events awaiting enrichment"),
     )
+    already_queued = {
+        row["event_id"]
+        for row in tx.execute(
+            "SELECT payload->>'event_id' AS event_id FROM jobs "
+            "WHERE kind = 'enrich' AND status IN ('pending', 'running') "
+            "AND payload ? 'event_id'"
+        )
+    }
     jobs = [
         {"kind": "enrich", "payload": {"event_id": str(eid)}}
-        for eid in pending
+        for eid in pending if str(eid) not in already_queued
     ]
     jobs.append({"kind": "embed_tags", "payload": {}})
     return jobs

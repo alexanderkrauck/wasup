@@ -54,7 +54,7 @@ def find_place(venue: dict, *, job_id=None) -> dict | None:
             "locationBias": {
                 "circle": {
                     "center": {"latitude": 48.3069, "longitude": 14.2858},
-                    "radius": 100_000.0,
+                    "radius": 50_000.0,
                 }
             },
         },

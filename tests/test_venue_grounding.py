@@ -48,6 +48,8 @@ def test_capacity_requires_verbatim_public_evidence(conn, monkeypatch):
 
 
 def test_ambiguous_repeated_place_name_stays_unknown(monkeypatch):
+    request = {}
+
     class Response:
         def raise_for_status(self):
             return None
@@ -69,12 +71,20 @@ def test_ambiguous_repeated_place_name_stays_unknown(monkeypatch):
             ]}
 
     monkeypatch.setattr(venue_facts.config, "GOOGLE_PLACES_API_KEY", "test")
-    monkeypatch.setattr(venue_facts.httpx, "post", lambda *a, **k: Response())
+    def post(*args, **kwargs):
+        request.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(venue_facts.httpx, "post", post)
     monkeypatch.setattr(venue_facts, "record_spend", lambda *a, **k: None)
 
     assert venue_facts.find_place(
         {"name": "Pfarrsaal", "address": None}
     ) is None
+    assert (
+        request["json"]["locationBias"]["circle"]["radius"]
+        <= 50_000
+    )
 
 
 def test_ground_venue_populates_place_fields_and_capacity(conn, monkeypatch):

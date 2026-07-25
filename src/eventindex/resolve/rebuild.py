@@ -471,6 +471,11 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
                 a, b = block[fps[i]][0], block[fps[j]][0]
                 score = match.pair_score(a.candidate(), b.candidate())
                 verdict = match.classify(score)
+                # Differing numeric title evidence can denote a year
+                # decoration, but can also denote distinct course levels,
+                # session codes, or showtimes. Never auto-merge it.
+                if verdict == match.MERGE and _digit_variant(a.title, b.title):
+                    verdict = match.ADJUDICATE
                 if verdict == match.ADJUDICATE:
                     same = _adjudicate(tx, a, b, score)
                     verdict = match.MERGE if same else match.DISTINCT
@@ -557,6 +562,19 @@ def _merge_shared_fingerprints(groups: list[dict]) -> list[dict]:
 
 MAX_GROUP_BLOCK = 15
 GROUP_DATE_WINDOW_DAYS = 60
+DIGIT_SENSITIVE_ADJUDICATION_VERSION = "digits-v2"
+
+
+def _digit_variant(left: str, right: str) -> bool:
+    """Whether title numbers differ and therefore need explicit judgment.
+
+    Digits are mechanical identity evidence, not semantic interpretation:
+    course/session numbers and showtimes must never slip through auto-merge,
+    while year decorations may still be merged by the adjudicator.
+    """
+    left_digits = tuple(re.findall(r"\d+", normalize_title(left)))
+    right_digits = tuple(re.findall(r"\d+", normalize_title(right)))
+    return left_digits != right_digits and bool(left_digits or right_digits)
 
 
 def _group_profile(g: dict) -> dict:
@@ -601,7 +619,12 @@ def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
     if ka == kb:
         return True  # identical profile: same identity by construction
     lo, hi = sorted((ka, kb))
-    pair_key = hashlib.md5(f"groups|{lo}||{hi}".encode()).hexdigest()
+    namespace = (
+        f"groups-{DIGIT_SENSITIVE_ADJUDICATION_VERSION}"
+        if _digit_variant(a["rep"].title, b["rep"].title)
+        else "groups"
+    )
+    pair_key = hashlib.md5(f"{namespace}|{lo}||{hi}".encode()).hexdigest()
     cached = tx.execute(
         "SELECT same_event FROM adjudication WHERE pair_key = %s", (pair_key,)
     ).fetchone()
@@ -625,8 +648,10 @@ def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
         "exhibition or run - possibly under a decorated title, different "
         "word order, a typo, or listed by different sites)? DIFFERENT "
         "means genuinely separate happenings: numbered course levels or "
-        "semester editions (Kurs 1 vs Kurs 3, Zirkuswelt I vs II), "
-        "different acts, different weekday variants of a titled slot."
+        "semester editions (Kurs 1 vs Kurs 3, Zirkuswelt I vs II), explicit "
+        "session times/codes, different acts, or different weekday variants "
+        "of a titled slot. A broad parent listing is not safely identical to "
+        "one specific child session unless another field identifies it."
     )
     try:
         verdict = llm.complete(tx, prompt, SameEvent).same_event
@@ -723,7 +748,12 @@ def _reconcile_venues(tx, a: Claim, b: Claim, notes: list[str]) -> None:
 
 def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
     fp_a, fp_b = sorted((a.fingerprint, b.fingerprint))
-    pair_key = hashlib.md5(f"{fp_a}|{fp_b}".encode()).hexdigest()
+    namespace = (
+        f"{DIGIT_SENSITIVE_ADJUDICATION_VERSION}|"
+        if _digit_variant(a.title, b.title)
+        else ""
+    )
+    pair_key = hashlib.md5(f"{namespace}{fp_a}|{fp_b}".encode()).hexdigest()
     cached = tx.execute(
         "SELECT same_event FROM adjudication WHERE pair_key = %s", (pair_key,)
     ).fetchone()
@@ -752,7 +782,12 @@ def _adjudicate(tx, a: Claim, b: Claim, score: float) -> bool:
         "act on the same evening is the festival concert itself; unknown "
         "venue or time is missing data, not evidence of difference. "
         "DIFFERENT means: genuinely separate happenings (two films, two "
-        "shows at different times, different acts)."
+        "shows at different times, different acts). Explicit course/session "
+        "times, levels, or codes are discriminators: Kurs 9 Uhr vs Kurs 10 "
+        "Uhr, Modul I vs Modul III, and code 203 vs code 204 are DIFFERENT "
+        "even when the stored start is date-only and every other word "
+        "matches. A broad parent listing is not safely identical to one "
+        "specific child session unless another field identifies it."
     )
     decided_by = "llm"
     try:

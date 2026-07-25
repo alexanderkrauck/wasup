@@ -360,6 +360,49 @@ def test_numbered_courses_stay_distinct_when_adjudicator_says_so(conn, monkeypat
     assert [e["title"] for e in events] == ["Kinderkurs 1", "Kinderkurs 3"]
 
 
+def test_numeric_session_variants_never_auto_merge_and_use_fresh_judgment(
+    conn, monkeypatch,
+):
+    prompts = []
+
+    def decide(tx, prompt, schema, **kwargs):
+        prompts.append(prompt)
+        return schema(same_event=False)
+
+    monkeypatch.setattr(rb.llm, "complete", decide)
+    sid = _source(conn, "courses", 0.9)
+    fingerprints = []
+    for hour in (9, 10):
+        fingerprint = f"schwimmkurs kurs {hour}|2026-08-31|x"
+        fingerprints.append(fingerprint)
+        _claim(
+            conn,
+            sid,
+            _concert(
+                f"Schwimmkurs - Kurs {hour} Uhr - Nichtschwimmer",
+                starts="2026-08-31T09:00:00+02:00",
+                venue="Hallenbad",
+                url=("https://courses.at/swim-day", 0.9),
+            ),
+            fingerprint,
+        )
+
+    rb.rebuild(conn, now=NOW)
+
+    events, _ = _canon(conn)
+    assert len(events) == 2
+    assert prompts and "Kurs 9 Uhr vs Kurs 10 Uhr" in prompts[0]
+    legacy_key = rb.hashlib.md5(
+        "|".join(sorted(fingerprints)).encode()
+    ).hexdigest()
+    verdict = conn.execute(
+        "SELECT pair_key, same_event FROM adjudication "
+        "WHERE title_a LIKE 'Schwimmkurs%' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert verdict["same_event"] is False
+    assert verdict["pair_key"] != legacy_key
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences

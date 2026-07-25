@@ -929,7 +929,11 @@ def ground_venue(job: dict, tx) -> list[dict]:
     """Ground one named venue and recover an explicitly stated capacity."""
     from eventindex.discovery.sweep import search_web
     from eventindex.enrich.facts import fetch_pages
-    from eventindex.enrich.venue_facts import extract_capacity, find_place
+    from eventindex.enrich.venue_facts import (
+        extract_capacity,
+        find_place,
+        is_location_only,
+    )
 
     venue = tx.execute(
         "SELECT id, name, address, capacity, gmaps_place_id, "
@@ -939,7 +943,11 @@ def ground_venue(job: dict, tx) -> list[dict]:
     if venue is None:
         return []
 
-    place = find_place(venue, job_id=job["id"])
+    place = (
+        None
+        if is_location_only(venue["name"])
+        else find_place(venue, job_id=job["id"])
+    )
     matched = place is not None
     if place:
         location = place["location"]
@@ -963,12 +971,17 @@ def ground_venue(job: dict, tx) -> list[dict]:
             },
         )
         venue = tx.execute(
-            "SELECT id, name, address, capacity FROM venue WHERE id = %s",
+            "SELECT id, name, address, capacity, gmaps_place_id "
+            "FROM venue WHERE id = %s",
             (venue["id"],),
         ).fetchone()
 
     capacity = evidence = source_url = None
-    if venue["capacity"] is None:
+    # Name-only public search is not identity evidence: generic venue names
+    # such as "Backstube" occur in many cities. Capacity extraction starts
+    # only after a Place match (now or in an earlier grounding run).
+    place_corroborated = place is not None or venue["gmaps_place_id"] is not None
+    if venue["capacity"] is None and place_corroborated:
         urls = []
         if place and place.get("websiteUri"):
             urls.append(place["websiteUri"])

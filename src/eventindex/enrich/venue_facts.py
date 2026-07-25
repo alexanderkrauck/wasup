@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import re
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +15,9 @@ from eventindex.resolve.fingerprint import normalize_title
 
 PLACES_COST_EUR = 0.03
 PLACE_NAME_MIN_SIMILARITY = 0.55
+_POSTCODE_LOCALITY_RE = re.compile(
+    r"^\s*\d{4,5}\s*(?:,\s*|\s+)[^\d,]+\s*$", re.IGNORECASE
+)
 
 
 class VenueCapacity(BaseModel):
@@ -31,8 +35,19 @@ def _name_similarity(left: str, right: str) -> float:
     ).ratio()
 
 
+def is_location_only(name: str) -> bool:
+    """True for a locality placeholder such as ``4020, Linz``.
+
+    These values can still be useful location evidence on an event, but they
+    do not identify a venue whose Google place or capacity can be grounded.
+    """
+    return bool(_POSTCODE_LOCALITY_RE.fullmatch(name))
+
+
 def find_place(venue: dict, *, job_id=None) -> dict | None:
     """Return one mechanically corroborated Google place, or no match."""
+    if is_location_only(venue["name"]):
+        return None
     if not config.GOOGLE_PLACES_API_KEY:
         raise RuntimeError("GOOGLE_PLACES_API_KEY not set")
     response = httpx.post(

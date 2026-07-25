@@ -980,7 +980,10 @@ def ground_venue(job: dict, tx) -> list[dict]:
     # Name-only public search is not identity evidence: generic venue names
     # such as "Backstube" occur in many cities. Capacity extraction starts
     # only after a Place match (now or in an earlier grounding run).
-    place_corroborated = place is not None or venue["gmaps_place_id"] is not None
+    place_corroborated = (
+        not is_location_only(venue["name"])
+        and (place is not None or venue["gmaps_place_id"] is not None)
+    )
     if venue["capacity"] is None and place_corroborated:
         urls = []
         if place and place.get("websiteUri"):

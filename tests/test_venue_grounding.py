@@ -204,6 +204,34 @@ def test_unsafe_rollout_capacity_migration_uses_its_provenance(conn):
     assert row["gmaps_place_id"] == "keep-place"
 
 
+def test_locality_place_id_migration_keeps_location_but_removes_venue_identity(
+    conn,
+):
+    venue_id = conn.execute(
+        "INSERT INTO venue (name, address, geo, gmaps_place_id) VALUES "
+        "('4020, Linz', '4020 Linz', "
+        "ST_SetSRID(ST_MakePoint(14.3, 48.3), 4326), 'wrong-venue') "
+        "RETURNING id"
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO jobs (kind, payload, status) "
+        "VALUES ('ground_venue', %s, 'done')",
+        (Jsonb({"venue_id": str(venue_id)}),),
+    )
+    conn.execute(
+        (config.MIGRATIONS_DIR / "017_locality_place_ids.sql").read_text()
+    )
+
+    row = conn.execute(
+        "SELECT address, geo IS NOT NULL AS has_geo, gmaps_place_id "
+        "FROM venue WHERE id = %s",
+        (venue_id,),
+    ).fetchone()
+    assert row["address"] == "4020 Linz"
+    assert row["has_geo"] is True
+    assert row["gmaps_place_id"] is None
+
+
 def test_scheduler_bounds_and_deduplicates_venue_grounding(conn):
     from eventindex.jobs.schedule import enqueue_venue_grounding
 

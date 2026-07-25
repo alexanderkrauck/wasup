@@ -317,6 +317,43 @@ def test_hydration_covers_every_future_event_with_missing_public_facts(conn):
     assert enqueue_hydration(conn) == 0  # 30d recovery budget respected
 
 
+def test_venue_grounding_queue_stays_small_for_fact_recovery(conn):
+    import uuid
+
+    from eventindex.jobs.schedule import (
+        VENUE_GROUND_QUEUE_TARGET,
+        enqueue_venue_grounding,
+    )
+
+    for number in range(VENUE_GROUND_QUEUE_TARGET + 2):
+        venue_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        conn.execute(
+            "INSERT INTO venue (id, name) VALUES (%s, %s)",
+            (venue_id, f"Venue {number}"),
+        )
+        conn.execute(
+            "INSERT INTO event "
+            "(id, kind, title, confidence, status, venue_id) VALUES "
+            "(%s, 'one_off', %s, 0.8, 'confirmed', %s)",
+            (event_id, f"Event {number}", venue_id),
+        )
+        conn.execute(
+            "INSERT INTO occurrence "
+            "(event_id, starts_at, status, time_unknown) "
+            "VALUES (%s, now() + interval '3 days', 'scheduled', false)",
+            (event_id,),
+        )
+    conn.commit()
+
+    assert enqueue_venue_grounding(conn) == VENUE_GROUND_QUEUE_TARGET
+    assert enqueue_venue_grounding(conn) == 0
+    assert conn.execute(
+        "SELECT count(*) AS n FROM jobs WHERE kind = 'ground_venue' "
+        "AND status IN ('pending', 'running')"
+    ).fetchone()["n"] == VENUE_GROUND_QUEUE_TARGET
+
+
 def test_agentic_sources_get_agent_sessions_not_crawls(conn):
     from eventindex.jobs.schedule import enqueue_agentic, schedule
 

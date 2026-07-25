@@ -362,8 +362,10 @@ def enqueue_weekly_parity(conn) -> bool:
 
 HYDRATE_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
 HYDRATE_QUEUE_TARGET = 240  # bounded SLA queue; refill only as workers drain it
-VENUE_GROUND_BATCH = 20
-VENUE_GROUND_QUEUE_TARGET = 120
+# Venue grounding can involve several public searches. Keep only a small rolling
+# batch ahead of workers so it cannot crowd out the older factual-recovery SLA.
+VENUE_GROUND_BATCH = 4
+VENUE_GROUND_QUEUE_TARGET = 4
 
 
 def enqueue_hydration(conn) -> int:

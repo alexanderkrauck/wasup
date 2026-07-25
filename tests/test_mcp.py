@@ -121,6 +121,68 @@ def test_search_events_runs_the_query_core(client):
     assert all("match_score" in o for o in result["occurrences"])
 
 
+def test_search_events_returns_multi_tag_evidence_without_contract_error(
+    conn, client, monkeypatch,
+):
+    from eventindex import tags as tag_store
+
+    event_id = _add_event(
+        conn, "Summer Ball", starts=NOW + timedelta(days=3),
+        lat=48.30, lon=14.29, category=["nightlife"],
+    )
+    conn.commit()
+
+    def semantic_matches(tx, event_ids, desired):
+        assert desired == ["dance", "elegant"]
+        concepts = []
+        for query, event_tag, joint in (
+            ("dance", "dancing", False),
+            ("elegant", "formal", False),
+            ("dance + elegant", "ballroom dancing", True),
+        ):
+            support = {
+                "score": 0.8,
+                "event_tag": event_tag,
+                "tag_confidence": 0.8,
+                "relatedness": 1.0,
+                "origin": "event_tag",
+            }
+            concepts.append({
+                "query": query,
+                "score": 0.8,
+                "event_tag": event_tag,
+                "tag_confidence": 0.8,
+                "relatedness": 1.0,
+                "origin": "event_tag",
+                "supports": [support],
+                "joint": joint,
+            })
+        return {
+            candidate: {
+                "score": 0.8 if candidate == event_id else 0.0,
+                "concepts": concepts,
+            }
+            for candidate in event_ids
+        }
+
+    monkeypatch.setattr(tag_store, "semantic_matches", semantic_matches)
+    result = _call(client, "search_events", {
+        "filters": {
+            "name": "ball",
+            "tags": ["dance", "elegant"],
+            "importance": {"tags": 1.0},
+        },
+        "limit": 8,
+    })
+
+    assert [row["title"] for row in result["occurrences"]] == ["Summer Ball"]
+    matches = result["occurrences"][0]["tag_matches"]
+    assert len(matches) == 3
+    assert matches[-1]["joint"] is True
+    assert matches[0]["origin"] == "event_tag"
+    assert matches[0]["supports"][0]["origin"] == "event_tag"
+
+
 def test_search_events_rejects_unknown_filters(client):
     body = _rpc(client, "tools/call", {
         "name": "search_events", "arguments": {"filters": {"bogus": 1}},

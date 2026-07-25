@@ -133,6 +133,7 @@ class TagSupport(_Output):
     event_tag: str
     tag_confidence: float
     relatedness: float
+    origin: Literal["title", "event_tag"]
 
 
 class TagConceptMatch(_Output):
@@ -141,6 +142,7 @@ class TagConceptMatch(_Output):
     event_tag: str | None
     tag_confidence: float | None
     relatedness: float
+    origin: Literal["title", "event_tag"] | None
     supports: list[TagSupport] = Field(default_factory=list)
     joint: bool = False
 

@@ -153,7 +153,11 @@ def test_hydration_appends_a_claim_and_enqueues_resolve(conn, monkeypatch):
     assert claim["payload"]["price_min"]["value"] == 28
     assert claim["payload"]["url"]["value"] == page.url
     assert claim["raw_excerpt"] == "28 EUR"
-    assert jobs == [{"kind": "resolve", "payload": {}}]
+    assert jobs[0]["kind"] == "resolve"
+    assert jobs[0]["payload"] == {}
+    assert jobs[0]["run_after"] > datetime.now(
+        ZoneInfo("Europe/Vienna")
+    ).astimezone(ZoneInfo("UTC"))
 
 
 def test_web_recovery_price_keeps_the_actual_evidence_url(conn, monkeypatch):
@@ -199,3 +203,46 @@ def test_web_recovery_price_keeps_the_actual_evidence_url(conn, monkeypatch):
     ).fetchone()
     assert claim["payload"]["price_min"]["value"] == 39
     assert claim["payload"]["url"]["value"] == price_page.url
+
+
+def test_stored_public_description_recovers_price_before_network(
+    conn, monkeypatch,
+):
+    from eventindex.discovery import sweep
+    from eventindex.jobs.handlers import hydrate_event
+
+    event_id = _seed_hydratable_event(conn)
+    conn.execute(
+        "UPDATE event SET description = 'Eintritt 24 EUR' WHERE id = %s",
+        (event_id,),
+    )
+    seen_pages = []
+
+    def fake_extract(tx, row, pages, **kwargs):
+        seen_pages.extend(pages)
+        return ({
+            "price_min": {"value": 24, "confidence": 0.85},
+            "price_max": {"value": 24, "confidence": 0.85},
+            "url": {"value": pages[0].url, "confidence": 0.85},
+        }, "Eintritt 24 EUR")
+
+    monkeypatch.setattr(facts, "extract_facts", fake_extract)
+    monkeypatch.setattr(
+        facts, "fetch_pages",
+        lambda urls: pytest.fail("stored text should satisfy recovery first"),
+    )
+    monkeypatch.setattr(
+        sweep, "search_web",
+        lambda *a, **k: pytest.fail("stored text should avoid web search"),
+    )
+
+    hydrate_event(
+        {"id": uuid.uuid4(), "payload": {"event_id": str(event_id)}}, conn
+    )
+    assert seen_pages[0].text == "Eintritt 24 EUR"
+    claim = conn.execute(
+        "SELECT payload FROM event_claim WHERE fingerprint = %s "
+        "AND payload ? 'price_min'",
+        (f"hydrate-{event_id}",),
+    ).fetchone()
+    assert claim["payload"]["price_min"]["value"] == 24

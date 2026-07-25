@@ -117,6 +117,7 @@ class PriceInfo(_Output):
 
 
 class EventScale(_Output):
+    estimate_status: Literal["estimated", "unknown"]
     estimated_participants: int | None
     plausible_min: int | None
     plausible_max: int | None
@@ -455,6 +456,8 @@ def search_events(
     - "must cost at most EUR 30": filters={"max_price":30}
     - "large, preferably 300+ people":
       filters={"participant_count_min":300}
+    - "300+ people, but only reasonably supported estimates":
+      filters={"participant_count_min":300,"min_scale_confidence":0.5}
     - "must have 300+ people":
       filters={"participant_count_min":300,
                "required_attributes":["event_scale"]}
@@ -462,7 +465,8 @@ def search_events(
     Do not put `dance` in name, do not call once for dance and again for
     elegant, and do not call get_event repeatedly merely to compare prices or
     scale: every result already returns those fields, their confidence/basis,
-    and per-requested-tag match evidence. When tags and secondary preferences
+    an explicit `estimate_status`, and per-requested-tag match evidence. When
+    tags and secondary preferences
     are combined, semantic fit leads by default; use `importance` only when
     the user's wording clearly assigns a different relative priority.
 
@@ -540,7 +544,6 @@ def get_event(
 def get_calendar_link(
     filters: QueryBody | None = None,
     min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
-    min_scale_confidence: Annotated[float, Field(ge=0, le=1)] = 0,
     include_time_unknown: Annotated[
         bool,
         Field(
@@ -569,7 +572,7 @@ def get_calendar_link(
     Example: filters={"name":"ball","tags":["dance","elegant"],
     "min_tag_match":0.5}. Example large-event feed:
     filters={"categories":["music"],"participant_count_min":300,
-    "required_attributes":["event_scale"]}.
+    "min_scale_confidence":0.5,"required_attributes":["event_scale"]}.
     Named-day subscriptions use the same hard weekday filter, for example
     filters={"tags":["salsa dancing"],"weekdays":["thursday","friday"],
     "min_tag_match":0.4}.
@@ -644,7 +647,7 @@ def get_calendar_link(
             ("is_free", str(parsed.is_free).lower() if parsed.is_free else None),
             ("participant_count_min", parsed.participant_count_min),
             ("participant_count_max", parsed.participant_count_max),
-            ("min_scale_confidence", min_scale_confidence if has_scale else None),
+            ("min_scale_confidence", parsed.min_scale_confidence),
     ]
         if value not in (None, "")
     }

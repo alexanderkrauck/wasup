@@ -972,6 +972,39 @@ def test_venueless_singleton_with_foreign_dates_stays_apart(conn):
     assert len(events) == 2
 
 
+def test_same_public_page_blocks_title_normalization_variants(
+    conn, monkeypatch,
+):
+    """A query-string occurrence ID must not hide a duplicate from matching."""
+    sid = _source(conn, "cup", 0.8)
+    page = "https://sport.example.at/events/linz-cup"
+    _claim(
+        conn, sid,
+        _concert(
+            "5. Linz-Cup", starts="2026-09-19T10:00:00+02:00", venue=None,
+            url=(page + "?occurrence=5", 0.9),
+        ),
+        "5 linz cup|2026-09-19|",
+    )
+    _claim(
+        conn, sid,
+        _concert(
+            "Linz-Cup", starts="2026-09-19T10:00:00+02:00", venue=None,
+            url=(page + "?date=2026-09-19", 0.9),
+        ),
+        "linz cup|2026-09-19|",
+    )
+    monkeypatch.setattr(
+        rb.llm, "complete",
+        lambda *a, **k: rb.SameEvent(same_event=True),
+    )
+
+    rb.rebuild(conn, now=NOW)
+    events, occurrences = _canon(conn)
+    assert len(events) == 1
+    assert len(occurrences) == 1
+
+
 def test_venueless_twin_with_disjoint_dates_but_same_rule_merges(conn):
     """Prod 2026-07-13: MeinBezirk emits one row per date of a weekly
     course; venue present on some rows only. Disjoint observed days,

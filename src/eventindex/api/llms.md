@@ -72,6 +72,7 @@ SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 FORCES interaction: rotation/teams/pair work; optional; none = silent
 attendance ok), `outdoor`, `energy` (low|medium|high), `language` (de|en),
 `preferred_max_price`, `participant_count_min`, `participant_count_max`,
+`min_scale_confidence`,
 `sex_service_context` (true = the event happens at a commercial sex
 establishment - Bordell, strip club, swinger club - NOT mere 18+
 nightlife; send `false` BY DEFAULT so these rank out of innocent queries,

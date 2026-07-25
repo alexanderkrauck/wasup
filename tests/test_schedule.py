@@ -173,6 +173,56 @@ def test_enrichment_sweep_repairs_every_stale_future_event_once(conn):
     assert enqueue_enrichment(conn) == 0
 
 
+def test_enrichment_sweep_repairs_cache_projection_divergence(conn):
+    import uuid
+
+    from eventindex import enrich, tags
+    from eventindex.jobs.schedule import enqueue_enrichment
+
+    event_id = uuid.uuid4()
+    key = "cache-winner"
+    cached = {
+        "newcomer_friendly": {
+            "value": True, "confidence": 0.35, "evidence": None,
+        },
+        "language": {"value": "de", "confidence": 0.35, "evidence": None},
+        "tags": [
+            {"name": f"concept {i}", "confidence": 0.2, "evidence": None}
+            for i in range(enrich.MIN_INFERRED_TAGS)
+        ],
+    }
+    conn.execute(
+        "INSERT INTO enrichment (content_key, attributes) VALUES (%s, %s)",
+        (key, Jsonb(cached)),
+    )
+    conn.execute(
+        "INSERT INTO event (id, kind, title, confidence, status, inferred) "
+        "VALUES (%s, 'one_off', 'Divergent', 0.8, 'confirmed', %s)",
+        (
+            event_id,
+            Jsonb({
+                "newcomer_friendly": {
+                    "value": False, "confidence": 0.35, "evidence": None,
+                },
+                "language": cached["language"],
+                "_enrichment": {
+                    "schema_version": enrich.SCHEMA_VERSION,
+                    "content_key": key,
+                },
+            }),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '3 days')",
+        (event_id,),
+    )
+    for tag in cached["tags"]:
+        tags.upsert(conn, event_id, tag["name"], tag["confidence"], "inferred")
+
+    assert enqueue_enrichment(conn) == 1
+
+
 def test_yieldless_sources_park_dormant_with_monthly_pulse(conn):
     junk = _source(conn, "junk", "now() - interval '40 days'", yield_ema=0.0)
     for _ in range(5):

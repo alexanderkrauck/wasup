@@ -419,3 +419,16 @@ def test_price_and_event_scale_are_soft_by_default_and_hard_when_required(conn):
         required_attributes=["event_scale"],
     ))
     assert hard == ["Large Estimated Gala"]
+
+
+def test_scale_confidence_floor_is_hard_and_excludes_unknown(conn):
+    _add(conn, "Well supported", attendance=500, attendance_conf=0.7)
+    _add(conn, "Weak estimate", attendance=500, attendance_conf=0.3)
+    _add(conn, "Unknown estimate")
+    conn.commit()
+
+    titles = _run(conn, _filters(
+        participant_count_min=300,
+        min_scale_confidence=0.5,
+    ))
+    assert titles == ["Well supported"]

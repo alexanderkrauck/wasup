@@ -309,12 +309,19 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
             str(event.get("price_max") or ""),
         ]),
     )
-    tx.execute(
+    # Two workers can miss the cache together and produce different valid
+    # estimates. Canon must apply the one value that actually won the cache
+    # race, otherwise the event and its persisted content cache diverge until
+    # another rebuild happens to repair it. The no-op update locks/returns the
+    # committed winner without replacing it.
+    persisted = tx.execute(
         "INSERT INTO enrichment (content_key, attributes, model) VALUES (%s, %s, %s) "
-        "ON CONFLICT (content_key) DO NOTHING",
+        "ON CONFLICT (content_key) DO UPDATE "
+        "SET content_key = enrichment.content_key "
+        "RETURNING attributes",
         (key, Jsonb(attributes), config.MODEL_MINI),
-    )
-    return _live_overrides(event, attributes)
+    ).fetchone()
+    return _live_overrides(event, persisted["attributes"])
 
 
 _TIME_RE = __import__("re").compile(r"^([01]?\d|2[0-3]):[0-5]\d$")

@@ -780,16 +780,16 @@ def hydrate_event(job: dict, tx) -> list[dict]:
     Canon remains a pure resolver projection.
     """
     from eventindex.discovery.sweep import search_web
-    from eventindex.enrich.facts import extract_facts, fetch_pages
+    from eventindex.enrich.facts import PublicPage, extract_facts, fetch_pages
 
     event_id = job["payload"]["event_id"]
     row = tx.execute(
         """
-        SELECT e.id AS event_id, e.title, e.url, e.booking_url, e.organizer,
-               e.price_min, e.venue_id, e.geo,
+        SELECT e.id AS event_id, e.title, e.description, e.url, e.booking_url,
+               e.organizer, e.price_min, e.venue_id, e.geo,
                v.name AS venue_name,
                o.starts_at, o.time_unknown,
-               i.fingerprint, c.source_id
+               i.fingerprint, c.source_id, s.url AS source_url
         FROM event e
         JOIN occurrence o ON o.event_id = e.id
         JOIN identity i ON i.event_id = e.id
@@ -811,17 +811,58 @@ def hydrate_event(job: dict, tx) -> list[dict]:
         url for url in (row.get("url"), row.get("booking_url"))
         if url and url.startswith(("http://", "https://"))
     ]
-    pages = fetch_pages(urls)
-    payload, raw_excerpt = extract_facts(tx, row, pages, job_id=job["id"])
+    evidence_url = row.get("url") or row.get("source_url")
+    stored_pages = (
+        [PublicPage(evidence_url, row["description"])]
+        if row.get("description")
+        and evidence_url
+        and evidence_url.startswith(("http://", "https://"))
+        else []
+    )
+    # Canonical descriptions are already public source text. Inspect them
+    # first: this recovers a stated price in one bounded LLM call without
+    # waiting for fetch/render/search, and preserves its real source URL.
+    payload, raw_excerpt = extract_facts(
+        tx, row, stored_pages, job_id=job["id"]
+    )
+    pages = list(stored_pages)
     searched = False
 
-    needs_price = row["price_min"] is None and "price_min" not in payload
-    needs_venue = (
-        row["venue_id"] is None and row["geo"] is None
-        and "venue_name" not in payload
-    )
-    needs_time = row["time_unknown"] and "starts_at" not in payload
-    needs_booking = row["booking_url"] is None and "booking_url" not in payload
+    def missing() -> tuple[bool, bool, bool, bool]:
+        return (
+            row["price_min"] is None and "price_min" not in payload,
+            row["venue_id"] is None and row["geo"] is None
+            and "venue_name" not in payload,
+            row["time_unknown"] and "starts_at" not in payload,
+            row["booking_url"] is None and "booking_url" not in payload,
+        )
+
+    def merge_recovery(extra_payload: dict, extra_raw: str | None) -> None:
+        nonlocal raw_excerpt
+        recovered_price = (
+            "price_min" not in payload and "price_min" in extra_payload
+        )
+        for key, value in extra_payload.items():
+            payload.setdefault(key, value)
+        if recovered_price and "url" in extra_payload:
+            payload["url"] = extra_payload["url"]
+        raw_excerpt = " | ".join(filter(None, [
+            raw_excerpt, extra_raw
+        ]))[:2000] or None
+
+    if any(missing()):
+        fetched_pages = fetch_pages(urls)
+        if fetched_pages:
+            pages.extend(
+                page for page in fetched_pages
+                if page.url not in {known.url for known in pages}
+            )
+            extra_payload, extra_raw = extract_facts(
+                tx, row, pages, job_id=job["id"]
+            )
+            merge_recovery(extra_payload, extra_raw)
+
+    needs_price, needs_venue, needs_time, needs_booking = missing()
     if needs_price or needs_venue or needs_time or needs_booking:
         local_date = row["starts_at"].date().isoformat()
         query = " ".join(filter(None, [
@@ -839,18 +880,7 @@ def hydrate_event(job: dict, tx) -> list[dict]:
             extra_payload, extra_raw = extract_facts(
                 tx, row, pages + extra_pages, job_id=job["id"]
             )
-            recovered_price = (
-                "price_min" not in payload and "price_min" in extra_payload
-            )
-            for key, value in extra_payload.items():
-                payload.setdefault(key, value)
-            if recovered_price and "url" in extra_payload:
-                # The canonical price provenance must point at the page that
-                # actually states the price, not an earlier venue-only page.
-                payload["url"] = extra_payload["url"]
-            raw_excerpt = " | ".join(filter(None, [
-                raw_excerpt, extra_raw
-            ]))[:2000] or None
+            merge_recovery(extra_payload, extra_raw)
 
     if payload:
         payload.setdefault(
@@ -882,7 +912,89 @@ def hydrate_event(job: dict, tx) -> list[dict]:
     pending = tx.execute(
         "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
     ).fetchone()
-    return [] if pending else [{"kind": "resolve", "payload": {}}]
+    if pending:
+        return []
+    run_after = tx.execute(
+        "SELECT now() + interval '10 minutes' AS ts"
+    ).fetchone()["ts"]
+    return [{"kind": "resolve", "payload": {}, "run_after": run_after}]
+
+
+def ground_venue(job: dict, tx) -> list[dict]:
+    """Ground one named venue and recover an explicitly stated capacity."""
+    from eventindex.discovery.sweep import search_web
+    from eventindex.enrich.facts import fetch_pages
+    from eventindex.enrich.venue_facts import extract_capacity, find_place
+
+    venue = tx.execute(
+        "SELECT id, name, address, capacity, gmaps_place_id, "
+        "ST_Y(geo) AS lat, ST_X(geo) AS lon FROM venue WHERE id = %s",
+        (job["payload"]["venue_id"],),
+    ).fetchone()
+    if venue is None:
+        return []
+
+    place = find_place(venue, job_id=job["id"])
+    matched = place is not None
+    if place:
+        location = place["location"]
+        tx.execute(
+            """
+            UPDATE venue SET
+                address = coalesce(address, %(address)s),
+                geo = coalesce(
+                    geo,
+                    ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)
+                ),
+                gmaps_place_id = coalesce(gmaps_place_id, %(place_id)s)
+            WHERE id = %(id)s
+            """,
+            {
+                "id": venue["id"],
+                "address": place.get("formattedAddress"),
+                "lat": location["latitude"],
+                "lon": location["longitude"],
+                "place_id": place["id"],
+            },
+        )
+        venue = tx.execute(
+            "SELECT id, name, address, capacity FROM venue WHERE id = %s",
+            (venue["id"],),
+        ).fetchone()
+
+    capacity = evidence = source_url = None
+    if venue["capacity"] is None:
+        urls = []
+        if place and place.get("websiteUri"):
+            urls.append(place["websiteUri"])
+        query = " ".join(filter(None, [
+            f'"{venue["name"]}"', venue.get("address"),
+            "Kapazität Plätze Personen Fassungsvermögen",
+        ]))
+        urls.extend(search_web(tx, query, job_id=job["id"]))
+        pages = fetch_pages(list(dict.fromkeys(urls)))
+        capacity, evidence, source_url = extract_capacity(
+            tx, venue, pages, job_id=job["id"]
+        )
+        if capacity is not None:
+            tx.execute(
+                "UPDATE venue SET capacity = %s WHERE id = %s AND capacity IS NULL",
+                (capacity, venue["id"]),
+            )
+
+    detail = (
+        f"ground_venue: matched={matched} capacity={capacity or '-'}"
+        + (
+            f" evidence={evidence[:160]!r} source={source_url}"
+            if evidence and source_url else ""
+        )
+    )
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, detail) "
+        "VALUES (%s, now(), 'ok', %s)",
+        (job["id"], detail[:2000]),
+    )
+    return []
 
 
 HANDLERS = {
@@ -891,5 +1003,6 @@ HANDLERS = {
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
     "discover": discover, "qa_check": qa_check,
     "hydrate_event": hydrate_event,
+    "ground_venue": ground_venue,
     "parity_audit": parity_audit,
 }

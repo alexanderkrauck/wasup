@@ -284,6 +284,17 @@ def render(stats: dict, now: datetime) -> str:
     hydration = stats.get("hydration") or {}
     unresolved = hydration.get("unresolved") or 0
     oldest = hydration.get("oldest_unresolved")
+    if (
+        unresolved
+        and oldest is not None
+        and now - oldest > timedelta(hours=24)
+    ):
+        lines += [
+            "!" * 60,
+            f"!! FACT RECOVERY SLA BREACH: {unresolved} unresolved jobs; "
+            f"oldest is {now - oldest} old (target <24h).",
+            "!" * 60,
+        ]
     age = (
         f", oldest {now - oldest} ago"
         if oldest is not None else ""

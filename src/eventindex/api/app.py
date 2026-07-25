@@ -299,6 +299,7 @@ def _public_event_scale(row: dict, inferred: dict | None = None) -> dict:
     )
     if participants is None:
         return {
+            "estimate_status": "unknown",
             "estimated_participants": None,
             "plausible_min": None,
             "plausible_max": None,
@@ -332,6 +333,7 @@ def _public_event_scale(row: dict, inferred: dict | None = None) -> dict:
             plausible_min, math.ceil(participants * (1 + uncertainty))
         )
     return {
+        "estimate_status": "estimated",
         "estimated_participants": participants,
         "plausible_min": int(plausible_min),
         "plausible_max": int(plausible_max),

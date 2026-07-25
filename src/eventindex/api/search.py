@@ -176,6 +176,12 @@ class SearchFilters(BaseModel):
         description="soft preferred maximum estimated participant count; use "
         "required_attributes=['event_scale'] only when the user makes it a "
         "hard limit")
+    min_scale_confidence: float | None = Field(
+        default=None, ge=0, le=1,
+        description="hard minimum certainty for the event-scale estimate. "
+        "Use only when the user cares how trustworthy the crowd-size estimate "
+        "is; lower-certainty and unknown estimates are excluded"
+    )
     sex_service_context: bool | None = Field(
         description="event at a commercial sex establishment (Bordell, "
         "strip club, swinger club) - NOT mere 18+ nightlife. On the public "
@@ -261,6 +267,15 @@ class SearchFilters(BaseModel):
             _radius_m(self.radius)  # raises ValueError on junk
         if self.min_tag_match is not None and not self.tags:
             raise ValueError("min_tag_match requires at least one tag")
+        if (
+            self.min_scale_confidence is not None
+            and self.participant_count_min is None
+            and self.participant_count_max is None
+        ):
+            raise ValueError(
+                "min_scale_confidence requires participant_count_min or "
+                "participant_count_max"
+            )
         return self
 
 
@@ -278,6 +293,7 @@ FILTER_DEFAULTS: dict = {
     "outdoor": None, "solo_friendly": None, "interaction_structure": None,
     "energy": None, "language": None, "sex_service_context": None,
     "participant_count_min": None, "participant_count_max": None,
+    "min_scale_confidence": None,
     "required_attributes": [], "tags": [], "min_tag_match": None,
     "near": None, "radius": None,
 }
@@ -442,6 +458,7 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "as separate searches. max_price/is_free are hard stated-price facts; "
         "preferred_max_price is soft. participant_count_min/max describe the "
         "event_scale estimate and are soft unless event_scale is required. "
+        "min_scale_confidence is always a hard certainty floor. "
         "Set min_tag_match only for an explicit must/only requirement.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
@@ -553,6 +570,11 @@ def build_sql(
     elif f.max_price is not None:
         conditions.append("e.price_min <= %(max_price)s")
         params["max_price"] = f.max_price
+    if f.min_scale_confidence is not None:
+        conditions.append(
+            "e.expected_attendance_confidence >= %(min_scale_confidence)s"
+        )
+        params["min_scale_confidence"] = f.min_scale_confidence
 
     if exclude_sex_service_context:
         # MCP-safe default: suppress only a positively known commercial-sex

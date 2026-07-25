@@ -64,6 +64,8 @@ def test_low_confidence_scale_never_presents_an_exact_range():
     assert scale["plausible_min"] == 30
     assert scale["plausible_max"] == 70
     assert scale["confidence"] == 0.2
+    assert scale["estimate_status"] == "estimated"
+    assert _public_event_scale({"inferred": {}})["estimate_status"] == "unknown"
 
     explicit = _public_event_scale({
         "expected_attendance": 50,

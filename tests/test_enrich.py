@@ -1,8 +1,11 @@
 """Enrichment: cache idempotency, confidence cap, typed-column application."""
 
 import uuid
+from threading import Barrier, Thread
 
+import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from eventindex import enrich as en
 from eventindex.enrich import Enrichment, apply_to_event, content_key, enrich_event
@@ -78,6 +81,48 @@ def test_enrich_caches_and_never_pays_twice(conn, event_row, monkeypatch):
     assert "core named activity or event format" in calls[0]
     assert "atmosphere/style" in calls[0]
     assert first == second
+
+
+def test_concurrent_cache_miss_returns_the_committed_winner(
+    conn, test_db_url, event_row, monkeypatch,
+):
+    """Both workers may pay, but both must apply the one persisted verdict."""
+    barrier = Barrier(2)
+
+    def fake_complete(*args, **kwargs):
+        raw = _fake_enrichment().model_dump()
+        estimate = 250 if __import__("threading").current_thread().name == "a" else 600
+        raw["event_scale"].update({
+            "estimated_participants": estimate,
+            "plausible_min": 100,
+            "plausible_max": 800,
+        })
+        barrier.wait(timeout=5)
+        return Enrichment.model_validate(raw)
+
+    monkeypatch.setattr(en.llm, "complete", fake_complete)
+    results = []
+
+    def run():
+        with psycopg.connect(test_db_url, row_factory=dict_row) as worker_conn:
+            results.append(enrich_event(worker_conn, event_row))
+
+    threads = [Thread(target=run, name=name) for name in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    persisted = conn.execute(
+        "SELECT attributes FROM enrichment WHERE content_key = %s",
+        (content_key(event_row),),
+    ).fetchone()["attributes"]
+    expected = persisted["event_scale"]["estimated_participants"]
+    assert len(results) == 2
+    assert {
+        result["event_scale"]["estimated_participants"] for result in results
+    } == {expected}
 
 
 def test_confidence_cap_is_code_not_model_discipline(conn, event_row, monkeypatch):

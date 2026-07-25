@@ -48,6 +48,58 @@ def enqueue_enrichment(conn) -> int:
             OR coalesce(
               (e.inferred->'newcomer_friendly'->>'confidence')::float, 0
             ) <= 0
+            OR EXISTS (
+              SELECT 1
+              FROM enrichment en
+              WHERE en.content_key =
+                    e.inferred->'_enrichment'->>'content_key'
+                AND (
+                  -- Price and sex-service context have live canonical/curated
+                  -- overrides. Every other inferred field must exactly equal
+                  -- the committed cache winner.
+                  coalesce(e.inferred, '{}'::jsonb)
+                    - '_enrichment' - 'price' - 'sex_service_context'
+                  IS DISTINCT FROM
+                  en.attributes
+                    - 'age_min' - 'age_max' - 'gender_split' - 'tags'
+                    - 'price' - 'sex_service_context'
+                  OR e.expected_attendance IS DISTINCT FROM
+                     (en.attributes->'event_scale'
+                       ->>'estimated_participants')::int
+                  OR e.expected_attendance_confidence IS DISTINCT FROM
+                     (en.attributes->'event_scale'->>'confidence')::float
+                  OR e.expected_gender_split IS DISTINCT FROM
+                     (en.attributes->'gender_split'->>'value')::float
+                  OR e.expected_gender_split_confidence IS DISTINCT FROM
+                     (en.attributes->'gender_split'->>'confidence')::float
+                  OR lower(e.expected_age_range) IS DISTINCT FROM
+                     (en.attributes->'age_min'->>'value')::int
+                  OR upper(e.expected_age_range) - 1 IS DISTINCT FROM
+                     (en.attributes->'age_max'->>'value')::int
+                  OR e.lang IS DISTINCT FROM
+                     en.attributes->'language'->>'value'
+                  OR (
+                    SELECT coalesce(
+                      jsonb_object_agg(
+                        et.name,
+                        (et.origin_confidences->>'inferred')::float
+                      ),
+                      '{}'::jsonb
+                    )
+                    FROM event_tag et
+                    WHERE et.event_id = e.id
+                      AND et.origin_confidences ? 'inferred'
+                  ) IS DISTINCT FROM (
+                    SELECT coalesce(
+                      jsonb_object_agg(
+                        tag->>'name', (tag->>'confidence')::float
+                      ),
+                      '{}'::jsonb
+                    )
+                    FROM jsonb_array_elements(en.attributes->'tags') tag
+                  )
+                )
+            )
             OR (
               SELECT count(*) FROM event_tag et
               WHERE et.event_id = e.id
@@ -309,6 +361,9 @@ def enqueue_weekly_parity(conn) -> bool:
 
 
 HYDRATE_BATCH = 40  # per tick; politeness comes from CRAWL_DELAY_S per fetch
+HYDRATE_QUEUE_TARGET = 240  # bounded SLA queue; refill only as workers drain it
+VENUE_GROUND_BATCH = 20
+VENUE_GROUND_QUEUE_TARGET = 120
 
 
 def enqueue_hydration(conn) -> int:
@@ -317,6 +372,13 @@ def enqueue_hydration(conn) -> int:
     This is event-scoped, so a large source's listing-page detail cap cannot
     repeatedly strand later events.
     """
+    queued = conn.execute(
+        "SELECT count(*) AS n FROM jobs WHERE kind = 'hydrate_event' "
+        "AND status IN ('pending', 'running')"
+    ).fetchone()["n"]
+    available = min(HYDRATE_BATCH, max(0, HYDRATE_QUEUE_TARGET - queued))
+    if available == 0:
+        return 0
     rows = conn.execute(
         """
         SELECT e.id, min(o.starts_at) AS next_start
@@ -345,10 +407,55 @@ def enqueue_hydration(conn) -> int:
                  min(o.starts_at)
         LIMIT %s
         """,
-        (HYDRATE_BATCH,),
+        (available,),
     ).fetchall()
     for r in rows:
         enqueue(conn, "hydrate_event", {"event_id": str(r["id"])})
+    return len(rows)
+
+
+def enqueue_venue_grounding(conn) -> int:
+    """Continuously ground named future-event venues exactly once per season."""
+    queued = conn.execute(
+        "SELECT count(*) AS n FROM jobs WHERE kind = 'ground_venue' "
+        "AND status IN ('pending', 'running')"
+    ).fetchone()["n"]
+    available = min(
+        VENUE_GROUND_BATCH, max(0, VENUE_GROUND_QUEUE_TARGET - queued)
+    )
+    if available == 0:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT v.id
+        FROM venue v
+        WHERE (
+            v.geo IS NULL OR v.address IS NULL
+            OR v.gmaps_place_id IS NULL OR v.capacity IS NULL
+        )
+          AND EXISTS (
+            SELECT 1 FROM event e
+            JOIN occurrence o ON o.event_id = e.id
+            WHERE e.venue_id = v.id
+              AND o.status = 'scheduled'
+              AND coalesce(o.ends_at, o.starts_at) >= now()
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.kind = 'ground_venue'
+              AND j.payload->>'venue_id' = v.id::text
+              AND (
+                j.status IN ('pending', 'running')
+                OR j.created_at > now() - interval '180 days'
+              )
+          )
+        ORDER BY v.geo IS NULL DESC, v.capacity IS NULL DESC, v.name
+        LIMIT %s
+        """,
+        (available,),
+    ).fetchall()
+    for row in rows:
+        enqueue(conn, "ground_venue", {"venue_id": str(row["id"])})
     return len(rows)
 
 
@@ -435,6 +542,9 @@ def schedule(conn) -> int:
     hydrated = enqueue_hydration(conn)
     if hydrated:
         print(f"enqueued {hydrated} public event fact-recovery jobs")
+    grounded = enqueue_venue_grounding(conn)
+    if grounded:
+        print(f"enqueued {grounded} venue-grounding jobs")
     rows = conn.execute(
         """
         WITH proximate AS (

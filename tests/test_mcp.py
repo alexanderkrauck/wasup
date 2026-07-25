@@ -218,9 +218,9 @@ def test_get_calendar_link_builds_ics_url(client):
         "filters": {
             "categories": ["music"],
             "participant_count_min": 300,
+            "min_scale_confidence": 0.3,
             "required_attributes": ["event_scale"],
         },
-        "min_scale_confidence": 0.3,
     })
     assert "participant_count_min=300" in large["ics_url"]
     assert "min_scale_confidence=0.3" in large["ics_url"]

@@ -20,6 +20,7 @@ import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_t, timedelta
+from urllib.parse import urlsplit, urlunsplit
 
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -432,6 +433,13 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
     for c in remaining:
         day = c.starts_at.astimezone(VIENNA).date()
         blocks[("v", day, _venue_key(c))][c.fingerprint].append(c)
+        # The same public detail page often emits slightly different
+        # fingerprints after title normalization changes, or one query string
+        # per occurrence. Page identity is generic corroboration, so block by
+        # scheme/host/path while leaving the actual merge decision to the
+        # existing precision-gated scorer/adjudicator.
+        if page_key := _url_page_key(c.value("url")):
+            blocks[("u", day, page_key)][c.fingerprint].append(c)
         # word-level: "Klassik am Dom 2026 - Erwin Schrott" must block with
         # "Erwin Schrott" - any shared informative word on the same day
         # (years are shared by everything and inform nothing)
@@ -481,6 +489,21 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
         }
     out = _merge_shared_fingerprints(list(groups.values()))
     return _adjudicate_groups(tx, out, venue_notes)
+
+
+def _url_page_key(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return None
+    return urlunsplit((
+        parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/",
+        "", "",
+    ))
 
 
 def _merge_shared_fingerprints(groups: list[dict]) -> list[dict]:

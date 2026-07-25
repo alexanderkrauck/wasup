@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -246,3 +246,35 @@ def test_stored_public_description_recovers_price_before_network(
         (f"hydrate-{event_id}",),
     ).fetchone()
     assert claim["payload"]["price_min"]["value"] == 24
+
+
+def test_far_future_resolve_does_not_block_fact_publication(
+    conn, monkeypatch,
+):
+    from eventindex.discovery import sweep
+    from eventindex.jobs.handlers import hydrate_event
+
+    event_id = _seed_hydratable_event(conn)
+    page = PublicPage("https://tickets.example/gala", "Tickets 28 EUR")
+    conn.execute(
+        "INSERT INTO jobs (kind, run_after) "
+        "VALUES ('resolve', now() + interval '7 days')"
+    )
+    monkeypatch.setattr(facts, "fetch_pages", lambda urls: [page])
+    monkeypatch.setattr(
+        facts, "extract_facts",
+        lambda *a, **k: ({
+            "price_min": {"value": 28, "confidence": 0.85},
+            "price_max": {"value": 28, "confidence": 0.85},
+        }, "Tickets 28 EUR"),
+    )
+    monkeypatch.setattr(sweep, "search_web", lambda *a, **k: [])
+
+    jobs = hydrate_event(
+        {"id": uuid.uuid4(), "payload": {"event_id": str(event_id)}}, conn
+    )
+    assert len(jobs) == 1
+    assert jobs[0]["kind"] == "resolve"
+    assert jobs[0]["run_after"] < datetime.now(
+        ZoneInfo("UTC")
+    ) + timedelta(minutes=11)

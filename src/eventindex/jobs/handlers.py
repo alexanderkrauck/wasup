@@ -96,7 +96,8 @@ def crawl(job: dict, tx) -> list[dict]:
         return []
     # debounce: one pending rebuild covers any number of finished crawls
     pending = tx.execute(
-        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+        "AND run_after <= now() + interval '10 minutes' LIMIT 1"
     ).fetchone()
     return [] if pending else [{"kind": "resolve", "payload": {}}]
 
@@ -234,7 +235,8 @@ def _crawl_recipe(job: dict, tx, source: dict, crawl_id) -> list[dict]:
         }})
     if payloads:
         pending = tx.execute(
-            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+            "AND run_after <= now() + interval '10 minutes' LIMIT 1"
         ).fetchone()
         if not pending:
             jobs.append({"kind": "resolve", "payload": {}})
@@ -449,7 +451,8 @@ def agent_extract(job: dict, tx) -> list[dict]:
         jobs.append({"kind": "crawl", "payload": {"source_id": str(source["id"])}})
     if result.payloads:
         pending = tx.execute(
-            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+            "AND run_after <= now() + interval '10 minutes' LIMIT 1"
         ).fetchone()
         if not pending:
             jobs.append({"kind": "resolve", "payload": {}})
@@ -755,7 +758,8 @@ def parity_audit(job: dict, tx) -> list[dict]:
         (job["id"], f"parity_audit: {audited}/{len(sources)} sources audited"),
     )
     pending = tx.execute(
-        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+        "AND run_after <= now() + interval '10 minutes' LIMIT 1"
     ).fetchone()
     return [] if pending or not audited else [{"kind": "resolve", "payload": {}}]
 
@@ -910,7 +914,8 @@ def hydrate_event(job: dict, tx) -> list[dict]:
     if not payload:
         return []
     pending = tx.execute(
-        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' LIMIT 1"
+        "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+        "AND run_after <= now() + interval '10 minutes' LIMIT 1"
     ).fetchone()
     if pending:
         return []

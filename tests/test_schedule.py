@@ -182,6 +182,8 @@ def test_enrichment_sweep_repairs_cache_projection_divergence(conn):
     event_id = uuid.uuid4()
     key = "cache-winner"
     cached = {
+        "age_min": {"value": 18.0, "confidence": 0.35, "evidence": None},
+        "age_max": {"value": 60.0, "confidence": 0.35, "evidence": None},
         "newcomer_friendly": {
             "value": True, "confidence": 0.35, "evidence": None,
         },
@@ -196,8 +198,9 @@ def test_enrichment_sweep_repairs_cache_projection_divergence(conn):
         (key, Jsonb(cached)),
     )
     conn.execute(
-        "INSERT INTO event (id, kind, title, confidence, status, inferred) "
-        "VALUES (%s, 'one_off', 'Divergent', 0.8, 'confirmed', %s)",
+        "INSERT INTO event (id, kind, title, confidence, status, inferred, "
+        "expected_age_range) VALUES (%s, 'one_off', 'Divergent', 0.8, "
+        "'confirmed', %s, int4range(18, 60, '[]'))",
         (
             event_id,
             Jsonb({

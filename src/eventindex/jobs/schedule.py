@@ -65,7 +65,7 @@ def enqueue_enrichment(conn) -> int:
                     - 'price' - 'sex_service_context'
                   OR e.expected_attendance IS DISTINCT FROM
                      (en.attributes->'event_scale'
-                       ->>'estimated_participants')::int
+                       ->>'estimated_participants')::numeric::int
                   OR e.expected_attendance_confidence IS DISTINCT FROM
                      (en.attributes->'event_scale'->>'confidence')::float
                   OR e.expected_gender_split IS DISTINCT FROM
@@ -73,9 +73,9 @@ def enqueue_enrichment(conn) -> int:
                   OR e.expected_gender_split_confidence IS DISTINCT FROM
                      (en.attributes->'gender_split'->>'confidence')::float
                   OR lower(e.expected_age_range) IS DISTINCT FROM
-                     (en.attributes->'age_min'->>'value')::int
+                     (en.attributes->'age_min'->>'value')::numeric::int
                   OR upper(e.expected_age_range) - 1 IS DISTINCT FROM
-                     (en.attributes->'age_max'->>'value')::int
+                     (en.attributes->'age_max'->>'value')::numeric::int
                   OR e.lang IS DISTINCT FROM
                      en.attributes->'language'->>'value'
                   OR (

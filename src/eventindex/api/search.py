@@ -26,6 +26,10 @@ from pydantic import (
 )
 
 from eventindex import config, llm
+from eventindex.api.confidence import (
+    DEFAULT_MIN_CONFIDENCE,
+    EFFECTIVE_CONFIDENCE_SQL,
+)
 
 VIENNA = ZoneInfo(config.TIMEZONE)
 WEEKDAY_NUMBERS = {
@@ -85,6 +89,12 @@ class SearchFilters(BaseModel):
     weekdays: list[Weekday] = Field(
         description="local Europe/Vienna weekdays that may match; hard "
         "occurrence filter. Example: ['thursday','friday']"
+    )
+    min_confidence: float = Field(
+        default=DEFAULT_MIN_CONFIDENCE, ge=0, le=1,
+        description="hard minimum effective whole-event confidence after "
+        "freshness decay. Defaults to 0.4; set 0 only when the user "
+        "explicitly wants tentative/unverified hints",
     )
 
     @field_validator("from_dt", "to_dt")
@@ -283,7 +293,8 @@ class SearchFilters(BaseModel):
 # output for the internal parser). External callers of POST /v1/query send
 # partial bodies; these defaults fill the gaps.
 FILTER_DEFAULTS: dict = {
-    "from_dt": None, "to_dt": None, "weekdays": [], "categories": None,
+    "from_dt": None, "to_dt": None, "weekdays": [],
+    "min_confidence": DEFAULT_MIN_CONFIDENCE, "categories": None,
     "exclude_categories": [], "exclude_terms": [], "name": None,
     "organizer": None, "venue": None, "source": None,
     "age_min": None,
@@ -459,6 +470,9 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "preferred_max_price is soft. participant_count_min/max describe the "
         "event_scale estimate and are soft unless event_scale is required. "
         "min_scale_confidence is always a hard certainty floor. "
+        "Whole-event min_confidence defaults to 0.4; use 0 only when the "
+        "query explicitly asks for tentative, unverified, or speculative "
+        "event hints. "
         "Set min_tag_match only for an explicit must/only requirement.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
@@ -475,8 +489,11 @@ def build_sql(
 ) -> tuple[str, dict]:
     """HARD conditions only: guarantees + attributes marked required.
     null attribute = unknown = never matches a hard constraint (§7)."""
-    conditions = ["o.status = 'scheduled'"]
-    params: dict = {}
+    conditions = [
+        "o.status = 'scheduled'",
+        f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_confidence)s",
+    ]
+    params: dict = {"min_confidence": f.min_confidence}
     # overlap semantics (Alexander 2026-07-13): something still RUNNING at
     # `from` is in the window - 95 ongoing exhibitions were invisible under
     # starts_at-only filtering (audit A21). Rows expose `ongoing`.

@@ -21,7 +21,8 @@ user's natural language into filters - the index runs no LLM for this.
 - Hard guarantees: `from_dt`/`to_dt` (ISO, naive = Europe/Vienna),
   `weekdays` (local names such as `thursday`/`friday`), `categories`,
   `exclude_categories`, `exclude_terms`, `max_price`,
-  `is_free`, `required_attributes`.
+  `is_free`, `required_attributes`, and `min_confidence` (default 0.4;
+  set 0 only when the user explicitly asks for tentative/unverified hints).
 - Soft preferences (ranked by `importance` x stored certainty, unknowns stay
   visible): `age_min`+`age_max`, `gender_split_min`, `kid_friendly`,
   `newcomer_friendly`, `outdoor`, `energy`, `language`,

@@ -92,7 +92,14 @@ def gather_stats(conn) -> dict:
         """
         WITH future AS (
             SELECT DISTINCT e.id, e.price_min, e.booking_url, e.inferred,
-                   e.expected_attendance
+                   e.expected_attendance,
+                   EXISTS (
+                       SELECT 1 FROM identity i
+                       JOIN event_claim c ON c.fingerprint = i.fingerprint
+                       JOIN source s ON s.id = c.source_id
+                       WHERE i.event_id = e.id AND s.kind <> 'internal'
+                         AND nullif(c.raw_excerpt, '') IS NOT NULL
+                   ) AS has_identity_evidence
             FROM event e
             JOIN occurrence o ON o.event_id = e.id
             WHERE o.status = 'scheduled'
@@ -109,7 +116,10 @@ def gather_stats(conn) -> dict:
                ) AS booking_without_stated_price,
                count(*) FILTER (
                    WHERE expected_attendance IS NOT NULL
-               ) AS event_scale
+               ) AS event_scale,
+               count(*) FILTER (
+                   WHERE has_identity_evidence
+               ) AS identity_evidence
         FROM future
         """
     ).fetchone()
@@ -128,6 +138,31 @@ def gather_stats(conn) -> dict:
         FROM jobs WHERE kind = 'hydrate_event'
         """
     ).fetchone()
+    verification = conn.execute(
+        """
+        SELECT count(*) FILTER (
+                   WHERE j.status IN ('pending', 'running')
+               ) AS unresolved,
+               min(j.created_at) FILTER (
+                   WHERE j.status IN ('pending', 'running')
+               ) AS oldest_unresolved,
+               count(*) FILTER (
+                   WHERE cl.detail LIKE 'verify_event:%%outcome=supported%%'
+                     AND cl.started_at >= now() - interval '24 hours'
+               ) AS supported_24h,
+               count(*) FILTER (
+                   WHERE cl.detail LIKE 'verify_event:%%outcome=contradicted%%'
+                     AND cl.started_at >= now() - interval '24 hours'
+               ) AS contradicted_24h,
+               count(*) FILTER (
+                   WHERE cl.detail LIKE 'verify_event:%%outcome=unverified%%'
+                     AND cl.started_at >= now() - interval '24 hours'
+               ) AS unverified_24h
+        FROM jobs j
+        LEFT JOIN crawl_log cl ON cl.job_id = j.id
+        WHERE j.kind = 'verify_event'
+        """
+    ).fetchone()
     return {
         "credit_parked": credit_parked,
         "openrouter_balance_usd": openrouter_balance(),
@@ -144,6 +179,7 @@ def gather_stats(conn) -> dict:
         "day_curve": day_curve,
         "field_completeness": field_completeness,
         "hydration": hydration,
+        "verification": verification,
     }
 
 
@@ -271,11 +307,14 @@ def render(stats: dict, now: datetime) -> str:
         stated = fields.get("stated_price") or 0
         any_price = fields.get("any_price") or 0
         scale = fields.get("event_scale") or 0
+        evidence = fields.get("identity_evidence") or 0
         lines += [
             f"  stated price: {stated}/{total} ({stated / total:.1%})",
             f"  any price (stated or estimated): {any_price}/{total} "
             f"({any_price / total:.1%})",
             f"  event scale estimate: {scale}/{total} ({scale / total:.1%})",
+            f"  evidence-backed identity: {evidence}/{total} "
+            f"({evidence / total:.1%})",
             "  booking URL without stated price: "
             f"{fields.get('booking_without_stated_price') or 0}",
         ]
@@ -302,6 +341,19 @@ def render(stats: dict, now: datetime) -> str:
     lines.append(
         f"  hydration jobs: {unresolved} unresolved{age}, "
         f"{hydration.get('failed_24h') or 0} failed in 24h"
+    )
+    verification = stats.get("verification") or {}
+    verify_unresolved = verification.get("unresolved") or 0
+    verify_oldest = verification.get("oldest_unresolved")
+    verify_age = (
+        f", oldest {now - verify_oldest} ago"
+        if verify_oldest is not None else ""
+    )
+    lines.append(
+        f"  risk verification: {verify_unresolved} unresolved{verify_age}; "
+        f"24h supported={verification.get('supported_24h') or 0}, "
+        f"contradicted={verification.get('contradicted_24h') or 0}, "
+        f"unverified={verification.get('unverified_24h') or 0}"
     )
 
     anomalies = day_curve_anomalies(stats.get("day_curve", []))

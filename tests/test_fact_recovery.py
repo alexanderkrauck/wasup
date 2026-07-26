@@ -152,6 +152,9 @@ def test_hydration_appends_a_claim_and_enqueues_resolve(conn, monkeypatch):
     ).fetchone()
     assert claim["payload"]["price_min"]["value"] == 28
     assert claim["payload"]["url"]["value"] == page.url
+    # Optional fact recovery must not promote identity certainty.
+    assert claim["payload"]["title"]["confidence"] == 0.8
+    assert claim["payload"]["starts_at"]["confidence"] == 0.5
     assert claim["raw_excerpt"] == "28 EUR"
     assert jobs[0]["kind"] == "resolve"
     assert jobs[0]["payload"] == {}

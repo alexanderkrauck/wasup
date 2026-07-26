@@ -115,16 +115,27 @@ def test_field_completeness_and_hydration_render():
             "any_price": 90,
             "booking_without_stated_price": 7,
             "event_scale": 95,
+            "identity_evidence": 40,
         },
         "hydration": {
             "unresolved": 8,
             "oldest_unresolved": NOW - timedelta(hours=6),
             "failed_24h": 2,
         },
+        "verification": {
+            "unresolved": 3,
+            "oldest_unresolved": NOW - timedelta(hours=2),
+            "supported_24h": 4,
+            "contradicted_24h": 1,
+            "unverified_24h": 2,
+        },
     }
     text = render(stats, NOW)
     assert "stated price: 25/100 (25.0%)" in text
     assert "any price (stated or estimated): 90/100 (90.0%)" in text
     assert "event scale estimate: 95/100 (95.0%)" in text
+    assert "evidence-backed identity: 40/100 (40.0%)" in text
     assert "booking URL without stated price: 7" in text
     assert "hydration jobs: 8 unresolved, oldest 6:00:00 ago" in text
+    assert "risk verification: 3 unresolved, oldest 2:00:00 ago" in text
+    assert "supported=4, contradicted=1, unverified=2" in text

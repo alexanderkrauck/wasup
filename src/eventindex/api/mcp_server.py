@@ -80,6 +80,9 @@ mcp = _StrictToolInputsFastMCP(
         "exclusions, and required_attributes exclude unknown values. Soft "
         "fields such as tags, preferred_max_price, and ordinary audience/scale "
         "preferences retain unknowns and rank by stored confidence. "
+        "Discovery defaults to effective event confidence >=0.4 after "
+        "freshness decay; set filters.min_confidence=0 only when the user "
+        "explicitly asks for tentative or unverified hints. "
         "Do not use Wasup for Vienna, restaurants, private-event creation, "
         "or invitations. Known commercial sex-service contexts are excluded "
         "unless a supported tool receives an explicit true opt-in. Null "
@@ -463,6 +466,8 @@ def search_events(
     - "must have 300+ people":
       filters={"participant_count_min":300,
                "required_attributes":["event_scale"]}
+    - "include tentative hints too":
+      filters={"min_confidence":0,"tags":["experimental music"]}
 
     Do not put `dance` in name, do not call once for dance and again for
     elegant, and do not call get_event repeatedly merely to compare prices or
@@ -545,7 +550,6 @@ def get_event(
 @mcp.tool(title="Get calendar subscription link", annotations=_READ_ONLY)
 def get_calendar_link(
     filters: QueryBody | None = None,
-    min_confidence: Annotated[float | None, Field(ge=0, le=1)] = None,
     include_time_unknown: Annotated[
         bool,
         Field(
@@ -580,7 +584,9 @@ def get_calendar_link(
     "min_tag_match":0.4}.
 
     The feed defaults to timed events only and always excludes known
-    commercial sex-service contexts while retaining unknown classifications."""
+    commercial sex-service contexts while retaining unknown classifications.
+    Like search, it defaults to effective event confidence >=0.4; put
+    min_confidence=0 inside filters only for an explicitly tentative feed."""
     parsed, importance = _validated_filters(filters or QueryBody())
     if not (
         parsed.name or parsed.organizer or parsed.venue or parsed.source
@@ -644,7 +650,7 @@ def get_calendar_link(
             ("weekdays", ",".join(parsed.weekdays)),
             ("from", parsed.from_dt),
             ("to", parsed.to_dt),
-            ("min_confidence", min_confidence),
+            ("min_confidence", parsed.min_confidence),
             ("max_price", parsed.max_price),
             ("is_free", str(parsed.is_free).lower() if parsed.is_free else None),
             ("participant_count_min", parsed.participant_count_min),

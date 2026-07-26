@@ -24,6 +24,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config, db, tags as tag_store
+from eventindex.api.confidence import (
+    DEFAULT_MIN_CONFIDENCE,
+    EFFECTIVE_CONFIDENCE_SQL,
+)
 from eventindex.api.search import QueryBody, VIENNA
 
 MAX_LIMIT = 200
@@ -40,17 +44,6 @@ _PRICE_SOURCE_SQL = """
     FROM event_claim c JOIN source s ON s.id = c.source_id
     WHERE c.id = nullif(e.field_provenance->'price_min'->>'claim', '')::uuid
 """
-
-# §7 staleness decay, computed at query time: each missed re-confirmation
-# cadence multiplies confidence by 0.9. A dead pipeline fades to an empty
-# feed instead of serving frozen confidence.
-_EFFECTIVE_CONFIDENCE_SQL = """
-    e.confidence * power(0.9, least(50, greatest(0, floor(
-        extract(epoch from now() - o.last_confirmed_at)
-        / nullif(extract(epoch from coalesce(e.expected_cadence, interval '7 days')), 0)
-    ))))
-"""
-
 
 # discovery surfaces stay open like /docs: they carry no data, only the
 # instructions an agent needs before it has a key (the human pages fetch
@@ -446,9 +439,11 @@ def _occurrence_filters(
         # null category = unknown: never matches a category filter (§7)
         conditions.append("e.category && %(cats)s")
         params["cats"] = [c.strip() for c in category.split(",")]
-    if min_confidence is not None:
-        conditions.append(f"({_EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
-        params["min_conf"] = min_confidence
+    conditions.append(f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
+    params["min_conf"] = (
+        DEFAULT_MIN_CONFIDENCE
+        if min_confidence is None else min_confidence
+    )
     if name:
         # Same event-title scope and German compound-suffix behavior as the
         # structured query core.
@@ -490,7 +485,11 @@ def occurrences(
     radius: str = Query("default", description="'5km'/'800m'; 'any' disables the default 15km-around-Linz gate"),
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
-    min_confidence: float | None = Query(None, ge=0, le=1),
+    min_confidence: float = Query(
+        DEFAULT_MIN_CONFIDENCE, ge=0, le=1,
+        description="effective confidence after freshness decay; set 0 to "
+        "include tentative/unverified hints",
+    ),
     name: str | None = Query(
         None, description="literal event-title search; German compound "
         "suffixes such as Maturaball match name=ball"),
@@ -540,7 +539,7 @@ def occurrences(
                e.expected_attendance, e.expected_attendance_confidence,
                ({_PRICE_SOURCE_SQL}) AS price_source_url,
                v.name AS venue_name, v.address AS venue_address,
-               ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
+               ({EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
                ({_PROVENANCE_SQL}) AS provenance_summary
         FROM occurrence o JOIN event e ON e.id = o.event_id
@@ -585,7 +584,11 @@ def feed_ics(
     radius: str = Query("default", description="'5km'/'800m'; 'any' disables the default 15km-around-Linz gate"),
     bbox: str | None = Query(None, description="min_lon,min_lat,max_lon,max_lat"),
     category: str | None = Query(None, description="comma-separated"),
-    min_confidence: float | None = Query(None, ge=0, le=1),
+    min_confidence: float = Query(
+        DEFAULT_MIN_CONFIDENCE, ge=0, le=1,
+        description="effective confidence after freshness decay; set 0 to "
+        "include tentative/unverified hints",
+    ),
     name: str | None = Query(None, description="literal event-title search"),
     organizer: str | None = Query(None, description="literal organizer name"),
     venue: str | None = Query(None, description="literal venue name"),
@@ -766,7 +769,7 @@ def _run_filters(filters, limit: int,
                    e.inferred, e.field_provenance,
                    e.expected_attendance, e.expected_attendance_confidence,
                    ({_PRICE_SOURCE_SQL}) AS price_source_url,
-                   ({_EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
+                   ({EFFECTIVE_CONFIDENCE_SQL}) AS confidence,
                    ST_Y(e.geo) AS lat, ST_X(e.geo) AS lon,
                    ({_PROVENANCE_SQL}) AS provenance_summary,
                    {attribute_select()}

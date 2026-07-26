@@ -8,7 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from eventindex import config, llm
-from eventindex.extract.llm_text import LLMExtraction, to_payloads
+from eventindex.extract.llm_text import LLMTextExtraction, to_payloads
 
 MAX_IMAGE_BYTES = 4_000_000  # posters compress well; bigger is a photo dump
 
@@ -24,6 +24,11 @@ Extract every upcoming event the image shows, following these rules:
 - category: one of {categories}, or null.
 - confidence: your certainty (0-1) the event and date are read correctly -
   be honest about hard-to-read text.
+- evidence: quote the exact text visible in the image for every non-null
+  field. event_excerpt must be one contiguous visible passage containing the
+  title and date; title/starts_at quote their smallest supporting fragments.
+- field_confidences: give every non-null field its own reading certainty
+  (0-1), and null for null fields.
 - recurrence only if the image states a repeating pattern; copy the wording
   into as_stated. One-off events: recurrence=null.
 - If the image contains no readable events, return an empty list."""
@@ -40,7 +45,7 @@ def extract_image(tx, image: bytes, mime: str, source: dict,
         categories=", ".join(config.CATEGORIES),
     )
     result = llm.complete(
-        tx, prompt, LLMExtraction, model=config.MODEL_VISION,
+        tx, prompt, LLMTextExtraction, model=config.MODEL_VISION,
         source_id=source.get("id"), job_id=job_id, images=[data_url],
     )
-    return to_payloads(result)
+    return to_payloads(result, basis="vision")

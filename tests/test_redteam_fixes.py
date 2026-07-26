@@ -11,6 +11,12 @@ from eventindex.resolve.rebuild import Claim, _recurrence_of
 VIENNA = ZoneInfo("Europe/Vienna")
 
 
+def _field_confidences(llm_text, **values):
+    return dict.fromkeys(llm_text.LLMFieldConfidences.model_fields) | {
+        "title": 0.9, "starts_at": 0.9,
+    } | values
+
+
 def _claim(title, starts, recurrence):
     return Claim(
         id=uuid.uuid4(), source_id=uuid.uuid4(), fingerprint="fp",
@@ -96,16 +102,112 @@ def test_llm_text_drops_invented_urls(monkeypatch):
 
     text = ("Workshop Extremismus am 12.09.2026 im Wissensturm. " * 4
             + "Anmeldung: https://linztermine.at/kurs/123 ")
+    evidence = dict.fromkeys(llm_text.LLMEventEvidence.model_fields) | {
+        "event_excerpt": "Workshop Extremismus am 12.09.2026 im Wissensturm.",
+        "title": "Workshop Extremismus",
+        "starts_at": "12.09.2026",
+        "url": "https://www.linz-termine.at/event/extremismus-basisworkshop",
+        "booking_url": "https://linztermine.at/kurs/123",
+    }
     ev = dict.fromkeys(llm_text.LLMEvent.model_fields) | {
         "title": "Workshop Extremismus", "starts_at": "2026-09-12",
         "url": "https://www.linz-termine.at/event/extremismus-basisworkshop",
         "booking_url": "https://linztermine.at/kurs/123", "confidence": 0.9,
+        "evidence": evidence,
+        "field_confidences": _field_confidences(
+            llm_text, url=0.9, booking_url=0.9,
+        ),
     }
     extraction = llm_text.LLMExtraction(events=[llm_text.LLMEvent(**ev)])
     monkeypatch.setattr("eventindex.llm.complete", lambda *a, **k: extraction)
     payloads = llm_text.extract(None, text, {"id": None})
     assert "url" not in payloads[0]                      # invented -> dropped
     assert payloads[0]["booking_url"]["value"] == "https://linztermine.at/kurs/123"
+
+
+def test_llm_text_rejects_identity_date_not_supported_by_source(monkeypatch):
+    """The exact Linz-Marathon failure class: plausible title, wrong month."""
+    from eventindex.extract import llm_text
+
+    text = (
+        "24. Oberbank Linz Donau Marathon 2026 findet am 12. April 2026 statt. "
+        * 4
+    )
+    evidence = dict.fromkeys(llm_text.LLMEventEvidence.model_fields) | {
+        "event_excerpt": (
+            "24. Oberbank Linz Donau Marathon 2026 findet am "
+            "12. April 2026 statt."
+        ),
+        "title": "24. Oberbank Linz Donau Marathon 2026",
+        "starts_at": "12. April 2026",
+    }
+    event = dict.fromkeys(llm_text.LLMEvent.model_fields) | {
+        "title": "24. Oberbank Linz Donau Marathon 2026",
+        "starts_at": "2026-08-02",
+        "confidence": 0.9,
+        "evidence": evidence,
+        "field_confidences": _field_confidences(llm_text),
+    }
+    extraction = llm_text.LLMExtraction(
+        events=[llm_text.LLMEvent(**event)]
+    )
+    monkeypatch.setattr("eventindex.llm.complete", lambda *a, **k: extraction)
+
+    assert llm_text.extract(None, text, {"id": None}) == []
+
+
+def test_llm_text_drops_only_unsupported_optional_fields(monkeypatch):
+    from eventindex.extract import llm_text
+
+    text = (
+        "Sommernachtstanz am 18. Juli 2027 um 20:30 im Stadtpark. "
+        "Eintritt 12 EUR. " * 4
+    )
+    evidence = dict.fromkeys(llm_text.LLMEventEvidence.model_fields) | {
+        "event_excerpt": (
+            "Sommernachtstanz am 18. Juli 2027 um 20:30 im Stadtpark."
+        ),
+        "title": "Sommernachtstanz",
+        "starts_at": "18. Juli 2027 um 20:30",
+        "venue_name": "im Stadtpark",
+        "price_min": "Eintritt 12 EUR",
+    }
+    event = dict.fromkeys(llm_text.LLMEvent.model_fields) | {
+        "title": "Sommernachtstanz",
+        "starts_at": "2027-07-18T20:30:00+02:00",
+        "venue_name": "Stadtpark",
+        "price_min": 12,
+        "organizer": "Erfundene GmbH",
+        "confidence": 0.8,
+        "evidence": evidence,
+        "field_confidences": _field_confidences(
+            llm_text, venue_name=0.8, price_min=0.7, organizer=0.6,
+        ),
+    }
+    extraction = llm_text.LLMExtraction(
+        events=[llm_text.LLMEvent(**event)]
+    )
+    monkeypatch.setattr("eventindex.llm.complete", lambda *a, **k: extraction)
+
+    payload = llm_text.extract(
+        None, text, {"id": None}, observed_url="https://events.example/list",
+    )[0]
+    assert payload["starts_at"]["value"].startswith("2027-07-18T20:30")
+    assert payload["venue_name"]["value"] == "Stadtpark"
+    assert payload["price_min"]["value"] == 12
+    assert "organizer" not in payload
+    assert payload["title"]["event_excerpt"].startswith("Sommernachtstanz")
+    assert payload["title"]["observed_url"] == "https://events.example/list"
+
+
+def test_html_to_text_preserves_absolute_link_evidence():
+    from eventindex.extract.llm_text import html_to_text
+
+    text = html_to_text(
+        b'<a href="/tickets/42">Tickets</a>',
+        "https://events.example/program",
+    )
+    assert "https://events.example/tickets/42" in text
 
 
 def test_clamped_validity_ranges_yield_no_occurrences():

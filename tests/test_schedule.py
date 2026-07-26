@@ -2,6 +2,7 @@ from psycopg.types.json import Jsonb
 
 from eventindex.jobs.schedule import (
     completeness_escalation, enqueue_enrichment, enqueue_nightly_qa,
+    enqueue_risk_verification,
     escalate_broken, park_dormant, schedule,
 )
 
@@ -124,6 +125,55 @@ def test_nightly_qa_enqueued_once_per_day(conn):
         "SELECT count(*) AS n FROM jobs WHERE kind = 'qa_check'"
     ).fetchone()
     assert n["n"] == 1
+
+
+def test_risk_verification_prioritizes_generic_singleton_signals(conn):
+    import uuid
+
+    source_id = conn.execute(
+        "INSERT INTO source (name, url, kind, entity_type, tier, trust) "
+        "VALUES ('Portal', 'https://portal.example/events', 'website', "
+        "'portal', 2, 0.7) RETURNING id"
+    ).fetchone()["id"]
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, url, confidence, status, "
+        "expected_attendance) VALUES (%s, 'one_off', 'Large Spring Run', "
+        "'https://official.example/run', 0.6, 'confirmed', 3000)",
+        (event_id,),
+    )
+    occurrence_id = conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '30 days') RETURNING id",
+        (event_id,),
+    ).fetchone()["id"]
+    fingerprint = "large spring run|future|"
+    conn.execute(
+        "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+        (fingerprint, event_id),
+    )
+    conn.execute(
+        "INSERT INTO event_claim (source_id, fingerprint, payload) "
+        "VALUES (%s, %s, %s)",
+        (
+            source_id, fingerprint,
+            Jsonb({
+                "title": {"value": "Large Spring Run", "confidence": 0.8},
+                "starts_at": {
+                    "value": "2099-01-01", "confidence": 0.8,
+                },
+            }),
+        ),
+    )
+
+    assert enqueue_risk_verification(conn) == 1
+    job = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'verify_event'"
+    ).fetchone()
+    assert job["payload"]["event_id"] == str(event_id)
+    assert job["payload"]["occurrence_id"] == str(occurrence_id)
+    assert job["payload"]["reason"] == "singleton_portal_cross_host"
+    assert enqueue_risk_verification(conn) == 0
 
 
 def test_enrichment_sweep_repairs_every_stale_future_event_once(conn):

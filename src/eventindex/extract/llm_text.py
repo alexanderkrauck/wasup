@@ -1,7 +1,17 @@
-"""Tier c: LLM extraction on readable page text (mini model, structured
-output, budget-enforced through eventindex.llm)."""
+"""Tier c: evidence-bound LLM extraction on readable page text.
 
+The model proposes fields, but deterministic code decides whether the cited
+source text actually supports them. Unsupported optional fields are dropped;
+unsupported title/date identity drops the event.
+"""
+
+import html as html_lib
+import re
+import unicodedata
+from datetime import datetime
 from typing import Literal
+from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict
@@ -11,6 +21,7 @@ from eventindex.resolve.recurrence import Recurrence
 
 MAX_CHARS = 20_000
 CONFIDENCE_CAP = 0.9  # self-reported confidence is never taken at face value
+PROMPT_VERSION = 2
 
 _PROMPT = """Extract all upcoming events from this web page text (usually German, \
 from Linz, Austria). Today is {today}.
@@ -53,9 +64,63 @@ For a repeating event, starts_at = the first upcoming occurrence. \
 "außer Ferien"/"nicht in den Schulferien" -> except_holidays=["school_holidays"]. \
 One-off events: recurrence=null.
 - status: "cancelled" if marked ABGESAGT/abgesagt, "moved" if verschoben, else null.
+- evidence is mandatory. event_excerpt must be ONE verbatim contiguous passage
+  (maximum 600 characters) containing this event's title and date together.
+  title and starts_at must each quote the smallest verbatim supporting fragment
+  inside event_excerpt. For every other non-null field, provide the smallest
+  verbatim source fragment supporting it in the matching evidence field. Never
+  cite text from another event. If title/date cannot be supported this way,
+  skip the event. If an optional field has no literal support, return it null.
+- field_confidences is mandatory. Give title and starts_at their own certainty
+  and give every other non-null field its own certainty (0-1); use null for
+  null fields. Confidence means certainty that this exact field value is
+  supported by its cited source fragment.
 
 PAGE TEXT:
 {text}"""
+
+
+class LLMEventEvidence(BaseModel):
+    """Verbatim source spans corresponding to LLMEvent fields."""
+
+    model_config = ConfigDict(extra="forbid")
+    event_excerpt: str
+    title: str
+    starts_at: str
+    ends_at: str | None
+    venue_name: str | None
+    address: str | None
+    description: str | None
+    url: str | None
+    price_min: str | None
+    price_max: str | None
+    category: str | None
+    organizer: str | None
+    booking_url: str | None
+    registration_required: str | None
+    recurrence: str | None
+    status: str | None
+
+
+class LLMFieldConfidences(BaseModel):
+    """Per-field certainty; text extraction requires one for every value."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: float
+    starts_at: float
+    ends_at: float | None
+    venue_name: float | None
+    address: float | None
+    description: float | None
+    url: float | None
+    price_min: float | None
+    price_max: float | None
+    category: float | None
+    organizer: float | None
+    booking_url: float | None
+    registration_required: float | None
+    recurrence: float | None
+    status: float | None
 
 
 class LLMEvent(BaseModel):
@@ -76,6 +141,18 @@ class LLMEvent(BaseModel):
     recurrence: Recurrence | None
     status: Literal["cancelled", "moved", "postponed"] | None
     confidence: float
+    # Optional at the shared schema boundary because vision and the tier-D
+    # browser agent use this model too. Text extraction below requires and
+    # validates it; those modalities retain their existing validation path.
+    evidence: LLMEventEvidence | None = None
+    field_confidences: LLMFieldConfidences | None = None
+
+
+class LLMTextEvent(LLMEvent):
+    """Text-tier event: evidence and field certainties are schema-required."""
+
+    evidence: LLMEventEvidence
+    field_confidences: LLMFieldConfidences
 
 
 class LLMExtraction(BaseModel):
@@ -83,16 +160,118 @@ class LLMExtraction(BaseModel):
     events: list[LLMEvent]
 
 
-def html_to_text(content: bytes) -> str:
+class LLMTextExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    events: list[LLMTextEvent]
+
+
+def html_to_text(content: bytes, base_url: str | None = None) -> str:
     soup = BeautifulSoup(content, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
+    # Preserve literal public links in the text the model sees. This makes a
+    # relative booking/detail link evidence-verifiable without teaching the
+    # extractor anything about a particular website.
+    if base_url:
+        for anchor in soup.find_all("a", href=True):
+            absolute = urljoin(base_url, anchor["href"])
+            if absolute.startswith(("http://", "https://")):
+                anchor.append(f" [{absolute}]")
     return " ".join(soup.get_text(" ").split())
 
 
-def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
+def _norm(value: str) -> str:
+    return " ".join(
+        unicodedata.normalize("NFKC", html_lib.unescape(value)).split()
+    ).casefold()
+
+
+def _is_literal_quote(quote: str | None, source_text: str) -> bool:
+    return bool(quote and _norm(quote) in _norm(source_text))
+
+
+_TIME_RE = re.compile(
+    r"(?<!\d)(?P<hour>[01]?\d|2[0-3])"
+    r"(?::(?P<colon_minute>[0-5]\d)"
+    r"|\.(?P<dot_minute>[0-5]\d)(?![./-]\d)|\s*uhr)\b",
+    re.IGNORECASE,
+)
+
+
+def _date_evidence_matches(value: str, quote: str) -> tuple[bool, str]:
+    """Return whether a cited fragment supports the claimed date/time.
+
+    A source that states only a date can support only a date-only claim. The
+    normalized value is returned so an invented midnight/time is not stored.
+    Regex here only recognizes numeric clock syntax; it makes no semantic
+    content judgment.
+    """
+    from dateutil import parser as dateparser
+
+    from eventindex.extract import _GERMAN_DATE_PARTS, parse_dt
+
+    claimed = parse_dt(value)
+    if claimed is None:
+        return False, value
+    local = claimed.astimezone(ZoneInfo(config.TIMEZONE))
+    normalized = quote.removesuffix(" Uhr")
+    for german, english in _GERMAN_DATE_PARTS:
+        normalized = normalized.replace(german, english)
+    try:
+        cited = dateparser.parse(
+            normalized,
+            dayfirst=True,
+            fuzzy=True,
+            default=local.replace(hour=0, minute=0, second=0, microsecond=0),
+        )
+    except (ValueError, OverflowError):
+        return False, value
+    if cited is None or cited.date() != local.date():
+        return False, value
+
+    clock = _TIME_RE.search(quote)
+    claimed_has_time = "T" in value or bool(re.search(r"\d\s+\d{1,2}:", value))
+    if clock is None:
+        return True, local.date().isoformat()
+    minute = int(
+        clock.group("colon_minute") or clock.group("dot_minute") or 0
+    )
+    if not claimed_has_time:
+        return False, value
+    if (local.hour, local.minute) != (int(clock.group("hour")), minute):
+        return False, value
+    return True, value
+
+
+def _supported_optional(
+    name: str, value, quote: str | None, source_text: str,
+) -> tuple[bool, object]:
+    if not _is_literal_quote(quote, source_text):
+        return False, value
+    if name in ("ends_at",):
+        return _date_evidence_matches(str(value), quote or "")
+    if name in (
+        "venue_name", "address", "description", "url", "organizer",
+        "booking_url",
+    ):
+        return _norm(str(value)) in _norm(quote or ""), value
+    if name in ("price_min", "price_max"):
+        numbers = [
+            float(match.replace(",", "."))
+            for match in re.findall(r"(?<!\d)\d+(?:[.,]\d+)?", quote or "")
+        ]
+        try:
+            return any(abs(float(value) - number) < 0.01 for number in numbers), value
+        except (TypeError, ValueError):
+            return False, value
+    # Category, price, booleans, status and recurrence are interpretations of
+    # a cited span. Their ordinary schema/sanity validators still apply.
+    return True, value
+
+
+def extract(
+    tx, text: str, source: dict, job_id=None, observed_url: str | None = None,
+) -> list[dict]:
 
     if len(text.strip()) < 100:
         return []  # JS shell or empty page; headless rendering is phase 3
@@ -103,22 +282,19 @@ def extract(tx, text: str, source: dict, job_id=None) -> list[dict]:
         text=text[:MAX_CHARS],
     )
     result = llm.complete(
-        tx, prompt, LLMExtraction,
+        tx, prompt, LLMTextExtraction,
         source_id=source["id"], job_id=job_id,
     )
-    payloads = to_payloads(result)
-    # the model only saw TEXT: a url it emits that is not literally in that
-    # text is invented provenance (red team 2026-07-21: a fabricated
-    # linz-termine slug shipped as an event's canonical URL, 301-looping)
-    for p in payloads:
-        for key in ("url", "booking_url"):
-            entry = p.get(key)
-            if entry and str(entry["value"]) not in text:
-                del p[key]
-    return payloads
+    return to_payloads(
+        result, source_text=text, observed_url=observed_url,
+        basis="llm_text",
+    )
 
 
-def to_payloads(result: LLMExtraction) -> list[dict]:
+def to_payloads(
+    result: LLMExtraction, *, source_text: str | None = None,
+    observed_url: str | None = None, basis: str = "llm",
+) -> list[dict]:
     """LLMExtraction -> claim payloads: shared by the text, vision, and
     agent emit_events paths so validation/confidence rules exist once."""
     from eventindex.extract import field
@@ -129,7 +305,11 @@ def to_payloads(result: LLMExtraction) -> list[dict]:
             continue  # the model's own "probably not an event" (audit A23)
         conf = min(max(ev.confidence, 0.0), CONFIDENCE_CAP)
         fields = ev.model_dump(
-            exclude_none=True, exclude={"confidence", "category", "recurrence"}
+            exclude_none=True,
+            exclude={
+                "confidence", "category", "recurrence", "evidence",
+                "field_confidences",
+            },
         )
         if ev.category in config.CATEGORIES:
             fields["category"] = ev.category
@@ -139,5 +319,56 @@ def to_payloads(result: LLMExtraction) -> list[dict]:
             # the model saying "not actually recurring" - storing it would
             # mint a bogus series (and a 00:00 occurrence when time is null)
             fields["recurrence"] = ev.recurrence.model_dump()
-        payloads.append({k: field(v, conf) for k, v in fields.items()})
+        evidence = ev.evidence
+        field_confidences = ev.field_confidences
+        if evidence is None or field_confidences is None:
+            continue
+        excerpt = evidence.event_excerpt[:600]
+        title_quote = evidence.title
+        starts_quote = evidence.starts_at
+        if not (
+            (source_text is None or _is_literal_quote(excerpt, source_text))
+            and _is_literal_quote(title_quote, excerpt)
+            and _is_literal_quote(starts_quote, excerpt)
+            and _norm(ev.title) in _norm(title_quote)
+        ):
+            continue
+        date_ok, normalized_start = _date_evidence_matches(
+            ev.starts_at, starts_quote,
+        )
+        if not date_ok:
+            continue
+        fields["starts_at"] = normalized_start
+
+        kept: dict = {}
+        for name, value in fields.items():
+            quote = getattr(evidence, name, None)
+            if name == "title":
+                quote = title_quote
+                ok, normalized = True, value
+            elif name == "starts_at":
+                quote = starts_quote
+                ok, normalized = True, value
+            else:
+                ok, normalized = _supported_optional(
+                    name, value, quote,
+                    source_text if source_text is not None else (quote or ""),
+                )
+            if not ok:
+                continue
+            field_confidence = getattr(field_confidences, name, None)
+            if field_confidence is None:
+                continue
+            kept[name] = field(
+                normalized,
+                min(max(field_confidence, 0.0), conf),
+                evidence=quote,
+                basis=basis,
+                observed_url=observed_url,
+                evidence_version=1,
+                prompt_version=PROMPT_VERSION,
+                **({"event_excerpt": excerpt} if name == "title" else {}),
+            )
+        if "title" in kept and "starts_at" in kept:
+            payloads.append(kept)
     return payloads

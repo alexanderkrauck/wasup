@@ -107,8 +107,9 @@ def test_cascade_routes_pdf_to_llm_tier(conn, monkeypatch):
 
     seen = {}
 
-    def fake_llm(tx, text, source, job_id=None):
+    def fake_llm(tx, text, source, job_id=None, observed_url=None):
         seen["text"] = text
+        seen["url"] = observed_url
         return [{"title": field("Sommerkonzert im Pfarrsaal", 0.8),
                  "starts_at": field("2030-08-07T19:30", 0.8)}]
 
@@ -124,4 +125,5 @@ def test_cascade_routes_pdf_to_llm_tier(conn, monkeypatch):
     method, payloads = extract(source, R(), conn)
     assert method == "pdf"
     assert "Sommerkonzert" in seen["text"]
+    assert seen["url"] == "https://pfarre.example/programm.pdf"
     assert payloads[0]["title"]["value"] == "Sommerkonzert im Pfarrsaal"

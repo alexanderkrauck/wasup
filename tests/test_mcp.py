@@ -248,6 +248,7 @@ def test_get_calendar_link_builds_ics_url(client):
         "filters": {"categories": ["nightlife"]},
         "include_time_unknown": True,
     })
+    assert "min_confidence=0.4" in out["ics_url"]
     assert "include_time_unknown=true" in with_unknown_times["ics_url"]
 
     semantic = _call(client, "get_calendar_link", {
@@ -257,6 +258,14 @@ def test_get_calendar_link_builds_ics_url(client):
     })
     assert "tags=salsa+dancing" in semantic["ics_url"]
     assert "min_tag_match=0.6" in semantic["ics_url"]
+
+    tentative = _call(client, "get_calendar_link", {
+        "filters": {
+            "tags": ["salsa dancing"], "min_tag_match": 0.6,
+            "min_confidence": 0,
+        },
+    })
+    assert "min_confidence=0.0" in tentative["ics_url"]
 
     organizer = _call(client, "get_calendar_link", {
         "filters": {

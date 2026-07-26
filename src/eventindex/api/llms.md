@@ -33,6 +33,9 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
   filter); `radius=any` disables the gate.
 - **`confidence`** on results decays with staleness (missed re-confirmation
   cycles); `last_confirmed_at` says when a source last showed the event.
+  Every search/list/feed defaults to effective confidence >=0.4. Set
+  `min_confidence: 0` only when the user explicitly wants tentative or
+  unverified hints.
 - **`provenance_summary`** lists the reporting sources; `GET /v1/events/{id}`
   returns sanitized event fields, occurrences, and source name/URL/timestamp
   provenance. Raw append-only claim payloads and evidence snippets are never
@@ -59,6 +62,7 @@ for `/v1/search` (it spends the index's own LLM budget) and `POST
 HARD fields (set logic): `from_dt`, `to_dt` (ISO, naive = Europe/Vienna;
 a bare date in to_dt means the WHOLE day), `weekdays` (local day names such
 as `thursday`/`friday`), `near`+`radius` (geo circle),
+`min_confidence` (default 0.4; 0 explicitly includes tentative hints),
 `categories`, `exclude_categories`, `exclude_terms`, `name`
 (literal event-title lookup; `ball` also matches compounds such as
 `Maturaball`), `organizer` and `venue` (literal substrings in their own
@@ -190,6 +194,7 @@ queries are COMPOSITIONS you build at query time. Examples:
   `max_price`/`is_free`, and required event-scale bounds. When preserving
   accepted search results, set `min_tag_match` at or below the weakest
   accepted result's `tag_match`; there is no implicit threshold.
+  Feed membership uses the same default `min_confidence=0.4` as search.
   `exclude_sex_service_context=true` removes positively known commercial
   sex-service contexts while retaining unknowns. Set
   `include_time_unknown=false` for a quieter timed-events-only feed; the

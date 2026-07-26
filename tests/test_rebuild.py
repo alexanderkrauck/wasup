@@ -65,6 +65,33 @@ def _canon(conn):
     return events, occs
 
 
+def test_event_confidence_uses_identity_not_optional_richness():
+    source_id = uuid.uuid4()
+    common = {
+        "id": uuid.uuid4(),
+        "source_id": source_id,
+        "fingerprint": "identity",
+        "extracted_at": NOW,
+        "trust": 0.8,
+        "source_url": "https://source.at",
+        "source_lat": None,
+        "source_lon": None,
+    }
+    sparse = rb.Claim(payload={
+        "title": {"value": "Event", "confidence": 0.5},
+        "starts_at": {"value": "2026-07-20", "confidence": 0.5},
+    }, **common)
+    rich = rb.Claim(payload={
+        **sparse.payload,
+        "description": {"value": "Long", "confidence": 1.0},
+        "venue_name": {"value": "Venue", "confidence": 1.0},
+        "price_min": {"value": 10, "confidence": 1.0},
+    }, **(common | {"id": uuid.uuid4()}))
+
+    assert rb._event_confidence([sparse]) == pytest.approx(0.4)
+    assert rb._event_confidence([rich]) == pytest.approx(0.4)
+
+
 def test_more_specific_title_and_its_url_win_an_equal_weight_merge():
     common = {
         "source_id": uuid.uuid4(), "fingerprint": "same-event",

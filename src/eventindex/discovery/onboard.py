@@ -170,8 +170,11 @@ Method:
 2. Where event data is only visible as rendered pixels (posters, flyers,
    canvas), call read_screenshot - it OCR-extracts the current viewport.
 3. Submit events with emit_events (multiple calls fine; each is validated:
-   parseable future date, real title). Include venue and per-event detail
-   URL whenever the site shows them. Never invent fields - omit unknowns.
+   parseable future date, real title). Every non-null field needs its own
+   field_confidence and smallest verbatim evidence quote; title/date also
+   need one contiguous event_excerpt containing both. Include venue and
+   per-event detail URL whenever the site shows them. Never invent fields -
+   omit unknowns.
 4. ALSO call emit_recipe when a stable declarative recipe exists (JSON
    endpoint, clean listing) - a validated recipe makes future crawls free.
    If the site needs your tools every time (pure poster feeds with varying
@@ -194,13 +197,13 @@ def _tools(mode: str = "recipe") -> list[dict]:
 
     extract_tools = []
     if mode == "extract":
-        from eventindex.extract.llm_text import LLMEvent
+        from eventindex.extract.llm_text import LLMTextEvent
 
         extract_tools = [
             tool("emit_events", "Submit extracted events (validated; call as "
                  "often as needed while you work through the site).",
                  {"events": {"type": "array",
-                             "items": LLMEvent.model_json_schema()}}),
+                             "items": LLMTextEvent.model_json_schema()}}),
             tool("read_screenshot", "Vision-read the current page as rendered "
                  "pixels (posters, flyers, canvas text). Returns the events "
                  "legible in the screenshot; submit them via emit_events.", {}),
@@ -425,24 +428,28 @@ def _accept_events(args, source, result: "OnboardResult") -> str:
     from pydantic import ValidationError as VErr
 
     from eventindex.extract import sanity_filter
-    from eventindex.extract.llm_text import LLMEvent, LLMExtraction, to_payloads
+    from eventindex.extract.llm_text import (
+        LLMTextEvent, LLMTextExtraction, to_payloads,
+    )
     from eventindex.fetch.recipe import _coerce_list
 
     raw = _coerce_list(args.get("events") or [])
     if not isinstance(raw, list):
         return "emit_events schema invalid: events must be an array"
-    blank = {name: None for name in LLMEvent.model_fields}
+    blank = {name: None for name in LLMTextEvent.model_fields}
     valid, errors = [], []
     for entry in raw:
         if not isinstance(entry, dict):
             errors.append("not an object")
             continue
         try:
-            valid.append(LLMEvent.model_validate(blank | entry))
+            valid.append(LLMTextEvent.model_validate(blank | entry))
         except VErr as e:
             errors.append(f"{entry.get('title', '?')}: "
                           + "; ".join(err["msg"] for err in e.errors()[:2]))
-    payloads = sanity_filter(to_payloads(LLMExtraction(events=valid)), source)
+    payloads = sanity_filter(to_payloads(
+        LLMTextExtraction(events=valid), basis="agent",
+    ), source)
     result.payloads += payloads
     report = (f"accepted {len(payloads)}/{len(raw)} events "
               f"({len(valid) - len(payloads)} dropped by sanity gates: past "

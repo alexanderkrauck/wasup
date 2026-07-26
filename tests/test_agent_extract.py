@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 from eventindex.discovery import onboard
 from eventindex.extract import vision
-from eventindex.extract.llm_text import LLMEvent, LLMExtraction
+from eventindex.extract.llm_text import (
+    LLMEvent, LLMEventEvidence, LLMExtraction, LLMFieldConfidences,
+)
 from eventindex.jobs import handlers
 from eventindex.jobs.worker import enqueue
 
@@ -19,7 +21,18 @@ FUTURE = (NOW + timedelta(days=30)).strftime("%Y-%m-%dT19:00:00")
 
 def _event(title="Sommerkonzert", starts=FUTURE, **kw) -> dict:
     base = {name: None for name in LLMEvent.model_fields}
-    return base | {"title": title, "starts_at": starts, "confidence": 0.9} | kw
+    evidence = {name: None for name in LLMEventEvidence.model_fields} | {
+        "event_excerpt": f"{title} {starts}",
+        "title": title,
+        "starts_at": starts,
+    }
+    field_confidences = {
+        name: None for name in LLMFieldConfidences.model_fields
+    } | {"title": 0.9, "starts_at": 0.9}
+    return base | {
+        "title": title, "starts_at": starts, "confidence": 0.9,
+        "evidence": evidence, "field_confidences": field_confidences,
+    } | kw
 
 
 def test_emit_events_validates_and_collects():
@@ -135,6 +148,39 @@ def test_agent_extract_inserts_claims_and_goes_agentic(conn, monkeypatch):
         "SELECT detail FROM crawl_log WHERE source_id = %s", (sid,)
     ).fetchone()
     assert "method=agent" in log["detail"]
+
+
+def test_claim_insert_persists_llm_identity_excerpt(conn):
+    source_id = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust) "
+        "VALUES ('Evidence Site', 'https://evidence.at', 'website', 2, 0.8) "
+        "RETURNING id"
+    ).fetchone()["id"]
+    source = conn.execute(
+        "SELECT *, ST_Y(geo) AS lat, ST_X(geo) AS lon "
+        "FROM source WHERE id = %s", (source_id,),
+    ).fetchone()
+    excerpt = "Sommerkonzert am 18. August 2027"
+    payload = {
+        "title": {
+            "value": "Sommerkonzert", "confidence": 0.8,
+            "evidence": "Sommerkonzert", "event_excerpt": excerpt,
+            "basis": "llm_text",
+        },
+        "starts_at": {
+            "value": "2027-08-18", "confidence": 0.8,
+            "evidence": "18. August 2027", "basis": "llm_text",
+        },
+    }
+
+    handlers._insert_claims(conn, source, uuid.uuid4(), [payload])
+
+    claim = conn.execute(
+        "SELECT raw_excerpt, payload FROM event_claim WHERE source_id = %s",
+        (source_id,),
+    ).fetchone()
+    assert claim["raw_excerpt"] == excerpt
+    assert claim["payload"]["title"]["basis"] == "llm_text"
 
 
 def test_agent_extract_with_recipe_returns_to_rung_one(conn, monkeypatch):

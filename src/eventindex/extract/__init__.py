@@ -37,8 +37,13 @@ _GERMAN_DATE_PARTS = (
 )
 
 
-def field(value, confidence: float) -> dict:
-    return {"value": value, "confidence": confidence}
+def field(value, confidence: float, **metadata) -> dict:
+    """One confidence-bearing claim field.
+
+    Extractors may attach source evidence metadata without changing the
+    append-only payload contract consumed by the resolver.
+    """
+    return {"value": value, "confidence": confidence, **metadata}
 
 
 # ---- string hygiene: ONE choke point (audit A6/A18/A22). Applied both at
@@ -261,8 +266,10 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
     if pdf.is_pdf(result.content, ct):
         # text-layer PDFs feed the LLM tier; a scanned PDF yields no text
         # and returns empty here - the agent's vision path is its ladder rung
-        claims = llm_text.extract(tx, pdf.to_text(result.content), source,
-                                  job_id=job_id)
+        claims = llm_text.extract(
+            tx, pdf.to_text(result.content), source,
+            job_id=job_id, observed_url=result.url,
+        )
         return "pdf", sanity_filter(claims, source)
 
     if kind == "api":
@@ -278,7 +285,8 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
         else:
             method = "llm"
             claims = llm_text.extract(
-                tx, rss.to_text(result.content), source, job_id=job_id
+                tx, rss.to_text(result.content), source, job_id=job_id,
+                observed_url=result.url,
             )
     else:
         claims = jsonld.parse(result.content, base_url=result.url)
@@ -287,7 +295,8 @@ def extract(source: dict, result, tx, job_id=None) -> tuple[str, list[dict]]:
         else:
             method = "llm"
             claims = llm_text.extract(
-                tx, llm_text.html_to_text(result.content), source, job_id=job_id
+                tx, llm_text.html_to_text(result.content, result.url), source,
+                job_id=job_id, observed_url=result.url,
             )
 
     return method, sanity_filter(claims, source)

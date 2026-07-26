@@ -441,7 +441,10 @@ Three layers, all 0-1 floats:
 
 3. **Event confidence** (canonical): `1 - Π(1 - trustᵢ × confᵢ)` over supporting claims - independent confirmations compound. One Instagram post = 0.5; Instagram + venue website = 0.85; + oeticket = 0.95.
 
-The API exposes all three. Filters accept `min_confidence`; the default feed hides < 0.4 but a `?include_tentative=true` shows everything - for the niche-hunting use case you often WANT the 0.45-confidence hint that something might be happening.
+The API exposes all three. Filters accept `min_confidence`; every default
+search/list/feed hides < 0.4, while explicit `min_confidence=0` shows
+everything - for the niche-hunting use case you often WANT the
+0.45-confidence hint that something might be happening.
 
 **Staleness decay:** canon confidence also decays passively. Every event has an expected re-confirmation cadence (derived from its sources' crawl intervals); each missed cadence multiplies confidence by ~0.9. A Stammtisch last confirmed by a 2019 website drifts to "tentative" on its own - zombie listings die of old age instead of living forever. Any fresh confirmation resets the decay.
 
@@ -492,7 +495,7 @@ GET /v1/occurrences
     &category=sport.climbing,community.*
     &price_max=15&is_free=true
     &age_range=20-35&max_fullness=0.7&newcomer_friendly=true
-    &min_confidence=0.6&include_tentative=true
+    &min_confidence=0.6                         (0 = include tentative)
     &sort=starts_at|distance|confidence|relevance
     &tags=dancing&min_tag_match=0.5           → explicit semantic membership
 

@@ -54,13 +54,14 @@ def claim_next(conn) -> dict | None:
                     WHEN 'embed_tags' THEN 1
                     -- A due resolve publishes recovered claims in batches.
                     WHEN 'resolve' THEN 2
+                    WHEN 'verify_event' THEN 3
                     -- Grounding is admitted in small scheduler batches, so
                     -- giving it the first recovery slot cannot starve the
                     -- much larger hydration backlog; workers drain the batch
                     -- and spend the rest of the tick on event facts.
-                    WHEN 'ground_venue' THEN 3
-                    WHEN 'hydrate_event' THEN 4
-                    ELSE 5
+                    WHEN 'ground_venue' THEN 4
+                    WHEN 'hydrate_event' THEN 5
+                    ELSE 6
                 END,
                 CASE WHEN kind = 'enrich' THEN
                     coalesce(

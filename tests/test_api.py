@@ -424,6 +424,31 @@ def test_staleness_decay_is_computed_at_query_time(conn):
     assert 0.55 < served["confidence"] < 0.65  # 0.9 × 0.9^4
 
 
+def test_tentative_events_require_explicit_opt_in(client, conn):
+    event_id = _add_event(
+        conn, "Tentative Secret Concert",
+        starts=NOW + timedelta(days=4),
+        lat=48.3069, lon=14.2858,
+    )
+    conn.execute(
+        "UPDATE event SET confidence = 0.39 WHERE id = %s", (event_id,)
+    )
+    conn.commit()
+
+    assert "Tentative Secret Concert" not in _titles(
+        client.get("/v1/occurrences")
+    )
+    assert "Tentative Secret Concert" in _titles(
+        client.get("/v1/occurrences", params={"min_confidence": 0})
+    )
+    default_query = client.post("/v1/query", json={}).json()["occurrences"]
+    assert str(event_id) not in {str(row["event_id"]) for row in default_query}
+    tentative_query = client.post(
+        "/v1/query", json={"min_confidence": 0},
+    ).json()["occurrences"]
+    assert str(event_id) in {str(row["event_id"]) for row in tentative_query}
+
+
 def test_event_detail_serializes_enriched_events(conn, client):
     """int4range/interval columns 500ed the detail endpoint for every
     enriched event (found by the first external consumer, 2026-07-09)."""

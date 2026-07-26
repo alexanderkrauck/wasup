@@ -82,7 +82,8 @@ def test_cascade_ignores_json_without_events(conn, monkeypatch):
     from eventindex.extract import llm_text
 
     monkeypatch.setattr(llm_text, "extract",
-                        lambda tx, text, source, job_id=None: [])
+                        lambda tx, text, source, job_id=None,
+                        observed_url=None: [])
     source = {"id": None, "kind": "website", "name": "X",
               "lat": None, "lon": None}
     body = json.dumps({"config": {"locale": "de"}}).encode()

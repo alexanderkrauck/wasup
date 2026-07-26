@@ -112,10 +112,22 @@ def _insert_claims(tx, source, crawl_id, payloads) -> None:
             lat=lat if lat is not None else source["lat"],
             lon=lon if lon is not None else source["lon"],
         )
+        raw_excerpt = (
+            (payload.get("title") or {}).get("event_excerpt")
+            or " | ".join(filter(None, [
+                (payload.get("title") or {}).get("evidence"),
+                (payload.get("starts_at") or {}).get("evidence"),
+            ]))
+            or None
+        )
         tx.execute(
-            "INSERT INTO event_claim (source_id, crawl_id, fingerprint, payload) "
-            "VALUES (%s, %s, %s, %s)",
-            (source["id"], crawl_id, fp, Jsonb(payload)),
+            "INSERT INTO event_claim (source_id, crawl_id, fingerprint, "
+            "raw_excerpt, payload) VALUES (%s, %s, %s, %s, %s)",
+            (
+                source["id"], crawl_id, fp,
+                raw_excerpt[:2000] if raw_excerpt else None,
+                Jsonb(payload),
+            ),
         )
 
 
@@ -559,16 +571,38 @@ def _qa_verify(tx, occ: dict, job_id) -> str:
     ).outcome
 
 
-def _qa_claim(tx, qa_sid, occ: dict, status: str | None) -> None:
+def _qa_claim(
+    tx, qa_sid, occ: dict, status: str | None,
+    raw_excerpt: str | None = None,
+) -> None:
     """QA writes claims, never canon (H0): a positive claim re-anchors
     last_seen/last_confirmed_at at the next rebuild, a negative one flips
     the occurrence through the ordinary asymmetric status merge."""
-    fp = tx.execute(
-        "SELECT fingerprint FROM identity WHERE event_id = %s "
-        "ORDER BY fingerprint LIMIT 1", (occ["event_id"],),
-    ).fetchone()
-    if fp is None:
+    candidates = tx.execute(
+        "SELECT i.fingerprint, c.payload FROM identity i "
+        "LEFT JOIN LATERAL ("
+        "  SELECT payload FROM event_claim "
+        "  WHERE fingerprint = i.fingerprint ORDER BY extracted_at DESC LIMIT 1"
+        ") c ON true WHERE i.event_id = %s ORDER BY i.fingerprint",
+        (occ["event_id"],),
+    ).fetchall()
+    if not candidates:
         return
+    from zoneinfo import ZoneInfo
+
+    local_zone = ZoneInfo(config.TIMEZONE)
+    target_day = occ["starts_at"].astimezone(local_zone).date()
+    fp = candidates[0]
+    for candidate in candidates:
+        candidate_start = parse_dt(
+            (candidate["payload"].get("starts_at") or {}).get("value")
+        )
+        if (
+            candidate_start is not None
+            and candidate_start.astimezone(local_zone).date() == target_day
+        ):
+            fp = candidate
+            break
     payload = {
         "title": {"value": occ["title"], "confidence": 0.9},
         "starts_at": {"value": occ["starts_at"].isoformat(), "confidence": 0.9},
@@ -576,9 +610,9 @@ def _qa_claim(tx, qa_sid, occ: dict, status: str | None) -> None:
     if status:
         payload["status"] = {"value": status, "confidence": 0.9}
     tx.execute(
-        "INSERT INTO event_claim (source_id, fingerprint, payload) "
-        "VALUES (%s, %s, %s)",
-        (qa_sid, fp["fingerprint"], Jsonb(payload)),
+        "INSERT INTO event_claim (source_id, fingerprint, raw_excerpt, payload) "
+        "VALUES (%s, %s, %s, %s)",
+        (qa_sid, fp["fingerprint"], raw_excerpt, Jsonb(payload)),
     )
 
 
@@ -680,6 +714,176 @@ def qa_check(job: dict, tx) -> list[dict]:
                            "where the events moved and re-extract"),
             }})
     return jobs
+
+
+class RiskVerdict(BaseModel):
+    """Evidence-bearing verdict for one risk-prioritized occurrence."""
+
+    model_config = ConfigDict(extra="forbid")
+    outcome: Literal["supported", "contradicted", "unverified"]
+    actual_starts_at: str | None
+    evidence: str | None
+
+
+def _risk_verify(tx, occ: dict, job_id) -> RiskVerdict:
+    """Verify identity/date against the canonical public page.
+
+    Absence is never contradiction. Only a literal page quote can support or
+    negate a date, keeping temporary fetch/render failures fail-open.
+    """
+    import time
+
+    import httpx
+
+    from eventindex.extract.llm_text import (
+        _date_evidence_matches,
+        _is_literal_quote,
+        html_to_text,
+    )
+    from eventindex.fetch.headless import render_page
+    from eventindex.resolve.fingerprint import VIENNA
+
+    try:
+        with httpx.Client(
+            timeout=30, follow_redirects=True,
+            headers={"User-Agent": config.USER_AGENT},
+        ) as client:
+            time.sleep(config.CRAWL_DELAY_S)
+            resp = client.get(occ["url"])
+            resp.raise_for_status()
+            final_url = str(resp.url)
+    except httpx.HTTPError:
+        return RiskVerdict(
+            outcome="unverified", actual_starts_at=None, evidence=None,
+        )
+
+    text = html_to_text(resp.content, final_url)
+    title_head = (occ["title"] or "")[:25].casefold()
+    if title_head and title_head not in text.casefold():
+        rendered = render_page(final_url)
+        if rendered:
+            text = html_to_text(rendered, final_url)
+
+    local = occ["starts_at"].astimezone(VIENNA)
+    verdict = llm.complete(
+        tx,
+        f"Verify one public event occurrence against the page text below.\n"
+        f"Claimed event: {occ['title']!r}\n"
+        f"Claimed start: {local.isoformat()}\n"
+        f"Page: {final_url}\n\n"
+        "Return outcome='supported' only when the page explicitly supports "
+        "this same event on the claimed date (and time when stated). Return "
+        "outcome='contradicted' only when the page explicitly says this event "
+        "is cancelled/moved OR explicitly gives it a different date/time. "
+        "For a different date, actual_starts_at is the ISO value actually "
+        "shown. Return outcome='unverified' for absence, ambiguity, stale "
+        "yearless pages, fetch-like error text, or insufficient evidence. "
+        "evidence must be the smallest verbatim contiguous quote that proves "
+        "the verdict; never paraphrase. A supported or contradicted verdict "
+        "without such a quote is invalid.\n\n"
+        f"PAGE TEXT:\n{text[:12000]}",
+        RiskVerdict,
+        job_id=job_id,
+    )
+    if verdict.outcome == "unverified":
+        return verdict
+    if not _is_literal_quote(verdict.evidence, text):
+        return RiskVerdict(
+            outcome="unverified", actual_starts_at=None, evidence=None,
+        )
+    if verdict.outcome == "supported":
+        ok, normalized = _date_evidence_matches(
+            occ["starts_at"].isoformat(), verdict.evidence or "",
+        )
+        if not ok or (not occ.get("time_unknown") and "T" not in normalized):
+            return RiskVerdict(
+                outcome="unverified", actual_starts_at=None, evidence=None,
+            )
+    elif verdict.actual_starts_at is not None:
+        ok, actual = _date_evidence_matches(
+            verdict.actual_starts_at, verdict.evidence or "",
+        )
+        parsed_actual = parse_dt(actual) if ok else None
+        if (
+            parsed_actual is None
+            or parsed_actual == occ["starts_at"]
+            or (
+                parsed_actual.astimezone(VIENNA).date()
+                == occ["starts_at"].astimezone(VIENNA).date()
+                and "T" not in actual
+            )
+        ):
+            return RiskVerdict(
+                outcome="unverified", actual_starts_at=None, evidence=None,
+            )
+    return verdict
+
+
+def verify_event(job: dict, tx) -> list[dict]:
+    """Risk-prioritized contradiction loop for legacy singleton events."""
+    occurrence_id = job["payload"]["occurrence_id"]
+    occ = tx.execute(
+        """
+        SELECT o.id, o.event_id, o.starts_at, o.time_unknown, e.title, e.url
+        FROM occurrence o JOIN event e ON e.id = o.event_id
+        WHERE o.id = %s AND o.status = 'scheduled'
+          AND e.url ~ '^https?://'
+        """,
+        (occurrence_id,),
+    ).fetchone()
+    if occ is None:
+        return []
+
+    verdict = _risk_verify(tx, occ, job["id"])
+    if verdict.outcome == "supported":
+        qa_sid = _qa_source_id(tx)
+        tx.execute(
+            "UPDATE occurrence SET last_confirmed_at = now() WHERE id = %s",
+            (occ["id"],),
+        )
+        _qa_claim(
+            tx, qa_sid, occ, status=None,
+            raw_excerpt=(verdict.evidence or "")[:2000] or None,
+        )
+    elif verdict.outcome == "contradicted":
+        qa_sid = _qa_source_id(tx)
+        _qa_claim(
+            tx, qa_sid, occ, status="cancelled",
+            raw_excerpt=(verdict.evidence or "")[:2000] or None,
+        )
+        # Explicit contradiction is calibration evidence for every external
+        # source that supported this canonical event. Unverified absence is
+        # deliberately not a trust penalty.
+        tx.execute(
+            "UPDATE source SET trust = trust * (1 - %(a)s) "
+            "WHERE kind <> 'internal' AND id IN ("
+            "  SELECT DISTINCT c.source_id FROM identity i "
+            "  JOIN event_claim c ON c.fingerprint = i.fingerprint "
+            "  WHERE i.event_id = %(eid)s)",
+            {"a": config.QA_TRUST_ALPHA, "eid": occ["event_id"]},
+        )
+
+    detail = (
+        f"verify_event: risk={job['payload'].get('reason', 'unspecified')} "
+        f"outcome={verdict.outcome}"
+        + (
+            f" actual={verdict.actual_starts_at}"
+            if verdict.actual_starts_at else ""
+        )
+        + (
+            f" evidence={verdict.evidence[:240]!r}"
+            if verdict.evidence else ""
+        )
+    )
+    tx.execute(
+        "INSERT INTO crawl_log (job_id, finished_at, status, events_found, "
+        "detail) VALUES (%s, now(), 'ok', 1, %s)",
+        (job["id"], detail[:2000]),
+    )
+    return (
+        [{"kind": "resolve", "payload": {}}]
+        if verdict.outcome == "contradicted" else []
+    )
 
 
 def parity_audit(job: dict, tx) -> list[dict]:
@@ -793,7 +997,8 @@ def hydrate_event(job: dict, tx) -> list[dict]:
                e.organizer, e.price_min, e.venue_id, e.geo,
                v.name AS venue_name,
                o.starts_at, o.time_unknown,
-               i.fingerprint, c.source_id, s.url AS source_url
+               i.fingerprint, c.source_id, c.payload AS source_payload,
+               s.url AS source_url
         FROM event e
         JOIN occurrence o ON o.event_id = e.id
         JOIN identity i ON i.event_id = e.id
@@ -887,12 +1092,25 @@ def hydrate_event(job: dict, tx) -> list[dict]:
             merge_recovery(extra_payload, extra_raw)
 
     if payload:
+        source_payload = row.get("source_payload") or {}
         payload.setdefault(
-            "title", {"value": row["title"], "confidence": 0.9}
+            "title", {
+                "value": row["title"],
+                "confidence": (
+                    (source_payload.get("title") or {}).get("confidence")
+                    or 0.5
+                ),
+            },
         )
         payload.setdefault(
             "starts_at",
-            {"value": row["starts_at"].isoformat(), "confidence": 0.9},
+            {
+                "value": row["starts_at"].isoformat(),
+                "confidence": (
+                    (source_payload.get("starts_at") or {}).get("confidence")
+                    or 0.5
+                ),
+            },
         )
         tx.execute(
             "INSERT INTO event_claim (source_id, fingerprint, raw_excerpt, payload) "
@@ -1023,6 +1241,7 @@ HANDLERS = {
     "embed_tags": embed_tags,
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
     "discover": discover, "qa_check": qa_check,
+    "verify_event": verify_event,
     "hydrate_event": hydrate_event,
     "ground_venue": ground_venue,
     "parity_audit": parity_audit,

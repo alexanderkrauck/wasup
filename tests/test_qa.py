@@ -88,6 +88,71 @@ def test_cancelled_writes_claim_and_triggers_resolve(conn, monkeypatch):
     assert qa["trust"] == 0.9
 
 
+def test_risk_verification_contradiction_is_evidence_bearing(conn, monkeypatch):
+    sid, _, oid = _setup(conn)
+    verdict = handlers.RiskVerdict(
+        outcome="contradicted",
+        actual_starts_at="2026-04-12",
+        evidence="Sonntag, 12. April 2026",
+    )
+    monkeypatch.setattr(handlers, "_risk_verify", lambda *a: verdict)
+
+    out = handlers.verify_event({
+        "id": uuid.uuid4(),
+        "payload": {
+            "occurrence_id": str(oid),
+            "reason": "singleton_portal_cross_host",
+        },
+    }, conn)
+
+    assert out == [{"kind": "resolve", "payload": {}}]
+    claim = conn.execute(
+        "SELECT c.payload, c.raw_excerpt FROM event_claim c "
+        "JOIN source s ON s.id = c.source_id WHERE s.url = %s",
+        (handlers.QA_SOURCE_URL,),
+    ).fetchone()
+    assert claim["payload"]["status"]["value"] == "cancelled"
+    assert claim["raw_excerpt"] == "Sonntag, 12. April 2026"
+    trust = conn.execute(
+        "SELECT trust FROM source WHERE id = %s", (sid,),
+    ).fetchone()["trust"]
+    assert abs(trust - 0.72) < 1e-9
+    log = conn.execute(
+        "SELECT detail FROM crawl_log WHERE job_id IS NOT NULL"
+    ).fetchone()
+    assert "outcome=contradicted" in log["detail"]
+
+
+def test_risk_verification_unverified_never_mutates_trust_or_claims(
+    conn, monkeypatch,
+):
+    sid, _, oid = _setup(conn)
+    monkeypatch.setattr(
+        handlers, "_risk_verify",
+        lambda *a: handlers.RiskVerdict(
+            outcome="unverified", actual_starts_at=None, evidence=None,
+        ),
+    )
+
+    assert handlers.verify_event({
+        "id": uuid.uuid4(),
+        "payload": {"occurrence_id": str(oid), "reason": "risk"},
+    }, conn) == []
+
+    assert conn.execute(
+        "SELECT trust FROM source WHERE id = %s", (sid,),
+    ).fetchone()["trust"] == 0.8
+    assert conn.execute(
+        "SELECT count(*) AS n FROM source WHERE url = %s",
+        (handlers.QA_SOURCE_URL,),
+    ).fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT count(*) AS n FROM event_claim c JOIN source s "
+        "ON s.id = c.source_id WHERE s.url = %s",
+        (handlers.QA_SOURCE_URL,),
+    ).fetchone()["n"] == 0
+
+
 def test_projected_occurrences_are_not_sampled(conn, monkeypatch):
     _, eid, oid = _setup(conn)
     conn.execute("UPDATE occurrence SET projected = true WHERE id = %s", (oid,))

@@ -907,11 +907,17 @@ def _merge_status(claims: list[Claim]) -> dict:
 
 
 def _event_confidence(claims: list[Claim]) -> float:
-    """§7: independent confirmations compound, per distinct source."""
+    """§7: independent identity confirmations compound per distinct source.
+
+    Optional richness must not raise certainty that the event/date is real.
+    """
     by_source: dict = {}
     for c in claims:
+        identity_confidence = min(
+            c.confidence("title"), c.confidence("starts_at"),
+        )
         by_source[c.source_id] = max(
-            by_source.get(c.source_id, 0), c.trust * c.mean_confidence
+            by_source.get(c.source_id, 0), c.trust * identity_confidence
         )
     p_none = 1.0
     for v in by_source.values():

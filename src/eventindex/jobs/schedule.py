@@ -375,67 +375,73 @@ def enqueue_risk_verification(conn) -> int:
         return 0
     rows = conn.execute(
         """
-        SELECT DISTINCT ON (e.id)
-               e.id AS event_id, o.id AS occurrence_id, o.starts_at,
-               e.url AS event_url, e.expected_attendance,
-               src.url AS source_url, src.entity_type,
-               EXISTS (
-                   SELECT 1 FROM identity ei
-                   JOIN event_claim ec ON ec.fingerprint = ei.fingerprint
-                   JOIN source es ON es.id = ec.source_id
-                   WHERE ei.event_id = e.id AND es.kind <> 'internal'
-                     AND nullif(ec.raw_excerpt, '') IS NOT NULL
-               ) AS has_evidence
-        FROM event e
-        JOIN occurrence o ON o.event_id = e.id
-        JOIN LATERAL (
-            SELECT s.url, s.entity_type
-            FROM identity i
-            JOIN event_claim c ON c.fingerprint = i.fingerprint
-            JOIN source s ON s.id = c.source_id
-            WHERE i.event_id = e.id AND s.kind <> 'internal'
-            ORDER BY s.trust DESC, c.extracted_at DESC
-            LIMIT 1
-        ) src ON true
-        WHERE o.status = 'scheduled' AND o.starts_at >= now()
-          AND e.url ~ '^https?://'
-          AND (
-              SELECT count(DISTINCT c.source_id)
-              FROM identity i
-              JOIN event_claim c ON c.fingerprint = i.fingerprint
-              JOIN source s ON s.id = c.source_id
-              WHERE i.event_id = e.id AND s.kind <> 'internal'
-          ) = 1
-          AND (
-              (
-                  src.entity_type = 'portal'
-                  AND lower(substring(e.url from '^https?://([^/:]+)'))
-                      IS DISTINCT FROM
-                      lower(substring(src.url from '^https?://([^/:]+)'))
-              )
-              OR (
-                  e.expected_attendance >= 1000
-                  AND NOT EXISTS (
-                      SELECT 1 FROM identity ei
-                      JOIN event_claim ec
-                        ON ec.fingerprint = ei.fingerprint
-                      JOIN source es ON es.id = ec.source_id
-                      WHERE ei.event_id = e.id
-                        AND es.kind <> 'internal'
-                        AND nullif(ec.raw_excerpt, '') IS NOT NULL
+        WITH candidates AS (
+            SELECT DISTINCT ON (e.id)
+                   e.id AS event_id, o.id AS occurrence_id, o.starts_at,
+                   e.url AS event_url, e.expected_attendance,
+                   src.url AS source_url, src.entity_type,
+                   EXISTS (
+                       SELECT 1 FROM identity ei
+                       JOIN event_claim ec ON ec.fingerprint = ei.fingerprint
+                       JOIN source es ON es.id = ec.source_id
+                       WHERE ei.event_id = e.id AND es.kind <> 'internal'
+                         AND nullif(ec.raw_excerpt, '') IS NOT NULL
+                   ) AS has_evidence
+            FROM event e
+            JOIN occurrence o ON o.event_id = e.id
+            JOIN LATERAL (
+                SELECT s.url, s.entity_type
+                FROM identity i
+                JOIN event_claim c ON c.fingerprint = i.fingerprint
+                JOIN source s ON s.id = c.source_id
+                WHERE i.event_id = e.id AND s.kind <> 'internal'
+                ORDER BY s.trust DESC, c.extracted_at DESC
+                LIMIT 1
+            ) src ON true
+            WHERE o.status = 'scheduled' AND o.starts_at >= now()
+              AND e.url ~ '^https?://'
+              AND (
+                  SELECT count(DISTINCT c.source_id)
+                  FROM identity i
+                  JOIN event_claim c ON c.fingerprint = i.fingerprint
+                  JOIN source s ON s.id = c.source_id
+                  WHERE i.event_id = e.id AND s.kind <> 'internal'
+              ) = 1
+              AND (
+                  (
+                      src.entity_type = 'portal'
+                      AND lower(substring(e.url from '^https?://([^/:]+)'))
+                          IS DISTINCT FROM
+                          lower(substring(src.url from '^https?://([^/:]+)'))
+                  )
+                  OR (
+                      e.expected_attendance >= 1000
+                      AND NOT EXISTS (
+                          SELECT 1 FROM identity ei
+                          JOIN event_claim ec
+                            ON ec.fingerprint = ei.fingerprint
+                          JOIN source es ON es.id = ec.source_id
+                          WHERE ei.event_id = e.id
+                            AND es.kind <> 'internal'
+                            AND nullif(ec.raw_excerpt, '') IS NOT NULL
+                      )
                   )
               )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM jobs j
-              WHERE j.kind = 'verify_event'
-                AND j.payload->>'event_id' = e.id::text
-                AND (
-                    j.status IN ('pending', 'running')
-                    OR j.created_at > now() - interval '90 days'
-                )
-          )
-        ORDER BY e.id, o.starts_at
+              AND NOT EXISTS (
+                  SELECT 1 FROM jobs j
+                  WHERE j.kind = 'verify_event'
+                    AND j.payload->>'event_id' = e.id::text
+                    AND (
+                        j.status IN ('pending', 'running')
+                        OR j.created_at > now() - interval '90 days'
+                    )
+              )
+            ORDER BY e.id, o.starts_at
+        )
+        SELECT * FROM candidates
+        ORDER BY (entity_type = 'portal') DESC,
+                 expected_attendance DESC NULLS LAST,
+                 starts_at, event_id
         LIMIT %s
         """,
         (available * 8,),

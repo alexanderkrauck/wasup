@@ -176,6 +176,102 @@ def test_risk_verification_prioritizes_generic_singleton_signals(conn):
     assert enqueue_risk_verification(conn) == 0
 
 
+def test_risk_verification_admits_portal_identity_risk_before_scale_backlog(
+        conn, monkeypatch):
+    import uuid
+
+    from eventindex.jobs import schedule as schedule_module
+
+    monkeypatch.setattr(schedule_module, "VERIFY_BATCH", 1)
+    monkeypatch.setattr(schedule_module, "VERIFY_QUEUE_TARGET", 1)
+    official_source_id = conn.execute(
+        "INSERT INTO source (name, url, kind, entity_type, tier, trust) "
+        "VALUES ('Official', 'https://official.example/events', 'website', "
+        "'venue', 2, 0.8) RETURNING id"
+    ).fetchone()["id"]
+    portal_source_id = conn.execute(
+        "INSERT INTO source (name, url, kind, entity_type, tier, trust) "
+        "VALUES ('Portal', 'https://portal.example/events', 'website', "
+        "'portal', 2, 0.7) RETURNING id"
+    ).fetchone()["id"]
+
+    # More than the SQL preselection window of lower-sorting scale risks
+    # reproduces the production backlog that previously excluded portal risks.
+    for index in range(1, 10):
+        event_id = uuid.UUID(f"00000000-0000-0000-0000-{index:012d}")
+        fingerprint = f"large event {index}|future|"
+        conn.execute(
+            "INSERT INTO event (id, kind, title, url, confidence, status, "
+            "expected_attendance) VALUES (%s, 'one_off', %s, "
+            "'https://official.example/events', 0.6, 'confirmed', 3000)",
+            (event_id, f"Large Event {index}"),
+        )
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at) "
+            "VALUES (%s, now() + interval '30 days')",
+            (event_id,),
+        )
+        conn.execute(
+            "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+            (fingerprint, event_id),
+        )
+        conn.execute(
+            "INSERT INTO event_claim (source_id, fingerprint, payload) "
+            "VALUES (%s, %s, %s)",
+            (
+                official_source_id, fingerprint,
+                Jsonb({
+                    "title": {
+                        "value": f"Large Event {index}", "confidence": 0.8,
+                    },
+                    "starts_at": {
+                        "value": "2099-01-01", "confidence": 0.8,
+                    },
+                }),
+            ),
+        )
+
+    portal_event_id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    portal_fingerprint = "misplaced marathon|future|"
+    conn.execute(
+        "INSERT INTO event (id, kind, title, url, confidence, status) "
+        "VALUES (%s, 'one_off', 'Misplaced Marathon', "
+        "'https://race.example/marathon', 0.6, 'confirmed')",
+        (portal_event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '30 days')",
+        (portal_event_id,),
+    )
+    conn.execute(
+        "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+        (portal_fingerprint, portal_event_id),
+    )
+    conn.execute(
+        "INSERT INTO event_claim (source_id, fingerprint, payload) "
+        "VALUES (%s, %s, %s)",
+        (
+            portal_source_id, portal_fingerprint,
+            Jsonb({
+                "title": {
+                    "value": "Misplaced Marathon", "confidence": 0.8,
+                },
+                "starts_at": {
+                    "value": "2099-01-01", "confidence": 0.8,
+                },
+            }),
+        ),
+    )
+
+    assert schedule_module.enqueue_risk_verification(conn) == 1
+    job = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'verify_event'"
+    ).fetchone()
+    assert job["payload"]["event_id"] == str(portal_event_id)
+    assert job["payload"]["reason"] == "singleton_portal_cross_host"
+
+
 def test_enrichment_sweep_repairs_every_stale_future_event_once(conn):
     import uuid
 

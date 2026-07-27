@@ -321,6 +321,10 @@ def test_filter_defaults_cover_the_whole_model():
     assert set(FILTER_DEFAULTS) == set(SearchFilters.model_fields)
 
 
+def test_documented_any_radius_disables_geo_validation_gate():
+    assert _filters(radius="any").radius == "any"
+
+
 def test_registry_covers_every_soft_filter_field():
     soft = {"gender_split_min", "kid_friendly", "newcomer_friendly",
             "outdoor", "energy", "language", "age", "solo_friendly",

@@ -20,6 +20,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
+from eventindex.api.confidence import DEFAULT_MIN_CONFIDENCE
 from eventindex.api.search import FILTER_DEFAULTS, QueryBody, SearchFilters, VIENNA
 from eventindex.resolve.match import _trigrams
 
@@ -82,7 +83,11 @@ mcp = _StrictToolInputsFastMCP(
         "preferences retain unknowns and rank by stored confidence. "
         "Discovery defaults to effective event confidence >=0.4 after "
         "freshness decay; set filters.min_confidence=0 only when the user "
-        "explicitly asks for tentative or unverified hints. "
+        "explicitly asks for tentative or unverified hints. Exact entity "
+        "search is an index-presence lookup and may return lower-confidence "
+        "records labeled tentative; never reinterpret that label, or an "
+        "empty result whose diagnostics report tentative matches, as absent "
+        "from the index. "
         "Do not use Wasup for Vienna, restaurants, private-event creation, "
         "or invitations. Known commercial sex-service contexts are excluded "
         "unless a supported tool receives an explicit true opt-in. Null "
@@ -500,7 +505,38 @@ def search_events(
     selected = rows[:limit]
     diagnostics = None
     if not selected:
-        if parsed.max_price is not None or parsed.is_free:
+        tentative = []
+        if parsed.min_confidence > 0:
+            tentative_filters = parsed.model_copy(
+                update={"min_confidence": 0.0}
+            )
+            tentative_payload = api._run_filters(
+                tentative_filters,
+                limit=limit,
+                importance=importance,
+                sort=sort,
+                distinct=True,
+                exclude_sex_service_context=exclude_sex,
+            )
+            tentative = [
+                row for row in tentative_payload["occurrences"]
+                if _credible_ongoing(row)
+            ]
+        if tentative:
+            noun = "match exists" if len(tentative) == 1 else "matches exist"
+            diagnostics = SearchDiagnostics(
+                message=(
+                    f"No event meets min_confidence={parsed.min_confidence:g}, "
+                    f"but {len(tentative)} lower-confidence {noun} in the "
+                    "index."
+                ),
+                suggested_retry=(
+                    "Retry the same filters with min_confidence=0 to inspect "
+                    "the tentative records; present their confidence and do "
+                    "not describe them as absent from the index."
+                ),
+            )
+        elif parsed.max_price is not None or parsed.is_free:
             diagnostics = SearchDiagnostics(
                 message="No event matched every hard filter; unknown or "
                 "estimated prices cannot satisfy max_price/is_free.",
@@ -681,6 +717,11 @@ _SEARCH_HINT = (
     "and call search_events instead, e.g. filters={\"from_dt\": \"<ISO "
     "datetime>\", \"to_dt\": \"<ISO datetime>\", \"tags\": [\"concert\"]}."
 )
+_TENTATIVE_SEARCH_HINT = (
+    "Lower-confidence exact-name matches are included and explicitly labeled "
+    "tentative. Treat them as records present in the index, not as confirmed "
+    "recommendations; use fetch for their current confidence and provenance."
+)
 
 
 def _haystack_words(row: dict) -> list[str]:
@@ -688,7 +729,10 @@ def _haystack_words(row: dict) -> list[str]:
         row.get("title"), row.get("venue_name"), row.get("venue_address"),
         row.get("organizer"), " ".join(row.get("category") or []),
     ]))
-    return re.findall(r"[^\W\d_]+", text.lower())
+    # Entity names routinely contain meaningful digits (factory300, Ars
+    # Electronica 2026). Query lexemes preserve them, so deleting digits only
+    # from the indexed side turns exact entities into unrelated fuzzy words.
+    return re.findall(r"[^\W_]+", text.lower())
 
 
 def _token_similarity(token: str, word: str) -> float:
@@ -737,11 +781,25 @@ def _rank_rows(tokens: list[str], rows: list[dict]) -> list[dict]:
         return []
     weight = {i: math.log((pool + 1) / (df[i] + 1)) + 1 for i in live}
     min_gate_weight = _TOP_EVIDENCE_SHARE * max(weight.values())
+    exact_gate = {
+        i for i in live
+        if weight[i] >= min_gate_weight
+        and any(sims[i] == 1.0 for sims in sims_by_row)
+    }
     total = sum(weight.values())
     scored = []
     for row, sims in zip(rows, sims_by_row):
-        if not any(sims[i] >= _MIN_BEST_SIM and weight[i] >= min_gate_weight
-                   for i in live):
+        # Exact evidence for a rare query token dominates fuzzy containment.
+        # This keeps "factory300" on that entity instead of "Data Factory",
+        # while typo tolerance remains available when no exact row exists.
+        if exact_gate:
+            qualifies = any(sims[i] == 1.0 for i in exact_gate)
+        else:
+            qualifies = any(
+                sims[i] >= _MIN_BEST_SIM and weight[i] >= min_gate_weight
+                for i in live
+            )
+        if not qualifies:
             continue
         score = sum(weight[i] * sims[i] for i in live) / total
         scored.append((score, row))
@@ -779,17 +837,23 @@ def search(query: str) -> StandardSearchResponse:
     GOOD: search_events(filters={"from_dt": ..., "to_dt": ...,
           "tags": ["concert"]}) for dates, concepts, prices, or scale.
     GOOD: search(query="Posthof") - name lookup is what this tool is for.
-    Do not use for other cities, restaurants, private events, or
-    invitations. Known commercial sex-service events and past-start
-    occurrences are always excluded; fewer than ten results is preferable
-    to irrelevant filler."""
+    Exact entity lookup also inspects records below the ordinary discovery
+    confidence floor, labels them tentative, and returns their current
+    confidence. This prevents a temporarily stale source from being mistaken
+    for an entity absent from the index. Do not use for other cities,
+    restaurants, private events, or invitations. Known commercial sex-service
+    events and past-start occurrences are always excluded; fewer than ten
+    results is preferable to irrelevant filler."""
     from eventindex.api import app as api
 
     cutoff = datetime.now(VIENNA)
     tokens = _stemmed_tokens(query)
     if not tokens:
         return StandardSearchResponse(results=[], hint=_SEARCH_HINT)
-    filters = SearchFilters(**(FILTER_DEFAULTS | {"from_dt": cutoff.isoformat()}))
+    filters = SearchFilters(**(
+        FILTER_DEFAULTS
+        | {"from_dt": cutoff.isoformat(), "min_confidence": 0.0}
+    ))
     payload = api._run_filters(
         filters,
         # Standard connector search applies lexical title/venue/organizer
@@ -803,6 +867,7 @@ def search(query: str) -> StandardSearchResponse:
     )
     rows = [row for row in payload["occurrences"] if row["starts_at"] >= cutoff]
     results, seen = [], set()
+    has_tentative = False
     for row in _rank_rows(tokens, rows):
         semantic_key = (
             re.sub(r"\W+", "", row["title"].casefold()),
@@ -815,15 +880,27 @@ def search(query: str) -> StandardSearchResponse:
         when = f"{local:%a %Y-%m-%d}"
         when += " (time unknown)" if row["time_unknown"] else f" {local:%H:%M}"
         venue = f" @ {row['venue_name']}" if row.get("venue_name") else ""
+        confidence = float(row["confidence"])
+        tentative = confidence < DEFAULT_MIN_CONFIDENCE
+        has_tentative = has_tentative or tentative
+        confidence_label = (
+            f"; tentative confidence {confidence:.2f}" if tentative else ""
+        )
         results.append(SearchResultStub(
             id=str(row["event_id"]),
-            title=f"{row['title']} ({when}{venue})",
+            title=f"{row['title']} ({when}{venue}{confidence_label})",
             url=_event_url(row["event_id"]),
         ))
         if len(results) >= 10:
             break
     return StandardSearchResponse(
-        results=results, hint=None if results else _SEARCH_HINT)
+        results=results,
+        hint=(
+            _TENTATIVE_SEARCH_HINT if has_tentative
+            else None if results
+            else _SEARCH_HINT
+        ),
+    )
 
 
 def _format_estimates(estimates: EventEstimates) -> str | None:

@@ -481,6 +481,52 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
     assert filler_id not in phrase_ids  # fail-closed: no single-word filler
 
 
+def test_exact_entity_search_finds_and_labels_tentative_alphanumeric_names(
+        conn, client):
+    venue_id = conn.execute(
+        "INSERT INTO venue (name) VALUES ('factory300') RETURNING id"
+    ).fetchone()["id"]
+    factory_id = _add_event(
+        conn, "Community Lunch", starts=NOW + timedelta(days=2),
+        category=["community"],
+    )
+    conn.execute(
+        "UPDATE event SET venue_id = %s, organizer = 'factory300', "
+        "confidence = 0.3 WHERE id = %s",
+        (venue_id, factory_id),
+    )
+    data_factory_id = _add_event(
+        conn, "Microsoft Data Factory Training",
+        starts=NOW + timedelta(days=1),
+        category=["learning"],
+    )
+    conn.commit()
+
+    exact = _call(client, "search", {"query": "factory300"})
+    assert [uuid.UUID(row["id"]) for row in exact["results"]] == [factory_id]
+    assert "tentative confidence 0.30" in exact["results"][0]["title"]
+    assert "present in the index" in exact["hint"]
+    assert data_factory_id not in {
+        uuid.UUID(row["id"]) for row in exact["results"]
+    }
+
+    hidden = _call(client, "search_events", {
+        "filters": {"venue": "factory300"},
+        "limit": 10,
+    })
+    assert hidden["occurrences"] == []
+    assert "1 lower-confidence match exists" in hidden["diagnostics"]["message"]
+    assert "min_confidence=0" in hidden["diagnostics"]["suggested_retry"]
+
+    transparent = _call(client, "search_events", {
+        "filters": {"venue": "factory300", "min_confidence": 0},
+        "limit": 10,
+    })
+    assert [uuid.UUID(row["event_id"]) for row in transparent["occurrences"]] == [
+        factory_id
+    ]
+
+
 def test_search_events_places_in_window_starts_before_ongoing(conn, client):
     ongoing_id = uuid.uuid4()
     conn.execute(

@@ -56,7 +56,12 @@ DEFAULT_RADIUS_KM = 15
 def _radius_m(radius: str) -> float:
     import re as _re
 
-    m = _re.fullmatch(r"([\d.]+)\s*(km|m)?", radius.strip())
+    normalized = radius.strip().lower()
+    if normalized == "any":
+        # Validation calls this helper even though build_sql deliberately
+        # skips distance math for the documented geo-gate opt-out.
+        return float("inf")
+    m = _re.fullmatch(r"([\d.]+)\s*(km|m)?", normalized)
     if not m:
         raise ValueError("radius must look like '5km' or '500m' (or 'any')")
     return float(m.group(1)) * (1000 if (m.group(2) or "km") == "km" else 1)

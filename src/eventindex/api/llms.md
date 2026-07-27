@@ -35,7 +35,12 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
   cycles); `last_confirmed_at` says when a source last showed the event.
   Every search/list/feed defaults to effective confidence >=0.4. Set
   `min_confidence: 0` only when the user explicitly wants tentative or
-  unverified hints.
+  unverified hints. The MCP standard `search` tool is the narrow exception:
+  exact title/venue/organizer lookup also returns lower-confidence index
+  records, explicitly labeled `tentative confidence N`, so a temporarily
+  stale record is not misreported as absent. Empty structured MCP searches
+  report when the same filters have tentative matches and tell the caller to
+  retry with `min_confidence=0`.
 - **`provenance_summary`** lists the reporting sources; `GET /v1/events/{id}`
   returns sanitized event fields, occurrences, and source name/URL/timestamp
   provenance. Raw append-only claim payloads and evidence snippets are never

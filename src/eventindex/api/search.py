@@ -21,7 +21,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import (
-    BaseModel, ConfigDict, Field, create_model, field_validator,
+    BaseModel, ConfigDict, Field, PrivateAttr, create_model, field_validator,
     model_validator,
 )
 
@@ -89,6 +89,10 @@ REQUIRED_ATTRIBUTES = SOFT_ATTRIBUTES - {"price", "tags"}
 
 class SearchFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # MCP clients cache tool schemas. A private exact-anywhere term list lets
+    # the MCP adapter honor an older wire contract without reviving those
+    # fields in the REST/OpenAPI/current MCP surface.
+    _literal_any_terms: list[str] = PrivateAttr(default_factory=list)
     from_dt: str | None = Field(description="ISO datetime, start of wanted window")
     to_dt: str | None = Field(description="ISO datetime, end of wanted window")
     weekdays: list[Weekday] = Field(
@@ -547,6 +551,28 @@ def build_sql(
     if f.exclude_categories:
         conditions.append("NOT (e.category && %(not_cats)s)")
         params["not_cats"] = f.exclude_categories
+    if f._literal_any_terms:
+        params["literal_any_terms"] = [
+            f"%{term}%" for term in f._literal_any_terms
+        ]
+        conditions.append(
+            "("
+            "e.title ILIKE ANY(%(literal_any_terms)s) "
+            "OR coalesce(v.name ILIKE ANY(%(literal_any_terms)s), false) "
+            "OR coalesce(e.organizer ILIKE ANY(%(literal_any_terms)s), false) "
+            "OR coalesce(e.url ILIKE ANY(%(literal_any_terms)s), false) "
+            "OR EXISTS (SELECT 1 FROM event_tag exact_et "
+            "WHERE exact_et.event_id = e.id "
+            "AND exact_et.name ILIKE ANY(%(literal_any_terms)s)) "
+            "OR EXISTS (SELECT 1 FROM identity exact_i "
+            "JOIN event_claim exact_c "
+            "ON exact_c.fingerprint = exact_i.fingerprint "
+            "JOIN source exact_s ON exact_s.id = exact_c.source_id "
+            "WHERE exact_i.event_id = e.id AND exact_s.kind <> 'internal' "
+            "AND (exact_s.name ILIKE ANY(%(literal_any_terms)s) "
+            "OR exact_s.url ILIKE ANY(%(literal_any_terms)s)))"
+            ")"
+        )
     for i, term in enumerate(f.exclude_terms):
         key = f"not_term_{i}"
         # coalesce: an unenriched event (inferred IS NULL) must be judged by

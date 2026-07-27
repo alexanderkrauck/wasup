@@ -107,6 +107,9 @@ def test_tool_metadata_teaches_one_call_composition_and_hard_soft_intent(client)
     assert "one call" in search_description.lower()
     assert "preferred_max_price" in search_description
     assert "max_price" in search_description
+    current_schema = json.dumps(tools["search_events"]["inputSchema"])
+    assert "include_terms" not in current_schema
+    assert "vibe_terms" not in current_schema
     calendar_description = tools["get_calendar_link"]["description"]
     assert "same `filters` object" in calendar_description
     assert "required_attributes" in calendar_description
@@ -525,6 +528,15 @@ def test_exact_entity_search_finds_and_labels_tentative_alphanumeric_names(
     assert [uuid.UUID(row["event_id"]) for row in transparent["occurrences"]] == [
         factory_id
     ]
+
+    cached_client = _call(client, "search_events", {
+        "filters": {"include_terms": ["factory300"]},
+        "limit": 10,
+    })
+    assert cached_client["parsed_filters"]["min_confidence"] == 0
+    assert [
+        uuid.UUID(row["event_id"]) for row in cached_client["occurrences"]
+    ] == [factory_id]
 
 
 def test_search_events_places_in_window_starts_before_ongoing(conn, client):

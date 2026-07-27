@@ -19,6 +19,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 from eventindex.api.confidence import DEFAULT_MIN_CONFIDENCE
 from eventindex.api.search import FILTER_DEFAULTS, QueryBody, SearchFilters, VIENNA
@@ -61,6 +62,18 @@ class _StrictToolInputsFastMCP(FastMCP):
                     "fields inside their documented object."
                 )
         return await super().call_tool(name, arguments)
+
+
+class MCPQueryBody(QueryBody):
+    """Accept the cached pre-2026-07-24 connector wire shape invisibly.
+
+    Current clients see only QueryBody's scoped literal filters and unified
+    `tags`. Already-installed clients may still send these two retired names;
+    hiding them from JSON Schema prevents new callers from learning them.
+    """
+
+    include_terms: SkipJsonSchema[list[str]] = Field(default_factory=list)
+    vibe_terms: SkipJsonSchema[list[str]] = Field(default_factory=list)
 
 
 mcp = _StrictToolInputsFastMCP(
@@ -423,22 +436,41 @@ def _event_detail(event_id: str, *, include_sex: bool) -> EventDetailResponse:
     )
 
 
-def _validated_filters(body: QueryBody) -> tuple[SearchFilters, dict[str, float]]:
+def _validated_filters(
+    body: QueryBody | MCPQueryBody,
+) -> tuple[SearchFilters, dict[str, float]]:
     from eventindex.api.search import SOFT_ATTRIBUTES
 
     values = body.model_dump()
     importance = values.pop("importance")
+    include_terms = values.pop("include_terms", [])
+    retired_vibe_terms = values.pop("vibe_terms", [])
+    if retired_vibe_terms and not values["tags"]:
+        # One tag collection: this is only a retired input name, never a
+        # second tag type or storage path.
+        values["tags"] = retired_vibe_terms
+    if include_terms:
+        # The retired field was an exact index-presence lookup. Keep it
+        # transparent like standard search instead of allowing a stale client
+        # to conclude that lower-confidence records do not exist.
+        values["min_confidence"] = 0.0
     if not all(
         name in SOFT_ATTRIBUTES and 0 <= weight <= 1
         for name, weight in importance.items()
     ):
         raise ValueError("importance must use known attributes with weights 0..1")
-    return SearchFilters(**values), importance
+    parsed = SearchFilters(**values)
+    parsed._literal_any_terms = [
+        cleaned
+        for term in include_terms
+        if (cleaned := " ".join(term.split())[:120])
+    ]
+    return parsed, importance
 
 
 @mcp.tool(title="Search Linz events", annotations=_READ_ONLY)
 def search_events(
-    filters: QueryBody | None = None,
+    filters: MCPQueryBody | None = None,
     limit: Annotated[int, Field(ge=1, le=100)] = 20,
     sort: Literal["relevance", "starts_at"] = "relevance",
 ) -> SearchEventsResponse:

@@ -430,6 +430,36 @@ def test_numeric_session_variants_never_auto_merge_and_use_fresh_judgment(
     assert verdict["pair_key"] != legacy_key
 
 
+def test_exact_title_time_and_grounded_venue_override_stale_group_verdict(
+    monkeypatch,
+):
+    """Venue recovery is stronger than a cached venue-less split.
+
+    This is intentionally narrower than title/time alone: simultaneous
+    same-name sessions in different rooms remain distinct, as do numeric
+    course/session/showtime variants because their normalized titles differ.
+    """
+    from types import SimpleNamespace
+
+    venue_id = uuid.uuid4()
+    starts_at = datetime(2026, 8, 5, 13, 30, tzinfo=timezone.utc)
+    profile = {
+        "rep": SimpleNamespace(title="Highlights Tour (EN)"),
+        "ntitle": "highlights tour en",
+        "tokens": {"highlights", "tour"},
+        "venues": {venue_id},
+        "starts": {starts_at},
+        "days": {starts_at.date()},
+    }
+    recovered = profile | {"venues": {venue_id, uuid.uuid4()}}
+    monkeypatch.setattr(
+        rb.llm, "complete",
+        lambda *a, **k: pytest.fail("strong current evidence needs no LLM"),
+    )
+
+    assert rb._adjudicate_group_pair(None, profile, recovered) is True
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences

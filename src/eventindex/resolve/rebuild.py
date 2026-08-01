@@ -585,6 +585,7 @@ def _group_profile(g: dict) -> dict:
         "ntitle": ntitle,
         "tokens": {t for t in ntitle.split() if len(t) > 3 and not t.isdigit()},
         "venues": {c.venue_id for c in g["claims"] if c.venue_id},
+        "starts": {c.starts_at for c in g["claims"]},
         "days": {c.starts_at.astimezone(VIENNA).date() for c in g["claims"]},
     }
 
@@ -614,6 +615,15 @@ def _group_pair_candidate(a: dict, b: dict) -> bool:
 
 
 def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
+    # A prior venue-less series judgment can become stale after later claims
+    # ground both groups to the same venue. Exact title + exact occurrence +
+    # shared resolved venue is stronger current evidence than that cache. It
+    # deliberately does not apply to numeric title variants or simultaneous
+    # same-name sessions in different rooms.
+    if (a["ntitle"] == b["ntitle"]
+            and a["starts"] & b["starts"]
+            and a["venues"] & b["venues"]):
+        return True
     ka = f'{a["ntitle"]}|{"|".join(sorted(map(str, a["venues"])))}'
     kb = f'{b["ntitle"]}|{"|".join(sorted(map(str, b["venues"])))}'
     if ka == kb:

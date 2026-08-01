@@ -464,6 +464,33 @@ def test_exact_title_time_and_grounded_venue_override_stale_group_verdict(
     assert rb._adjudicate_group_pair(None, profile, recovered) is True
 
 
+def test_exact_title_time_with_unknown_venue_rejoins_grounded_twin(
+    monkeypatch,
+):
+    """A missing venue is unknown and cannot sustain a cached split."""
+    from types import SimpleNamespace
+
+    venue_id = uuid.uuid4()
+    starts_at = datetime(2026, 8, 6, 13, 0, tzinfo=timezone.utc)
+    base = {
+        "rep": SimpleNamespace(title="Yu-Gi-Oh! Trading-Treffen"),
+        "ntitle": "yu gi oh trading treffen",
+        "tokens": {"trading", "treffen"},
+        "starts": {starts_at},
+        "days": {starts_at.date()},
+        "exact_venue_ids": set(),
+        "exact_venue_names": set(),
+    }
+    unknown = base | {"venues": set()}
+    grounded = base | {"venues": {venue_id}}
+    monkeypatch.setattr(
+        rb.llm, "complete",
+        lambda *a, **k: pytest.fail("unknown venue cannot contradict the twin"),
+    )
+
+    assert rb._adjudicate_group_pair(None, unknown, grounded) is True
+
+
 def test_exact_nonrepresentative_claim_rejoins_split_series(monkeypatch):
     """A shared claim is decisive even when each group's representative differs."""
     from types import SimpleNamespace

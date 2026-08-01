@@ -642,13 +642,15 @@ def _group_pair_candidate(a: dict, b: dict) -> bool:
 def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
     # A prior venue-less series judgment can become stale after later claims
     # ground both groups to the same venue. Exact title + exact occurrence +
-    # shared resolved venue is stronger current evidence than that cache. It
-    # deliberately does not apply to numeric title variants or simultaneous
-    # same-name sessions in different rooms.
+    # shared/compatible venue evidence is stronger current evidence than that
+    # cache. A missing venue is unknown, not a contradiction; two different
+    # resolved venues still protect simultaneous same-name sessions. Numeric
+    # title variants do not share the confidence-weighted normalized title.
     if (_has_exact_claim_overlap(a, b)
             or (a["ntitle"] == b["ntitle"]
             and a["starts"] & b["starts"]
-            and a["venues"] & b["venues"])):
+            and (a["venues"] & b["venues"]
+                 or not a["venues"] or not b["venues"]))):
         return True
     ka = f'{a["ntitle"]}|{"|".join(sorted(map(str, a["venues"])))}'
     kb = f'{b["ntitle"]}|{"|".join(sorted(map(str, b["venues"])))}'

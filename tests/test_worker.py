@@ -41,12 +41,12 @@ def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
     assert productive["kind"] == "crawl"
     assert productive["payload"]["source_id"] == str(productive_source)
     assert claim_next(conn)["kind"] == "hydrate_event"
-    assert claim_next(conn)["kind"] == "hydrate_event"
     assert claim_next(conn)["kind"] == "enrich"
     claimed = claim_next(conn)
     assert claimed["kind"] == "enrich"
     assert claimed["payload"]["next_start"].startswith("2099-02")
     assert claim_next(conn)["kind"] == "embed_tags"
+    assert claim_next(conn)["kind"] == "hydrate_event"
     assert claim_next(conn)["kind"] == "crawl"
     conn.execute(
         "UPDATE jobs SET status='done' WHERE id=%s", (productive["id"],)

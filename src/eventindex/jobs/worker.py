@@ -75,6 +75,13 @@ def claim_next(conn) -> dict | None:
                     -- starves already-overdue public fact recovery forever.
                     WHEN 'hydrate_event' THEN
                         CASE WHEN created_at < now() - interval '24 hours'
+                                  AND NOT EXISTS (
+                            -- One hydration lane satisfies the recovery SLA
+                            -- without starving search-readiness enrichment.
+                            SELECT 1 FROM jobs active
+                            WHERE active.kind = 'hydrate_event'
+                              AND active.status = 'running'
+                        )
                              THEN 2 ELSE 7 END
                     WHEN 'enrich' THEN 3
                     WHEN 'embed_tags' THEN 4

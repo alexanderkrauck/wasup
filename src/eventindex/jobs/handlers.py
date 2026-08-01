@@ -260,9 +260,17 @@ def resolve(job: dict, tx) -> list[dict]:
     stats = rebuild(tx)
     if stats.get("skipped"):
         # the concurrent rebuild covers older claims but not ours: retry
-        # once it released the lock
+        # once it released the lock. One pending resolve is sufficient for
+        # every claim committed while that rebuild runs; lock losers must not
+        # create an unbounded retry fan-out.
         from datetime import datetime, timedelta, timezone
 
+        pending = tx.execute(
+            "SELECT 1 FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+            "LIMIT 1"
+        ).fetchone()
+        if pending:
+            return []
         return [{"kind": "resolve", "payload": {},
                  "run_after": datetime.now(timezone.utc) + timedelta(minutes=15)}]
     pending = stats.pop("enrich_pending", [])
@@ -274,6 +282,23 @@ def resolve(job: dict, tx) -> list[dict]:
          f"{stats['occurrences']} occurrences, {stats['venues_created']} new venues, "
          f"{len(pending)} events awaiting enrichment"),
     )
+    # Collapse all pre-existing requests to one newest follow-up. That one is
+    # deliberately retained: claims may have committed after _load_claims()
+    # while this long rebuild was running, and one later rebuild publishes
+    # all of them. Without coalescing, every lock loser becomes a 50-minute
+    # full rebuild once the advisory lock is free.
+    pending_resolves = tx.execute(
+        "SELECT id FROM jobs WHERE kind = 'resolve' AND status = 'pending' "
+        "ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+    if len(pending_resolves) > 1:
+        keep = pending_resolves[0]["id"]
+        tx.execute(
+            "UPDATE jobs SET status = 'done', finished_at = now(), "
+            "last_error = %s WHERE kind = 'resolve' AND status = 'pending' "
+            "AND id <> %s",
+            (f"superseded by atomic rebuild {job['id']}", keep),
+        )
     already_queued = {
         row["event_id"]
         for row in tx.execute(

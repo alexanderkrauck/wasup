@@ -11,9 +11,15 @@ def test_claim_on_empty_queue(conn):
 
 
 def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
+    productive_source = conn.execute(
+        "INSERT INTO source (name, url, kind, tier, trust, yield_ema) VALUES "
+        "('productive', 'https://productive.example', 'website', 2, 0.8, 20) "
+        "RETURNING id"
+    ).fetchone()["id"]
     with conn.transaction():
         conn.execute(
             "INSERT INTO jobs (kind, payload, run_after, created_at) VALUES "
+            "('resolve', '{}', now(), now()), "
             "('crawl', '{}', now() - interval '1 day', now()), "
             "('hydrate_event', '{}', now() - interval '3 days', "
             " now() - interval '3 days'), "
@@ -21,7 +27,16 @@ def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
             "('enrich', '{\"next_start\":\"2099-02-01T00:00:00Z\"}', now(), now()), "
             "('enrich', '{\"next_start\":\"2099-01-01T00:00:00Z\"}', now(), now())"
         )
+        conn.execute(
+            "INSERT INTO jobs (kind, payload, run_after, created_at) VALUES "
+            "('crawl', jsonb_build_object('source_id', %s::text), now(), now())",
+            (str(productive_source),),
+        )
 
+    assert claim_next(conn)["kind"] == "resolve"
+    productive = claim_next(conn)
+    assert productive["kind"] == "crawl"
+    assert productive["payload"]["source_id"] == str(productive_source)
     assert claim_next(conn)["kind"] == "hydrate_event"
     assert claim_next(conn)["kind"] == "enrich"
     claimed = claim_next(conn)
@@ -226,6 +241,49 @@ def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeyp
     jobs = handlers.resolve({"id": job_id, "payload": {}}, conn)
     assert [job["kind"] for job in jobs].count("enrich") == 300
     assert jobs[-1] == {"kind": "embed_tags", "payload": {}}
+
+
+def test_lock_losing_resolve_reuses_existing_pending_followup(conn, monkeypatch):
+    monkeypatch.setattr(
+        handlers, "rebuild", lambda tx: {"skipped": "another rebuild is running"}
+    )
+    conn.execute("INSERT INTO jobs (kind) VALUES ('resolve')")
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind, status) VALUES ('resolve', 'running') RETURNING id"
+    ).fetchone()["id"]
+
+    assert handlers.resolve({"id": job_id, "payload": {}}, conn) == []
+    assert conn.execute(
+        "SELECT count(*) n FROM jobs WHERE kind='resolve' AND status='pending'"
+    ).fetchone()["n"] == 1
+
+
+def test_successful_resolve_collapses_pending_fanout_to_one(conn, monkeypatch):
+    monkeypatch.setattr(
+        handlers,
+        "rebuild",
+        lambda tx: {
+            "claims": 1, "events": 1, "occurrences": 1,
+            "venues_created": 0, "enrich_pending": [],
+        },
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind) VALUES ('resolve'), ('resolve'), ('resolve')"
+    )
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind, status) VALUES ('resolve', 'running') RETURNING id"
+    ).fetchone()["id"]
+
+    handlers.resolve({"id": job_id, "payload": {}}, conn)
+
+    assert conn.execute(
+        "SELECT count(*) n FROM jobs WHERE kind='resolve' AND status='pending'"
+    ).fetchone()["n"] == 1
+    superseded = conn.execute(
+        "SELECT count(*) n FROM jobs WHERE kind='resolve' AND status='done' "
+        "AND last_error LIKE 'superseded by atomic rebuild %'"
+    ).fetchone()["n"]
+    assert superseded == 2
 
 
 def test_followup_resolve_does_not_duplicate_enrichment_jobs(conn, monkeypatch):

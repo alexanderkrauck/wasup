@@ -50,25 +50,41 @@ def claim_next(conn) -> dict | None:
                 -- crawl/hydration backlog cannot publish tagless events for
                 -- days. This is kind-generic, never source/site-specific.
                 ORDER BY CASE kind
+                    -- Canon publication coalesces duplicate resolve requests;
+                    -- one due atomic rebuild must not sit behind thousands of
+                    -- derived jobs that only become useful after publication.
+                    WHEN 'resolve' THEN 0
+                    -- A monthly reset must let proven acquisition sources
+                    -- refresh before staleness decay hides their otherwise
+                    -- healthy events.  yield_ema is the existing generic
+                    -- productivity signal; this never names a source/site.
+                    WHEN 'crawl' THEN CASE WHEN EXISTS (
+                        SELECT 1 FROM source s
+                        WHERE s.id::text = jobs.payload->>'source_id'
+                          AND s.yield_ema >= %s
+                    ) THEN 1 ELSE 8 END
                     -- Hydration has an explicit <24h publication SLA. A
                     -- schema-wide rebuild can enqueue thousands of enrich
                     -- jobs at once; fixed enrichment priority otherwise
                     -- starves already-overdue public fact recovery forever.
                     WHEN 'hydrate_event' THEN
                         CASE WHEN created_at < now() - interval '24 hours'
-                             THEN 0 ELSE 6 END
-                    WHEN 'enrich' THEN 1
-                    WHEN 'embed_tags' THEN 2
+                             THEN 2 ELSE 7 END
+                    WHEN 'enrich' THEN 3
+                    WHEN 'embed_tags' THEN 4
                     -- A due resolve publishes recovered claims in batches.
-                    WHEN 'resolve' THEN 3
-                    WHEN 'verify_event' THEN 4
+                    WHEN 'verify_event' THEN 5
                     -- Grounding is admitted in small scheduler batches, so
                     -- giving it the first recovery slot cannot starve the
                     -- much larger hydration backlog; workers drain the batch
                     -- and spend the rest of the tick on event facts.
-                    WHEN 'ground_venue' THEN 5
-                    ELSE 7
+                    WHEN 'ground_venue' THEN 6
+                    ELSE 8
                 END,
+                CASE WHEN kind = 'crawl' THEN (
+                    SELECT -s.yield_ema FROM source s
+                    WHERE s.id::text = jobs.payload->>'source_id'
+                ) END,
                 CASE WHEN kind = 'enrich' THEN
                     coalesce(
                         (payload->>'next_start')::timestamptz,
@@ -83,7 +99,8 @@ def claim_next(conn) -> dict | None:
             SET status = 'running', started_at = now(), attempts = attempts + 1
             FROM next WHERE j.id = next.id
             RETURNING j.*
-            """
+            """,
+            (config.COMPLETENESS_MIN_YIELD,),
         ).fetchone()
 
 

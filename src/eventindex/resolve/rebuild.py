@@ -579,7 +579,11 @@ def _digit_variant(left: str, right: str) -> bool:
 
 def _group_profile(g: dict) -> dict:
     rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
-    ntitle = normalize_title(rep.title)
+    # Group comparison must use the same confidence-weighted title that canon
+    # will publish. The highest-trust representative can carry a shorter alias
+    # even when both split groups deterministically select the same title.
+    values, _ = _merge_fields(g)
+    ntitle = normalize_title(values.get("title") or rep.title)
     exact_venue_ids = set()
     exact_venue_names = set()
     for claim in g["claims"]:

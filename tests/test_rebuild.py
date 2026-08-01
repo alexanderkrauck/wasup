@@ -497,6 +497,42 @@ def test_exact_nonrepresentative_claim_rejoins_split_series(monkeypatch):
     assert rb._adjudicate_group_pair(None, left, right) is True
 
 
+def test_group_profile_uses_the_title_canon_will_publish():
+    """Representative aliases must not hide identical canonical titles."""
+    from types import SimpleNamespace
+
+    venue_id = uuid.uuid4()
+    starts_at = datetime(2026, 10, 13, 17, 30, tzinfo=timezone.utc)
+
+    class ProfileClaim(SimpleNamespace):
+        def value(self, key):
+            return self.fields.get(key)
+
+        def confidence(self, key):
+            return self.confidences.get(key, 0.0)
+
+    alias = ProfileClaim(
+        id=uuid.uuid4(), trust=0.9, title="Lotterbuben", starts_at=starts_at,
+        venue_id=venue_id, fields={"title": "Lotterbuben"},
+        confidences={"title": 0.5},
+    )
+    canonical = ProfileClaim(
+        id=uuid.uuid4(), trust=0.8,
+        title="GASTVERANSTALTUNG Gernot & Stipsits Lotterbuben",
+        starts_at=starts_at, venue_id=venue_id,
+        fields={
+            "title": "GASTVERANSTALTUNG Gernot & Stipsits Lotterbuben",
+            "venue_name": "Brucknerhaus Linz",
+        },
+        confidences={"title": 0.9},
+    )
+
+    profile = rb._group_profile({"claims": [alias, canonical]})
+
+    assert profile["rep"] is alias
+    assert profile["ntitle"] == "gastveranstaltung gernot stipsits lotterbuben"
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences

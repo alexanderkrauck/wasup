@@ -66,7 +66,7 @@ def claim_next(conn) -> dict | None:
                     -- productivity signal; this never names a source/site.
                     WHEN 'crawl' THEN CASE WHEN EXISTS (
                         SELECT 1 FROM source s
-                        WHERE s.id::text = jobs.payload->>'source_id'
+                        WHERE s.id = (jobs.payload->>'source_id')::uuid
                           AND s.yield_ema >= %s
                     ) AND NOT EXISTS (
                         -- Reserve one acquisition lane while leaving the
@@ -102,7 +102,7 @@ def claim_next(conn) -> dict | None:
                 END,
                 CASE WHEN kind = 'crawl' THEN (
                     SELECT -s.yield_ema FROM source s
-                    WHERE s.id::text = jobs.payload->>'source_id'
+                    WHERE s.id = (jobs.payload->>'source_id')::uuid
                 ) END,
                 -- Freshly changed canon should become fully searchable
                 -- before old cache-miss backlog.  Within the same rebuild
@@ -110,7 +110,7 @@ def claim_next(conn) -> dict | None:
                 -- near-term ordering below.
                 CASE WHEN kind = 'enrich' THEN (
                     SELECT e.updated_at FROM event e
-                    WHERE e.id::text = jobs.payload->>'event_id'
+                    WHERE e.id = (jobs.payload->>'event_id')::uuid
                 ) END DESC NULLS LAST,
                 CASE WHEN kind = 'enrich' THEN
                     coalesce(

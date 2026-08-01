@@ -21,7 +21,9 @@ def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
             "INSERT INTO jobs (kind, payload, run_after, created_at) VALUES "
             "('resolve', '{}', now(), now()), "
             "('crawl', '{}', now() - interval '1 day', now()), "
-            "('hydrate_event', '{}', now() - interval '3 days', "
+            "('hydrate_event', '{\"row\":1}', now() - interval '3 days', "
+            " now() - interval '3 days'), "
+            "('hydrate_event', '{\"row\":2}', now() - interval '3 days', "
             " now() - interval '3 days'), "
             "('embed_tags', '{}', now() - interval '2 days', now()), "
             "('enrich', '{\"next_start\":\"2099-02-01T00:00:00Z\"}', now(), now()), "
@@ -29,8 +31,9 @@ def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
         )
         conn.execute(
             "INSERT INTO jobs (kind, payload, run_after, created_at) VALUES "
+            "('crawl', jsonb_build_object('source_id', %s::text), now(), now()), "
             "('crawl', jsonb_build_object('source_id', %s::text), now(), now())",
-            (str(productive_source),),
+            (str(productive_source), str(productive_source)),
         )
 
     assert claim_next(conn)["kind"] == "resolve"
@@ -38,11 +41,16 @@ def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
     assert productive["kind"] == "crawl"
     assert productive["payload"]["source_id"] == str(productive_source)
     assert claim_next(conn)["kind"] == "hydrate_event"
+    assert claim_next(conn)["kind"] == "hydrate_event"
     assert claim_next(conn)["kind"] == "enrich"
     claimed = claim_next(conn)
     assert claimed["kind"] == "enrich"
     assert claimed["payload"]["next_start"].startswith("2099-02")
     assert claim_next(conn)["kind"] == "embed_tags"
+    assert claim_next(conn)["kind"] == "crawl"
+    conn.execute(
+        "UPDATE jobs SET status='done' WHERE id=%s", (productive["id"],)
+    )
     assert claim_next(conn)["kind"] == "crawl"
 
 

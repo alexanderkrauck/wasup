@@ -62,6 +62,12 @@ def claim_next(conn) -> dict | None:
                         SELECT 1 FROM source s
                         WHERE s.id::text = jobs.payload->>'source_id'
                           AND s.yield_ema >= %s
+                    ) AND NOT EXISTS (
+                        -- Reserve one acquisition lane while leaving the
+                        -- other workers free to drain overdue hydration.
+                        SELECT 1 FROM jobs active
+                        WHERE active.kind = 'crawl'
+                          AND active.status = 'running'
                     ) THEN 1 ELSE 8 END
                     -- Hydration has an explicit <24h publication SLA. A
                     -- schema-wide rebuild can enqueue thousands of enrich

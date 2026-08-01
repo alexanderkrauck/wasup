@@ -580,6 +580,15 @@ def _digit_variant(left: str, right: str) -> bool:
 def _group_profile(g: dict) -> dict:
     rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
     ntitle = normalize_title(rep.title)
+    exact_venue_ids = set()
+    exact_venue_names = set()
+    for claim in g["claims"]:
+        title_start = (normalize_title(claim.title), claim.starts_at)
+        if claim.venue_id:
+            exact_venue_ids.add((*title_start, claim.venue_id))
+        venue_name = normalize_title(claim.value("venue_name") or "")
+        if venue_name:
+            exact_venue_names.add((*title_start, venue_name))
     return {
         "rep": rep,
         "ntitle": ntitle,
@@ -587,11 +596,23 @@ def _group_profile(g: dict) -> dict:
         "venues": {c.venue_id for c in g["claims"] if c.venue_id},
         "starts": {c.starts_at for c in g["claims"]},
         "days": {c.starts_at.astimezone(VIENNA).date() for c in g["claims"]},
+        "exact_venue_ids": exact_venue_ids,
+        "exact_venue_names": exact_venue_names,
     }
+
+
+def _has_exact_claim_overlap(a: dict, b: dict) -> bool:
+    """Whether both groups contain the same grounded occurrence claim."""
+    return bool(
+        a.get("exact_venue_ids", set()) & b.get("exact_venue_ids", set())
+        or a.get("exact_venue_names", set()) & b.get("exact_venue_names", set())
+    )
 
 
 def _group_pair_candidate(a: dict, b: dict) -> bool:
     """Mechanical compatibility only - the judgment is the adjudicator's."""
+    if _has_exact_claim_overlap(a, b):
+        return True
     if not a["tokens"] or not b["tokens"]:
         return False
     inter = len(a["tokens"] & b["tokens"])
@@ -620,9 +641,10 @@ def _adjudicate_group_pair(tx, a: dict, b: dict) -> bool:
     # shared resolved venue is stronger current evidence than that cache. It
     # deliberately does not apply to numeric title variants or simultaneous
     # same-name sessions in different rooms.
-    if (a["ntitle"] == b["ntitle"]
+    if (_has_exact_claim_overlap(a, b)
+            or (a["ntitle"] == b["ntitle"]
             and a["starts"] & b["starts"]
-            and a["venues"] & b["venues"]):
+            and a["venues"] & b["venues"])):
         return True
     ka = f'{a["ntitle"]}|{"|".join(sorted(map(str, a["venues"])))}'
     kb = f'{b["ntitle"]}|{"|".join(sorted(map(str, b["venues"])))}'

@@ -450,6 +450,10 @@ def test_exact_title_time_and_grounded_venue_override_stale_group_verdict(
         "venues": {venue_id},
         "starts": {starts_at},
         "days": {starts_at.date()},
+        "exact_venue_ids": {
+            ("highlights tour en", starts_at, venue_id),
+        },
+        "exact_venue_names": set(),
     }
     recovered = profile | {"venues": {venue_id, uuid.uuid4()}}
     monkeypatch.setattr(
@@ -458,6 +462,39 @@ def test_exact_title_time_and_grounded_venue_override_stale_group_verdict(
     )
 
     assert rb._adjudicate_group_pair(None, profile, recovered) is True
+
+
+def test_exact_nonrepresentative_claim_rejoins_split_series(monkeypatch):
+    """A shared claim is decisive even when each group's representative differs."""
+    from types import SimpleNamespace
+
+    starts_at = datetime(2026, 10, 13, 17, 30, tzinfo=timezone.utc)
+    shared = {
+        ("gastveranstaltung lotterbuben", starts_at, "brucknerhaus linz"),
+    }
+    left = {
+        "rep": SimpleNamespace(title="Lotterbuben"),
+        "ntitle": "lotterbuben",
+        "tokens": {"lotterbuben"},
+        "venues": set(),
+        "starts": {starts_at},
+        "days": {starts_at.date()},
+        "exact_venue_ids": set(),
+        "exact_venue_names": shared,
+    }
+    right = left | {
+        "rep": SimpleNamespace(title="Gastveranstaltung Gernot & Stipsits"),
+        "ntitle": "gastveranstaltung gernot stipsits",
+        "tokens": {"gastveranstaltung", "gernot", "stipsits"},
+        "exact_venue_names": set(shared),
+    }
+    monkeypatch.setattr(
+        rb.llm, "complete",
+        lambda *a, **k: pytest.fail("exact claim overlap needs no LLM"),
+    )
+
+    assert rb._group_pair_candidate(left, right) is True
+    assert rb._adjudicate_group_pair(None, left, right) is True
 
 
 def test_far_future_claims_never_reach_canon(conn):

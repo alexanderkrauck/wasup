@@ -560,6 +560,41 @@ def test_group_profile_uses_the_title_canon_will_publish():
     assert profile["ntitle"] == "gastveranstaltung gernot stipsits lotterbuben"
 
 
+def test_projected_public_twin_merges_only_with_compatible_venue(
+    monkeypatch,
+):
+    """Projected output catches twins but keeps known different rooms apart."""
+    from types import SimpleNamespace
+
+    starts_at = NOW + timedelta(days=10)
+    known_venue = uuid.uuid4()
+
+    def claim(title, venue_id=None):
+        return SimpleNamespace(id=uuid.uuid4(), title=title, venue_id=venue_id)
+
+    groups = [
+        {"key": "a", "claims": [claim("Trading-Treffen")],
+         "recurrence": None, "rrule_raw": None},
+        {"key": "b", "claims": [claim("Trading-Treffen", known_venue)],
+         "recurrence": None, "rrule_raw": None},
+        {"key": "c", "claims": [claim("Trading-Treffen", uuid.uuid4())],
+         "recurrence": None, "rrule_raw": None},
+    ]
+    monkeypatch.setattr(
+        rb, "_occurrences_for",
+        lambda tx, group, holidays, now: ([(starts_at, None)], None, set()),
+    )
+    monkeypatch.setattr(
+        rb, "_merge_fields",
+        lambda group: ({"title": "Trading-Treffen"}, {}),
+    )
+
+    merged = rb._merge_published_twins(None, groups, None, NOW)
+
+    assert len(merged) == 2
+    assert sorted(len(group["claims"]) for group in merged) == [1, 2]
+
+
 def test_far_future_claims_never_reach_canon(conn):
     # red team 2026-07-21: hallucinated dates served "Friday Night Magic
     # 2028" and Münzensammler 2032 as upcoming occurrences

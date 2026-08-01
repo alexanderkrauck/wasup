@@ -1276,6 +1276,76 @@ def _occurrences_for(
     return pairs, None, projected
 
 
+def _merge_published_twins(tx, groups: list[dict], holidays, now: datetime) -> list[dict]:
+    """Merge groups that would publish the same grounded occurrence.
+
+    Claim anchors can be disjoint while recurrence projection creates an
+    exact public duplicate. This final mechanical pass compares the output
+    identity itself; two different resolved venues remain contradictory.
+    """
+    profiles = []
+    lower = now - timedelta(days=PAST_RETENTION_DAYS)
+    upper = now + timedelta(days=FUTURE_HORIZON_DAYS)
+    for group in groups:
+        pairs, _, _ = _occurrences_for(tx, group, holidays, now)
+        values, _ = _merge_fields(group)
+        profiles.append({
+            "ntitle": normalize_title(values.get("title") or ""),
+            "starts": {pair[0] for pair in pairs if lower <= pair[0] <= upper},
+            "venues": {c.venue_id for c in group["claims"] if c.venue_id},
+        })
+
+    parent = list(range(len(groups)))
+    component_venues = [set(profile["venues"]) for profile in profiles]
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    by_title: dict[str, list[int]] = defaultdict(list)
+    for i, profile in enumerate(profiles):
+        if profile["ntitle"] and profile["starts"]:
+            by_title[profile["ntitle"]].append(i)
+    for members in by_title.values():
+        for x in range(len(members)):
+            for y in range(x + 1, len(members)):
+                i, j = members[x], members[y]
+                a, b = profiles[i], profiles[j]
+                if not (a["starts"] & b["starts"]):
+                    continue
+                left, right = find(i), find(j)
+                if left == right:
+                    continue
+                if (component_venues[left] and component_venues[right]
+                        and not (component_venues[left] & component_venues[right])):
+                    continue
+                parent[left] = right
+                component_venues[right] |= component_venues[left]
+
+    merged: dict[int, dict] = {}
+    for i, group in enumerate(groups):
+        item = merged.setdefault(find(i), {
+            "claims": [], "recurrence": None, "rrule_raw": None, "keys": [],
+        })
+        item["claims"].extend(group["claims"])
+        item["recurrence"] = item["recurrence"] or group["recurrence"]
+        item["rrule_raw"] = item["rrule_raw"] or group["rrule_raw"]
+        item["keys"].extend(group.get("keys", []) or [group["key"]])
+    out = []
+    for item in merged.values():
+        series_keys = sorted(k for k in item["keys"] if k.startswith("series|"))
+        item["key"] = series_keys[0] if series_keys else min(item["keys"])
+        seen: set = set()
+        item["claims"] = [
+            claim for claim in item["claims"]
+            if not (claim.id in seen or seen.add(claim.id))
+        ]
+        out.append(item)
+    return out
+
+
 def rebuild(conn, now: datetime | None = None) -> dict:
     now = now or datetime.now(VIENNA)
     stats = {"claims": 0, "events": 0, "occurrences": 0, "venues_created": 0,
@@ -1301,6 +1371,7 @@ def rebuild(conn, now: datetime | None = None) -> dict:
         stats["venues_created"] = len(resolver.created)
         venue_notes: list[str] = []
         groups = _group_claims(conn, claims, venue_notes)
+        groups = _merge_published_twins(conn, groups, holidays, now)
         _assign_identity(conn, groups)
 
         conn.execute("DELETE FROM occurrence")

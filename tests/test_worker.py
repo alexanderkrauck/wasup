@@ -10,6 +10,28 @@ def test_claim_on_empty_queue(conn):
     assert claim_next(conn) is None
 
 
+def test_newly_changed_event_enrichment_outranks_old_backlog(conn):
+    older = conn.execute(
+        "INSERT INTO event (id, kind, title, updated_at) VALUES "
+        "(gen_random_uuid(), 'event', 'older', now() - interval '1 day') "
+        "RETURNING id"
+    ).fetchone()["id"]
+    newer = conn.execute(
+        "INSERT INTO event (id, kind, title, updated_at) VALUES "
+        "(gen_random_uuid(), 'event', 'newer', now()) RETURNING id"
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO jobs (kind, payload) VALUES "
+        "('enrich', jsonb_build_object('event_id', %s::text, "
+        "'next_start', '2026-01-01T00:00:00Z')), "
+        "('enrich', jsonb_build_object('event_id', %s::text, "
+        "'next_start', '2027-01-01T00:00:00Z'))",
+        (str(older), str(newer)),
+    )
+
+    assert claim_next(conn)["payload"]["event_id"] == str(newer)
+
+
 def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
     productive_source = conn.execute(
         "INSERT INTO source (name, url, kind, tier, trust, yield_ema) VALUES "

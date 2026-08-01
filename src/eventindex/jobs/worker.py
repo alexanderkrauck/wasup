@@ -98,6 +98,14 @@ def claim_next(conn) -> dict | None:
                     SELECT -s.yield_ema FROM source s
                     WHERE s.id::text = jobs.payload->>'source_id'
                 ) END,
+                -- Freshly changed canon should become fully searchable
+                -- before old cache-miss backlog.  Within the same rebuild
+                -- generation, next occurrence still gives deterministic
+                -- near-term ordering below.
+                CASE WHEN kind = 'enrich' THEN (
+                    SELECT e.updated_at FROM event e
+                    WHERE e.id::text = jobs.payload->>'event_id'
+                ) END DESC NULLS LAST,
                 CASE WHEN kind = 'enrich' THEN
                     coalesce(
                         (payload->>'next_start')::timestamptz,

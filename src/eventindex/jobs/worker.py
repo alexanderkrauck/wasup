@@ -40,6 +40,12 @@ def requeue_stale(conn) -> int:
 
 def claim_next(conn) -> dict | None:
     with conn.transaction():
+        # Serialize only the millisecond claim decision so concurrent worker
+        # startups observe each other's committed lane occupancy.  Handlers
+        # still run concurrently after this transaction releases the lock.
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('eventindex.claim_next'))"
+        )
         return conn.execute(
             """
             WITH next AS (

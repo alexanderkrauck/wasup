@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from eventindex import config, db, tags as tag_store
+from eventindex.budget import BudgetExceeded, DailyBudgetExceeded
 from eventindex.api.confidence import (
     DEFAULT_MIN_CONFIDENCE,
     EFFECTIVE_CONFIDENCE_SQL,
@@ -128,6 +129,19 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="eventindex", version="v1", lifespan=_lifespan,
               dependencies=[Depends(_require_api_key)])
+
+
+@app.exception_handler(BudgetExceeded)
+async def _paid_budget_unavailable(_request: Request, exc: BudgetExceeded):
+    """Paid convenience endpoints fail explicitly; free query stays usable."""
+    detail = (
+        "daily paid-provider budget exhausted; use POST /v1/query"
+        if isinstance(exc, DailyBudgetExceeded)
+        else "paid model provider temporarily unavailable; use POST /v1/query"
+    )
+    return JSONResponse(
+        {"detail": detail}, status_code=503, headers={"Retry-After": "3600"}
+    )
 # an exact-path ASGI Route, not a Mount: mounting would 307-redirect
 # POST /mcp -> /mcp/, which MCP clients do not follow
 from starlette.routing import Route as _Route  # noqa: E402

@@ -1611,6 +1611,12 @@ def _confirmation_sweep(tx, event_ids: list[uuid.UUID]) -> None:
         JOIN event_claim c ON c.fingerprint = i.fingerprint
         JOIN source s ON s.id = c.source_id
         WHERE i.event_id = ANY(%s) AND s.kind != 'internal'
+          AND NOT EXISTS (
+              SELECT 1 FROM jobs j
+              WHERE j.kind = 'crawl'
+                AND j.status IN ('pending', 'running')
+                AND j.payload->>'source_id' = c.source_id::text
+          )
         """,
         (event_ids,),
     ).fetchall()

@@ -619,3 +619,20 @@ def test_to_dt_bare_date_covers_the_whole_day(client, conn):
     day = evening.date().isoformat()
     rows = client.post("/v1/query", json={"to_dt": day}).json()["occurrences"]
     assert any(r["title"] == "Abendkonzert 18ter" for r in rows)  # B6
+
+
+def test_paid_search_returns_explicit_budget_unavailable(client, monkeypatch):
+    from eventindex.api import search as search_module
+    from eventindex.budget import DailyBudgetExceeded
+
+    monkeypatch.setattr(
+        search_module,
+        "parse_query",
+        lambda *a, **k: (_ for _ in ()).throw(
+            DailyBudgetExceeded("daily cap")
+        ),
+    )
+    response = client.get("/v1/search?q=concert")
+    assert response.status_code == 503
+    assert "POST /v1/query" in response.json()["detail"]
+    assert response.headers["retry-after"] == "3600"

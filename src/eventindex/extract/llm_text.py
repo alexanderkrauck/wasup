@@ -217,10 +217,17 @@ def _date_evidence_matches(value: str, quote: str) -> tuple[bool, str]:
     normalized = quote.removesuffix(" Uhr")
     for german, english in _GERMAN_DATE_PARTS:
         normalized = normalized.replace(german, english)
+    # dateutil's dayfirst mode reverses the month/day of an otherwise
+    # unambiguous ISO quote (2026-09-04 became 2026-04-09).  Machine-readable
+    # source dates are common evidence, so preserve their explicit order.
+    iso_quote = bool(re.search(
+        r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", normalized,
+    ))
     try:
         cited = dateparser.parse(
             normalized,
-            dayfirst=True,
+            dayfirst=not iso_quote,
+            yearfirst=iso_quote,
             fuzzy=True,
             default=local.replace(hour=0, minute=0, second=0, microsecond=0),
         )

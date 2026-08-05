@@ -11,6 +11,12 @@ import time
 import traceback
 
 from eventindex import config, db
+from eventindex.budget import (
+    DailyBudgetExceeded,
+    PAID_JOB_KINDS,
+    ProviderUnavailable,
+    RECOVERY_JOB_KINDS,
+)
 from eventindex.jobs.handlers import HANDLERS
 
 log = logging.getLogger("eventindex.worker")
@@ -51,6 +57,17 @@ def claim_next(conn) -> dict | None:
             WITH next AS (
                 SELECT id FROM jobs
                 WHERE status = 'pending' AND run_after <= now()
+                -- A durable account-wide breaker suppresses every job kind
+                -- that may reach OpenRouter.  Deterministic embedding work
+                -- remains runnable and one periodic free balance probe clears
+                -- the row after a top-up.
+                AND NOT (
+                    kind = ANY(%s)
+                    AND EXISTS (
+                        SELECT 1 FROM provider_circuit
+                        WHERE provider = 'openrouter'
+                    )
+                )
                 -- Search readiness is derived data on already collected
                 -- events. Drain it ahead of slower acquisition so a large
                 -- crawl/hydration backlog cannot publish tagless events for
@@ -127,7 +144,7 @@ def claim_next(conn) -> dict | None:
             FROM next WHERE j.id = next.id
             RETURNING j.*
             """,
-            (config.COMPLETENESS_MIN_YIELD,),
+            (list(PAID_JOB_KINDS), config.COMPLETENESS_MIN_YIELD),
         ).fetchone()
 
 
@@ -170,21 +187,43 @@ def run_job(conn, job: dict) -> None:
         log.info("job %s (%s) done, enqueued %d", job["id"], job["kind"], len(new_jobs))
     except Exception as exc:
         error = traceback.format_exc(limit=20)
-        if "BudgetExceeded: global daily cap" in error:
-            # the daily envelope is spent - system condition, not job failure:
-            # park the job until the Vienna midnight reset, no attempt burned
+        if isinstance(exc, DailyBudgetExceeded) or (
+            "BudgetExceeded: global daily" in error
+        ):
+            # A lane cap parks the whole bulk lane; the global cap parks every
+            # potentially paid kind.  Workers keep running deterministic work
+            # instead of exiting into systemd's Restart=always loop.
+            lane = getattr(exc, "lane", None)
+            kinds = RECOVERY_JOB_KINDS if lane == "recovery" else PAID_JOB_KINDS
+            last_error = (
+                "recovery daily budget - waiting for reset"
+                if lane == "recovery"
+                else "global daily budget - waiting for reset"
+            )
             with conn.transaction():
                 conn.execute(
-                    "UPDATE jobs SET status = 'pending', attempts = attempts - 1, "
-                    "run_after = (date_trunc('day', now() AT TIME ZONE %s) "
-                    "  + interval '1 day 5 minutes') AT TIME ZONE %s, "
-                    "last_error = 'daily budget cap - waiting for reset' "
-                    "WHERE id = %s",
-                    (config.TIMEZONE, config.TIMEZONE, job["id"]),
+                    "UPDATE jobs SET "
+                    "status = CASE WHEN id = %(id)s THEN 'pending' ELSE status END, "
+                    "attempts = attempts - CASE WHEN id = %(id)s THEN 1 ELSE 0 END, "
+                    "started_at = CASE WHEN id = %(id)s THEN NULL ELSE started_at END, "
+                    "run_after = greatest(run_after, "
+                    " (date_trunc('day', now() AT TIME ZONE %(tz)s) "
+                    "  + interval '1 day 5 minutes') AT TIME ZONE %(tz)s), "
+                    "last_error = %(last_error)s "
+                    "WHERE id = %(id)s OR (kind = ANY(%(kinds)s) "
+                    "AND status = 'pending')",
+                    {
+                        "id": job["id"],
+                        "kinds": list(kinds),
+                        "last_error": last_error,
+                        "tz": config.TIMEZONE,
+                    },
                 )
-            log.warning("daily cap reached - job %s parked until midnight, worker exiting",
-                        job["id"])
-            raise SystemExit(0)
+            log.warning(
+                "%s cap reached - job %s and lane siblings parked until midnight",
+                lane or "global", job["id"],
+            )
+            return
         if "BudgetExceeded" in error and "monthly budget reached" in error:
             # per-source condition: park THIS job until the Vienna month
             # rolls over; other sources keep working, so no worker exit
@@ -199,27 +238,34 @@ def run_job(conn, job: dict) -> None:
                 )
             log.warning("monthly budget hit - job %s parked until next month", job["id"])
             return
-        if "Insufficient credits" in error or "Error code: 402" in error:
-            # Credit outage is a kind-wide circuit breaker, not a job
-            # failure. Parking only the current row lets systemd restart the
-            # worker and hammer every sibling of the same kind (a resolve did
-            # thousands of rejected per-event calls on 2026-07-22). Pause
-            # ready siblings too; unrelated deterministic work can continue.
+        if isinstance(exc, ProviderUnavailable) or (
+            "Insufficient credits" in error or "Error code: 402" in error
+        ):
+            # The durable provider_circuit row is checked before queue claims
+            # and API calls. Park every potentially paid sibling, not merely
+            # the current kind, and keep the worker alive.
+            blocked_until = getattr(exc, "blocked_until", None)
             with conn.transaction():
                 conn.execute(
                     "UPDATE jobs SET "
                     "status = CASE WHEN id = %(id)s THEN 'pending' ELSE status END, "
                     "attempts = attempts - CASE WHEN id = %(id)s THEN 1 ELSE 0 END, "
                     "started_at = CASE WHEN id = %(id)s THEN NULL ELSE started_at END, "
-                    "run_after = greatest(run_after, now() + interval '1 hour'), "
+                    "run_after = greatest(run_after, coalesce(%(until)s, "
+                    " now() + interval '1 hour')), "
                     "last_error = 'credits empty' "
-                    "WHERE id = %(id)s OR (kind = %(kind)s AND status = 'pending')",
-                    {"id": job["id"], "kind": job["kind"]},
+                    "WHERE id = %(id)s OR (kind = ANY(%(kinds)s) "
+                    "AND status = 'pending')",
+                    {
+                        "id": job["id"],
+                        "kinds": list(PAID_JOB_KINDS),
+                        "until": blocked_until,
+                    },
                 )
             log.warning(
-                "credits empty - %s jobs paused 1h, worker exiting", job["kind"]
+                "OpenRouter unavailable - all paid job kinds paused globally"
             )
-            raise SystemExit(0)
+            return
         _persist_agent_notes(conn, job, exc)
         with conn.transaction():
             if job["attempts"] >= config.JOB_MAX_ATTEMPTS:
@@ -269,6 +315,7 @@ def main() -> None:
 
     with db.connect() as conn:
         last_stale_check = 0.0
+        last_provider_check = 0.0
         while True:
             # periodically, not just at startup: a job orphaned by a restart
             # that happens < JOB_STALE_RUNNING_S after it started would
@@ -279,6 +326,14 @@ def main() -> None:
                 stale = requeue_stale(conn)
                 if stale:
                     log.warning("requeued %d stale running jobs", stale)
+            if time.monotonic() - last_provider_check > 60:
+                last_provider_check = time.monotonic()
+                from eventindex import llm
+
+                try:
+                    llm.ensure_openrouter_available()
+                except ProviderUnavailable:
+                    pass
             job = claim_next(conn)
             if job is not None:
                 run_job(conn, job)

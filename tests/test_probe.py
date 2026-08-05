@@ -5,6 +5,12 @@ events.factory300.at listing and onboarding exhausted from the homepage.
 Rejection memory added 2026-07-13: rejected domains were re-probed every
 sweep (sport-ooe.at judged 3x in one week) and verdicts were discarded."""
 
+from decimal import Decimal
+
+import pytest
+
+from eventindex import config
+from eventindex.budget import DailyBudgetExceeded, record_spend
 from eventindex.discovery import probe, sweep
 from eventindex.discovery.probe import (
     ProbeVerdict, domain_of, is_known, is_owned_by, probe_url,
@@ -100,3 +106,34 @@ def test_sweep_skips_recently_rejected_domains_until_ttl(conn, monkeypatch):
     urls = {r["url"] for r in conn.execute(
         "SELECT payload->>'url' AS url FROM jobs WHERE kind = 'probe'")}
     assert "https://sport-ooe.at/x" in urls
+
+
+def test_places_sweep_reserves_whole_batch_before_http(conn, monkeypatch):
+    global_cap = Decimal(str(config.GLOBAL_DAILY_PAID_CAP_EUR))
+    record_spend(global_cap - Decimal("0.10"), "llm")
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind) VALUES ('discover') RETURNING id"
+    ).fetchone()["id"]
+    conn.commit()
+    monkeypatch.setattr(config, "GOOGLE_PLACES_API_KEY", "test")
+    monkeypatch.setattr(
+        sweep.httpx,
+        "post",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("whole-sweep admission must precede HTTP")
+        ),
+    )
+    with pytest.raises(DailyBudgetExceeded):
+        sweep.sweep_google_places(conn, job_id=job_id)
+
+
+def test_search_sweep_does_not_swallow_budget_stop(conn, monkeypatch):
+    monkeypatch.setattr(
+        sweep,
+        "search_web",
+        lambda *a, **k: (_ for _ in ()).throw(
+            DailyBudgetExceeded("recovery cap", lane="recovery")
+        ),
+    )
+    with pytest.raises(DailyBudgetExceeded):
+        sweep.sweep_search(conn)

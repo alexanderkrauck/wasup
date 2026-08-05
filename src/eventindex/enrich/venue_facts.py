@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from difflib import SequenceMatcher
 import re
 
@@ -9,11 +10,11 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from eventindex import config, llm
-from eventindex.budget import record_spend
+from eventindex.budget import reserve_spend, settle_spend
 from eventindex.enrich.facts import PublicPage, _evidence_on_page
 from eventindex.resolve.fingerprint import normalize_title
 
-PLACES_COST_EUR = 0.03
+PLACES_COST_EUR = Decimal("0.04")
 PLACE_NAME_MIN_SIMILARITY = 0.55
 _POSTCODE_LOCALITY_RE = re.compile(
     r"^\s*\d{4,5}\s*(?:,\s*|\s+)[^\d,]+\s*$", re.IGNORECASE
@@ -48,37 +49,48 @@ def find_place(venue: dict, *, job_id=None) -> dict | None:
     """Return one mechanically corroborated Google place, or no match."""
     if is_location_only(venue["name"]):
         return None
+    if venue.get("gmaps_place_id") is not None:
+        return None
     if not config.GOOGLE_PLACES_API_KEY:
         raise RuntimeError("GOOGLE_PLACES_API_KEY not set")
-    response = httpx.post(
-        "https://places.googleapis.com/v1/places:searchText",
-        headers={
-            "X-Goog-Api-Key": config.GOOGLE_PLACES_API_KEY,
-            "X-Goog-FieldMask": (
-                "places.id,places.displayName,places.formattedAddress,"
-                "places.location,places.websiteUri"
-            ),
-        },
-        json={
-            "textQuery": " ".join(filter(None, [
-                venue["name"], venue.get("address"),
-            ])),
-            "maxResultCount": 5,
-            "languageCode": "de",
-            "regionCode": "AT",
-            "locationBias": {
-                "circle": {
-                    "center": {"latitude": 48.3069, "longitude": 14.2858},
-                    "radius": 50_000.0,
-                }
-            },
-        },
-        timeout=30,
-    )
-    record_spend(
-        PLACES_COST_EUR, "other", job_id=job_id,
+    reservation = reserve_spend(
+        PLACES_COST_EUR,
+        "places",
+        job_id=job_id,
+        provider="google_places",
         detail=f"venue place grounding '{venue['name'][:100]}'",
     )
+    try:
+        response = httpx.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            headers={
+                "X-Goog-Api-Key": config.GOOGLE_PLACES_API_KEY,
+                "X-Goog-FieldMask": (
+                    "places.id,places.displayName,places.formattedAddress,"
+                    "places.location,places.websiteUri"
+                ),
+            },
+            json={
+                "textQuery": " ".join(filter(None, [
+                    venue["name"], venue.get("address"),
+                ])),
+                "maxResultCount": 5,
+                "languageCode": "de",
+                "regionCode": "AT",
+                "locationBias": {
+                    "circle": {
+                        "center": {"latitude": 48.3069, "longitude": 14.2858},
+                        "radius": 50_000.0,
+                    }
+                },
+            },
+            timeout=30,
+        )
+    except Exception:
+        # The request may have reached Google even if its response did not.
+        settle_spend(reservation, PLACES_COST_EUR)
+        raise
+    settle_spend(reservation, PLACES_COST_EUR)
     response.raise_for_status()
     candidates = response.json().get("places", [])
     ranked = sorted(

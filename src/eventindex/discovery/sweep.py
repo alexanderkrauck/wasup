@@ -8,11 +8,12 @@ OSM Overpass (a). Search fan-out (d) is parked - needs a search API
 import logging
 import re
 import time
+from decimal import Decimal
 
 import httpx
 
 from eventindex import config
-from eventindex.budget import record_spend
+from eventindex.budget import BudgetExceeded, reserve_spend, settle_spend
 from eventindex.discovery.probe import (
     domain_of, is_known, known_domains, recently_rejected_domains,
 )
@@ -26,7 +27,10 @@ PLACES_CATEGORIES = [
     "Coworking Space", "Veranstaltungszentrum", "Buchhandlung", "Kino",
     "Kabarett", "Kongresszentrum", "Brauerei",
 ]
-PLACES_COST_EUR = 0.03  # per text-search request, logged for governance
+# websiteUri selects Google's higher Text Search SKU.  Four cents is a
+# conservative shadow authorization; free-tier/invoice effects can only make
+# the real charge lower.
+PLACES_COST_EUR = Decimal("0.04")
 MAX_PROBES_PER_SWEEP = 120
 
 OVERPASS_QUERY = """
@@ -45,34 +49,53 @@ BBOX = "48.08,13.95,48.53,14.63"  # Linz +/- ~25km
 def sweep_google_places(tx, job_id=None) -> list[str]:
     if not config.GOOGLE_PLACES_API_KEY:
         raise RuntimeError("GOOGLE_PLACES_API_KEY not set")
+    maximum = PLACES_COST_EUR * len(PLACES_CATEGORIES)
+    reservation = reserve_spend(
+        maximum,
+        "places",
+        job_id=job_id,
+        provider="google_places",
+        detail=f"maximum reservation for {len(PLACES_CATEGORIES)} text searches",
+    )
     urls: list[str] = []
-    for category in PLACES_CATEGORIES:
-        resp = httpx.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers={
-                "X-Goog-Api-Key": config.GOOGLE_PLACES_API_KEY,
-                "X-Goog-FieldMask": "places.displayName,places.websiteUri",
-            },
-            json={
-                "textQuery": f"{category} Linz Österreich",
-                "maxResultCount": 20,
-                "locationBias": {"circle": {
-                    "center": {"latitude": 48.3069, "longitude": 14.2858},
-                    "radius": 25000.0,
-                }},
-            },
-            timeout=30,
+    calls = 0
+    try:
+        for category in PLACES_CATEGORIES:
+            calls += 1  # a lost response may still be billable: count fail-closed
+            try:
+                resp = httpx.post(
+                    "https://places.googleapis.com/v1/places:searchText",
+                    headers={
+                        "X-Goog-Api-Key": config.GOOGLE_PLACES_API_KEY,
+                        "X-Goog-FieldMask": "places.displayName,places.websiteUri",
+                    },
+                    json={
+                        "textQuery": f"{category} Linz Österreich",
+                        "maxResultCount": 20,
+                        "locationBias": {"circle": {
+                            "center": {"latitude": 48.3069, "longitude": 14.2858},
+                            "radius": 25000.0,
+                        }},
+                    },
+                    timeout=30,
+                )
+            except httpx.HTTPError as exc:
+                log.warning("places search %s failed: %s", category, exc)
+                continue
+            if resp.status_code != 200:
+                log.warning("places search %s -> %s %s", category, resp.status_code,
+                            resp.text[:200])
+                continue
+            for place in resp.json().get("places", []):
+                if website := place.get("websiteUri"):
+                    urls.append(website)
+            time.sleep(0.3)
+    finally:
+        settle_spend(
+            reservation,
+            PLACES_COST_EUR * calls,
+            detail=f"{calls} Google Places text searches",
         )
-        record_spend(PLACES_COST_EUR, "other", job_id=job_id,
-                     detail=f"places textsearch '{category}'")
-        if resp.status_code != 200:
-            log.warning("places search %s -> %s %s", category, resp.status_code,
-                        resp.text[:200])
-            continue
-        for place in resp.json().get("places", []):
-            if website := place.get("websiteUri"):
-                urls.append(website)
-        time.sleep(0.3)
     return urls
 
 
@@ -189,6 +212,8 @@ def sweep_search(tx, job_id=None) -> list[str]:
     for query in queries:
         try:
             hits = search_web(tx, query, job_id=job_id)
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.warning("search %r failed: %s", query, e)
             continue

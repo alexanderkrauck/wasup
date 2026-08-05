@@ -1,7 +1,12 @@
 import pytest
 
 from eventindex import config
-from eventindex.budget import BudgetExceeded
+from eventindex.budget import (
+    BudgetExceeded,
+    DailyBudgetExceeded,
+    ProviderUnavailable,
+    trip_provider_circuit,
+)
 from eventindex.jobs import handlers
 from eventindex.jobs.worker import claim_next, enqueue, run_job
 
@@ -138,15 +143,20 @@ def test_credit_outage_pauses_ready_siblings_without_burning_attempts(
     conn, monkeypatch,
 ):
     def broke_handler(job, tx):
-        raise BudgetExceeded("Error code: 402 - OpenRouter credits empty")
+        blocked = trip_provider_circuit("openrouter", "test outage")
+        raise ProviderUnavailable(
+            "Error code: 402 - OpenRouter credits empty",
+            provider="openrouter",
+            blocked_until=blocked,
+        )
 
-    monkeypatch.setitem(handlers.HANDLERS, "test_kind", broke_handler)
+    monkeypatch.setitem(handlers.HANDLERS, "crawl", broke_handler)
+    monkeypatch.setitem(handlers.HANDLERS, "enrich", broke_handler)
     with conn.transaction():
-        enqueue(conn, "test_kind", {"row": 1})
-        enqueue(conn, "test_kind", {"row": 2})
+        enqueue(conn, "crawl", {"row": 1})
+        enqueue(conn, "enrich", {"row": 2})
     job = claim_next(conn)
-    with pytest.raises(SystemExit):
-        run_job(conn, job)
+    run_job(conn, job)
 
     rows = conn.execute(
         "SELECT status, attempts, last_error, "
@@ -157,6 +167,46 @@ def test_credit_outage_pauses_ready_siblings_without_burning_attempts(
     assert [row["attempts"] for row in rows] == [0, 0]
     assert all(row["last_error"] == "credits empty" for row in rows)
     assert all(row["wait_s"] > 3500 for row in rows)
+
+
+def test_recovery_daily_cap_parks_recovery_but_leaves_crawl_ready(
+    conn, monkeypatch,
+):
+    def capped(job, tx):
+        raise DailyBudgetExceeded("recovery cap", lane="recovery")
+
+    monkeypatch.setitem(handlers.HANDLERS, "hydrate_event", capped)
+    with conn.transaction():
+        enqueue(conn, "hydrate_event", {"row": 1})
+        enqueue(conn, "ground_venue", {"row": 2})
+        enqueue(conn, "crawl", {"row": 3})
+    hydrate = conn.execute(
+        "UPDATE jobs SET created_at=now()-interval '2 days', "
+        "run_after=now()-interval '1 day' "
+        "WHERE kind='hydrate_event' RETURNING id"
+    ).fetchone()
+    conn.commit()
+    job = claim_next(conn)
+    assert job["id"] == hydrate["id"]
+    run_job(conn, job)
+
+    recovery = conn.execute(
+        "SELECT attempts, last_error, run_after > now() AS parked FROM jobs "
+        "WHERE kind IN ('hydrate_event','ground_venue') ORDER BY kind"
+    ).fetchall()
+    assert all(row["attempts"] == 0 for row in recovery)
+    assert all(row["parked"] for row in recovery)
+    assert all("recovery daily budget" in row["last_error"] for row in recovery)
+    assert claim_next(conn)["kind"] == "crawl"
+
+
+def test_open_provider_circuit_skips_paid_jobs(conn):
+    trip_provider_circuit("openrouter", "empty")
+    with conn.transaction():
+        enqueue(conn, "crawl", {"row": 1})
+        enqueue(conn, "embed_tags", {"row": 2})
+    assert claim_next(conn)["kind"] == "embed_tags"
+    assert claim_next(conn) is None
 
 
 def test_failed_crawl_leaves_error_trace_for_the_scheduler(conn, monkeypatch):

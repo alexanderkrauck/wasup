@@ -488,6 +488,7 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "when the user is emphatic ('unbedingt', 'muss', 'nur wenn').\n\n"
         f"QUERY: {q}",
         SearchFilters,
+        budget_lane="interactive",
     )
 
 

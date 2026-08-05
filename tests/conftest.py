@@ -31,7 +31,8 @@ def conn(test_db_url):
         yield c
         c.rollback()
         c.execute(
-            "TRUNCATE jobs, crawl_log, budget_spend, event_claim, occurrence, "
+            "TRUNCATE jobs, crawl_log, budget_spend, provider_circuit, "
+            "event_claim, occurrence, "
             "identity, event, source, venue, report, api_key, text_recurrence, "
             "enrichment, adjudication, probe_rejection, event_tag, "
             "tag_embedding CASCADE"

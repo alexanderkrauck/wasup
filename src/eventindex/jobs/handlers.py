@@ -1186,9 +1186,15 @@ def ground_venue(job: dict, tx) -> list[dict]:
     if venue is None:
         return []
 
+    # Capacity recovery uses OpenRouter after the Place match.  Refuse before
+    # buying Google data when the durable provider breaker is open, otherwise
+    # the later 402 rolls this transaction back and the same Place is repaid.
+    if venue["capacity"] is None:
+        llm.ensure_openrouter_available(probe_now=True)
+
     place = (
         None
-        if is_location_only(venue["name"])
+        if is_location_only(venue["name"]) or venue["gmaps_place_id"] is not None
         else find_place(venue, job_id=job["id"])
     )
     matched = place is not None

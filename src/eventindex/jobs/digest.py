@@ -19,6 +19,15 @@ def gather_stats(conn) -> dict:
         "SELECT category, sum(amount_eur) AS eur, count(*) AS n FROM budget_spend "
         "WHERE spent_at >= now() - interval '24 hours' GROUP BY category"
     ).fetchall()
+    paid_budget = conn.execute(
+        "SELECT lane, sum(amount_eur) AS actual_eur, "
+        "sum(reserved_eur) AS reserved_eur, "
+        "sum(amount_eur) FILTER (WHERE state='uncertain') AS uncertain_eur "
+        "FROM budget_spend WHERE spent_at >= "
+        "date_trunc('day', now() AT TIME ZONE %s) AT TIME ZONE %s "
+        "GROUP BY lane ORDER BY lane",
+        (config.TIMEZONE, config.TIMEZONE),
+    ).fetchall()
     failed_jobs = conn.execute(
         "SELECT kind, count(*) AS n FROM jobs "
         "WHERE status = 'failed' AND finished_at >= now() - interval '24 hours' "
@@ -169,6 +178,7 @@ def gather_stats(conn) -> dict:
         "fetch_blocked": fetch_blocked,
         "crawls": crawls,
         "spend": spend,
+        "paid_budget": paid_budget,
         "failed_jobs": failed_jobs,
         "last_success": last_success,
         "qa": qa,
@@ -220,6 +230,20 @@ def day_curve_anomalies(day_curve: list[dict]) -> list[str]:
 
 def render(stats: dict, now: datetime) -> str:
     lines = [f"eventindex digest - {now:%Y-%m-%d %H:%M} UTC", ""]
+
+    paid = stats.get("paid_budget") or []
+    actual = sum(float(row.get("actual_eur") or 0) for row in paid)
+    reserved = sum(float(row.get("reserved_eur") or 0) for row in paid)
+    lines.append(
+        f"paid-provider budget today: €{actual:.4f} actual + "
+        f"€{reserved:.4f} reserved / €{config.GLOBAL_DAILY_PAID_CAP_EUR:.2f}"
+    )
+    for row in paid:
+        lines.append(
+            f"  {row['lane']}: €{float(row.get('actual_eur') or 0):.4f} actual"
+            f" + €{float(row.get('reserved_eur') or 0):.4f} reserved"
+        )
+    lines.append("")
 
     last = stats["last_success"]
     if last is None or now - last > timedelta(hours=config.DEAD_MAN_HOURS):

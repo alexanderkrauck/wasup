@@ -19,6 +19,19 @@ def test_no_dead_man_when_fresh():
     assert "DEAD MAN" not in text
     assert "ok: 3 (events found: 7)" in text
     assert "llm: €0.1234 over 5 calls" in text
+    assert "paid-provider budget today: €0.0000 actual + €0.0000 reserved / €2.40" in text
+
+
+def test_paid_budget_lanes_render():
+    stats = _stats(NOW) | {
+        "paid_budget": [
+            {"lane": "core", "actual_eur": 0.7, "reserved_eur": 0.2},
+            {"lane": "recovery", "actual_eur": 0.4, "reserved_eur": 0},
+        ]
+    }
+    text = render(stats, NOW)
+    assert "€1.1000 actual + €0.2000 reserved / €2.40" in text
+    assert "recovery: €0.4000 actual + €0.0000 reserved" in text
 
 
 def test_dead_man_when_stale():
@@ -83,11 +96,11 @@ def test_day_curve_anomaly_flags_capped_feed_signature():
 def test_credit_outage_and_low_balance_scream():
     stats = _stats(NOW) | {
         "credit_parked": {"n": 41, "resume": NOW + timedelta(hours=1)},
-        "openrouter_balance_usd": 3.5,
+        "openrouter_balance_usd": 2.5,
     }
     text = render(stats, NOW)
     assert "LLM CREDITS EMPTY: 41 jobs paused" in text
-    assert "OPENROUTER BALANCE LOW: $3.50" in text
+    assert "OPENROUTER BALANCE LOW: $2.50" in text
 
 
 def test_healthy_balance_stays_quiet():

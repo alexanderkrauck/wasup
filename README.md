@@ -77,10 +77,11 @@ claims**; the canonical index is a deterministic, rebuildable function of
 the claims log (dedup via fingerprint blocking + weighted matching + LLM
 grey-zone adjudication, gated by a labeled gold set with a hard
 precision-at-merge floor). Recurrence is a constrained schema compiled
-deterministically to RRULEs — the LLM never writes dates. Every LLM call
-runs inside an enforced budget context; a global daily cap is checked in
-code before any token is spent. Cheap open-weight models by default; an
-escalation ladder and validation nets guarantee quality instead of model
+deterministically to RRULEs — the LLM never writes dates. Every paid
+OpenRouter or Google Places request atomically reserves from one €2.40
+Vienna-day envelope before network I/O; bulk recovery is capped at €0.90
+and paid natural-language search at €0.40. Cheap open-weight models by
+default; an escalation ladder and validation nets guarantee quality instead
 brand.
 
 ## Running it

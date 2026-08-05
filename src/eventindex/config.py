@@ -22,6 +22,7 @@ GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
 # LLM (DECISIONS.md: one provider = OpenRouter; model names live here)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_RESUME_MIN_USD = 0.25
 # swapped to open-weight models 2026-07-07 (Alexander): ~4x cheaper per day
 # at yesterday's volume; the validation nets (pydantic schemas, recipe
 # self-validation, verify-calls, gold set) are what guarantee quality, not
@@ -35,7 +36,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # ~2.5-3x cheaper on the dominant onboarding spend, strong agentic scores,
 # multimodal (keeps the PDF/vision option). Kimi is the fallback if the
 # recipe-success rate in the digest degrades.
-MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.09/$0.18 per M, 1M ctx, text-only
+MODEL_MINI = "deepseek/deepseek-v4-flash"   # $0.14/$0.28 per M, 1M ctx, text-only
 MODEL_MID = "minimax/minimax-m3"            # $0.30/$1.20, 1M ctx, text+image+video
 # frontier re-added 2026-07-11 (was dropped 2026-07-07 as unused): the final
 # onboarding attempt on gate-heavy sites needs it - mid wall-clocked 4x on a
@@ -47,8 +48,33 @@ MODEL_VISION = MODEL_MID
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 
-# Budgets (DECISIONS.md: enforced in code from day one)
-GLOBAL_DAILY_LLM_CAP_EUR = 15.0  # 5->10 (2026-07-06), 10->15 (2026-07-08): onboarding backlog
+# Paid-provider budgets (Alexander 2026-08-05: hard ceiling below $3/day).
+# EUR 2.40 is about USD 2.67 at the ledger FX and deliberately leaves room
+# below $3 for FX drift and OpenRouter's credit-purchase fee.  Google Places
+# shadow charges share this same envelope.
+GLOBAL_DAILY_PAID_CAP_EUR = 2.40
+# Bulk fact/backfill queues may use at most this much of the total. They cannot
+# consume the other EUR 1.50; routine work and interactive search share that.
+RECOVERY_DAILY_PAID_CAP_EUR = 0.90
+# Natural-language /v1/search is a paid convenience; /v1/query is free.
+INTERACTIVE_DAILY_PAID_CAP_EUR = 0.40
+# Conservative maximum reservation per request.  Each exceeds the theoretical
+# full-context + 16k-output cost of its configured model at the prices above.
+LLM_RESERVATION_EUR_BY_MODEL = {
+    MODEL_MINI: 0.20,
+    MODEL_MID: 0.40,
+    MODEL_FRONTIER: 0.80,
+}
+# An unreviewed model must reserve the entire day; known models above have
+# tighter ceilings backed by their maximum context/output prices.
+LLM_UNKNOWN_MODEL_RESERVATION_EUR = GLOBAL_DAILY_PAID_CAP_EUR
+# Provider routing rejects an endpoint whose advertised token price exceeds
+# these reviewed maxima (USD per million tokens). A price change fails closed.
+LLM_MAX_PRICE_USD_PER_M_BY_MODEL = {
+    MODEL_MINI: {"prompt": 0.14, "completion": 0.28},
+    MODEL_MID: {"prompt": 0.30, "completion": 1.20},
+    MODEL_FRONTIER: {"prompt": 0.76, "completion": 2.42},
+}
 MONTHLY_BUDGET_EUR_BY_TIER = {1: 2.0, 2: 1.0, 3: 1.0, 4: 3.0}
 # Fallback when OpenRouter omits cost in the response: deliberately pessimistic.
 FALLBACK_EUR_PER_1K_TOKENS = 0.005
@@ -108,7 +134,7 @@ PARITY_MIN_COVERAGE = 0.7   # below this, misses feed the source's notes
 # Digest
 DIGEST_DIR = VAR_DIR / "digests"
 DEAD_MAN_HOURS = 48
-CREDITS_WARN_USD = 15.0  # 4 silent days on an empty balance (2026-07-16..19)
+CREDITS_WARN_USD = 3.0  # less than one maximum-cost day remains
 
 TIMEZONE = "Europe/Vienna"
 

@@ -1,9 +1,16 @@
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 
+import pytest
 from psycopg.types.json import Jsonb
 
 from eventindex import config
+from eventindex.budget import (
+    DailyBudgetExceeded,
+    ProviderUnavailable,
+    record_spend,
+)
 from eventindex.enrich.facts import PublicPage
 from eventindex.enrich import venue_facts
 from eventindex.enrich.venue_facts import VenueCapacity
@@ -79,7 +86,8 @@ def test_ambiguous_repeated_place_name_stays_unknown(monkeypatch):
         return Response()
 
     monkeypatch.setattr(venue_facts.httpx, "post", post)
-    monkeypatch.setattr(venue_facts, "record_spend", lambda *a, **k: None)
+    monkeypatch.setattr(venue_facts, "reserve_spend", lambda *a, **k: object())
+    monkeypatch.setattr(venue_facts, "settle_spend", lambda *a, **k: None)
 
     assert venue_facts.find_place(
         {"name": "Pfarrsaal", "address": None}
@@ -88,6 +96,61 @@ def test_ambiguous_repeated_place_name_stays_unknown(monkeypatch):
         request["json"]["locationBias"]["circle"]["radius"]
         <= 50_000
     )
+
+
+def test_places_budget_blocks_before_http(conn, monkeypatch):
+    cap = Decimal(str(config.GLOBAL_DAILY_PAID_CAP_EUR))
+    record_spend(cap - Decimal("0.01"), "llm")
+    monkeypatch.setattr(venue_facts.config, "GOOGLE_PLACES_API_KEY", "test")
+    monkeypatch.setattr(
+        venue_facts.httpx,
+        "post",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("budget denial must happen before HTTP")
+        ),
+    )
+    with pytest.raises(DailyBudgetExceeded):
+        venue_facts.find_place(
+            {"name": "Design Center Linz", "address": None}
+        )
+
+
+def test_known_place_id_skips_repeat_google_lookup(monkeypatch):
+    monkeypatch.setattr(
+        venue_facts.httpx,
+        "post",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("an already grounded venue must not repay Places")
+        ),
+    )
+    assert venue_facts.find_place({
+        "name": "Design Center Linz",
+        "gmaps_place_id": "places/existing",
+    }) is None
+
+
+def test_grounding_credit_breaker_prevents_places_call(conn, monkeypatch):
+    from eventindex.jobs import handlers
+
+    venue_id = _future_venue(conn)
+    monkeypatch.setattr(
+        handlers.llm,
+        "ensure_openrouter_available",
+        lambda **kwargs: (_ for _ in ()).throw(ProviderUnavailable(
+            "empty", provider="openrouter"
+        )),
+    )
+    monkeypatch.setattr(
+        venue_facts,
+        "find_place",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("Places must not run behind an open credit circuit")
+        ),
+    )
+    with pytest.raises(ProviderUnavailable):
+        handlers.ground_venue(
+            {"id": uuid.uuid4(), "payload": {"venue_id": str(venue_id)}}, conn
+        )
 
 
 def test_postcode_locality_is_not_treated_as_a_venue(monkeypatch):
@@ -112,6 +175,9 @@ def test_ground_venue_populates_place_fields_and_capacity(conn, monkeypatch):
     from eventindex.jobs import handlers
 
     venue_id = _future_venue(conn)
+    monkeypatch.setattr(
+        handlers.llm, "ensure_openrouter_available", lambda **kwargs: None
+    )
     place = {
         "id": "places/design-center",
         "formattedAddress": "Europaplatz 1, 4020 Linz",
@@ -155,6 +221,9 @@ def test_capacity_search_requires_a_corroborated_place(conn, monkeypatch):
     from eventindex.jobs import handlers
 
     venue_id = _future_venue(conn)
+    monkeypatch.setattr(
+        handlers.llm, "ensure_openrouter_available", lambda **kwargs: None
+    )
     monkeypatch.setattr(venue_facts, "find_place", lambda *a, **k: None)
     monkeypatch.setattr(
         sweep,

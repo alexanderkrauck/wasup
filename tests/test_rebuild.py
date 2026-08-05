@@ -1259,3 +1259,36 @@ def test_venueless_twin_with_disjoint_dates_but_same_rule_merges(conn):
     rb.rebuild(conn, now=NOW)
     events, _ = _canon(conn)
     assert len(events) == 1
+
+
+def test_confirmation_sweep_dedupes_existing_crawl_job(conn):
+    sid = _source(conn, "confirmation", 0.8)
+    event_id = uuid.uuid4()
+    fingerprint = "confirmation-event|2026-08-20|"
+    conn.execute(
+        "INSERT INTO event (id, kind, title) VALUES (%s, 'one_off', 'Confirm me')",
+        (event_id,),
+    )
+    _claim(
+        conn,
+        sid,
+        _concert("Confirm me", starts="2026-08-20T20:00:00+02:00"),
+        fingerprint,
+    )
+    conn.execute(
+        "INSERT INTO identity (fingerprint, event_id) VALUES (%s, %s)",
+        (fingerprint, event_id),
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload) VALUES "
+        "('crawl', jsonb_build_object('source_id', %s::text))",
+        (str(sid),),
+    )
+
+    rb._confirmation_sweep(conn, [event_id])
+
+    assert conn.execute(
+        "SELECT count(*) AS n FROM jobs WHERE kind='crawl' "
+        "AND payload->>'source_id'=%s",
+        (str(sid),),
+    ).fetchone()["n"] == 1

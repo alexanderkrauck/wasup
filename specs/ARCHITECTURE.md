@@ -454,7 +454,7 @@ everything - for the niche-hunting use case you often WANT the
 
 > **Extended 2026-07-08 (preference model, DECISIONS):** hard filters keep this contract verbatim. Audience attributes queried as SOFT preferences score unknowns at a fixed prior (0.45) so they stay visible and honestly ranked - the contract's spirit (never fabricate knowledge) holds; only the failure mode changed from "hidden" to "ranked as uncertain".
 
-**Negative constraints are set logic, not similarity:** exclusion filters (`exclude_category=comedy`, `exclude_terms`) are exact text/tag set logic applied BEFORE ranking. A grieving user who says "nothing funny" gets a guarantee, not a probability. Positive tag matching ranks by default; only an explicit `min_tag_match` turns its calibrated certainty-weighted score into a hard membership filter (needed for subscriptions).
+**Negative constraints are set logic, not similarity:** exclusion filters (`exclude_category=comedy`, `exclude_terms`) are exact text/tag set logic applied BEFORE ranking. A grieving user who says "nothing funny" gets a guarantee, not a probability. Positive tag matching ranks by default; only an explicit `min_tag_match` turns its calibrated certainty-weighted score into a hard membership filter (needed for subscriptions). Multi-concept results expose final harmonic coverage, the weakest requested concept, and bounded combined-phrase context separately; optional `min_tag_concept_match` makes every requested concept clear its own explicit floor.
 
 **Preference queries combine importance and certainty (2026-07-08):** every inferred attribute is stored with a certainty; a query states per-attribute importance. Ranking uses the importance-weighted mean of P(satisfied) = 0.5 + c/2 on a match, 0.5 - c/2 on a contradiction, 0.45 when unknown - so confident matches > weak guesses > unknowns > contradictions, and nothing is silently dropped. `required_attributes` opts an attribute back into hard set logic. Implementation + extension point: the ATTRIBUTES registry in `api/search.py`.
 
@@ -472,7 +472,7 @@ everything - for the niche-hunting use case you often WANT the
 | `expected_gender_split` | category priors (base rates per category/subculture), organizer audience, past attendee signals where visible |
 | `expected_attendance` | venue capacity × category prior × artist/organizer draw (follower counts, past RSVP data from Meetup/FB where visible) |
 | `expected_fullness` | expected_attendance / capacity; boosted by sold-out signals, ticket-tier depletion, "nur noch Restkarten" |
-| `tags` | 6-12 short activity/topic/format/audience/setting concepts, each with certainty; powers calibrated multilingual matching |
+| `tags` | 6-12 short retrieval concepts covering activity, participant actions, format/interaction, experience, and explicit secondary activities; redundant structured metadata is rejected; each has certainty and a safe evidence basis |
 | `stated_price`, `venue` | completion only from explicit text evidence; never guessed |
 | `language` | de / en / other with confidence - matters in a student city |
 | `weather_dependence` | outdoor flag → API can join a weather forecast |
@@ -497,7 +497,8 @@ GET /v1/occurrences
     &age_range=20-35&max_fullness=0.7&newcomer_friendly=true
     &min_confidence=0.6                         (0 = include tentative)
     &sort=starts_at|distance|confidence|relevance
-    &tags=dancing&min_tag_match=0.5           → explicit semantic membership
+    &tags=dancing&min_tag_match=0.5
+    &min_tag_concept_match=0.3               → optional floor per concept
 
 GET /v1/events/{id}            full record incl. field_provenance + claims
 GET /v1/events/{id}/similar    embedding neighbors
@@ -507,14 +508,19 @@ GET /v1/search?q=...           AGENT search, not pure semantic (redefined by Ale
                                query into HARD filters (time, category, exclusions,
                                price - set logic in SQL); audience attributes are SOFT
                                preferences (importance x certainty, see §7); desired
-                               tags rank softly unless min_tag_match is explicit.
+                               tags rank softly unless min_tag_match is explicit;
+                               min_tag_concept_match optionally floors each concept.
 POST /v1/query                 the same search WITHOUT the index-side LLM (added
                                2026-07-08): callers send the filter fields directly,
                                plus importance weights, required_attributes, tags,
-                               and optional min_tag_match. The
+                               and optional min_tag_match/min_tag_concept_match. The
                                endpoint for agents; discovery via /llms.txt (llmstxt.org
                                convention) + /.well-known/api-catalog (RFC 9727).
-GET /v1/feed.ics?tags=...&min_tag_match=...   semantic calendar subscription
+GET /v1/feed.ics?tags=...&min_tag_match=...&min_tag_concept_match=...
+                               scheduled-only semantic calendar subscription;
+                               MCP coverage is null when not checked, otherwise
+                               proves accepted occurrence IDs survive the exact
+                               limited feed query or reports omission reasons
 POST /v1/reports               user feedback: wrong/cancelled/duplicate → QA queue,
                                feeds source trust
 GET /v1/changes?since=cursor   delta stream for downstream consumers/agents

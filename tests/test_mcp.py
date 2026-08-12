@@ -7,6 +7,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -130,40 +131,53 @@ def test_search_events_returns_multi_tag_evidence_without_contract_error(
     from eventindex import tags as tag_store
 
     event_id = _add_event(
-        conn, "Summer Ball", starts=NOW + timedelta(days=3),
+        conn, "Singing Circle", starts=NOW + timedelta(days=3),
         lat=48.30, lon=14.29, category=["nightlife"],
     )
     conn.commit()
 
     def semantic_matches(tx, event_ids, desired):
-        assert desired == ["dance", "elegant"]
+        assert desired == ["singing", "movement"]
         concepts = []
-        for query, event_tag, joint in (
-            ("dance", "dancing", False),
-            ("elegant", "formal", False),
-            ("dance + elegant", "ballroom dancing", True),
+        for query, event_tag, score, joint in (
+            ("singing", "singing circle", 0.882657, False),
+            ("movement", "movement", 0.154198, False),
+            ("singing + movement", "sound meditation", 0.745269, True),
         ):
             support = {
-                "score": 0.8,
+                "score": score,
                 "event_tag": event_tag,
                 "tag_confidence": 0.8,
-                "relatedness": 1.0,
+                "relatedness": score / 0.8,
                 "origin": "event_tag",
             }
             concepts.append({
                 "query": query,
-                "score": 0.8,
+                "score": score,
                 "event_tag": event_tag,
                 "tag_confidence": 0.8,
-                "relatedness": 1.0,
+                "relatedness": score / 0.8,
                 "origin": "event_tag",
                 "supports": [support],
                 "joint": joint,
+                "role": (
+                    "combined_phrase_context" if joint else "requested_concept"
+                ),
             })
         return {
             candidate: {
-                "score": 0.8 if candidate == event_id else 0.0,
+                # Regression for the production Singing Circle result: the
+                # strong combined-phrase diagnostic must never be presented
+                # as the final multi-concept coverage score.
+                "score": 0.262533 if candidate == event_id else 0.0,
                 "concepts": concepts,
+                "weakest_concept_score": (
+                    0.154198 if candidate == event_id else 0.0
+                ),
+                "weakest_concept_query": "movement",
+                "combined_context_score": (
+                    0.745269 if candidate == event_id else 0.0
+                ),
             }
             for candidate in event_ids
         }
@@ -171,19 +185,26 @@ def test_search_events_returns_multi_tag_evidence_without_contract_error(
     monkeypatch.setattr(tag_store, "semantic_matches", semantic_matches)
     result = _call(client, "search_events", {
         "filters": {
-            "name": "ball",
-            "tags": ["dance", "elegant"],
+            "name": "Singing Circle",
+            "tags": ["singing", "movement"],
             "importance": {"tags": 1.0},
         },
         "limit": 8,
     })
 
-    assert [row["title"] for row in result["occurrences"]] == ["Summer Ball"]
+    assert [row["title"] for row in result["occurrences"]] == ["Singing Circle"]
     matches = result["occurrences"][0]["tag_matches"]
     assert len(matches) == 3
     assert matches[-1]["joint"] is True
+    assert matches[-1]["role"] == "combined_phrase_context"
     assert matches[0]["origin"] == "event_tag"
     assert matches[0]["supports"][0]["origin"] == "event_tag"
+    row = result["occurrences"][0]
+    assert row["tag_match"] == 0.2625
+    assert row["tag_weakest_concept_match"] == 0.1542
+    assert row["tag_weakest_concept"] == "movement"
+    assert row["tag_context_match"] == 0.7453
+    assert row["tag_context_match"] != row["tag_match"]
 
 
 def test_search_events_rejects_unknown_filters(client):
@@ -246,6 +267,8 @@ def test_get_calendar_link_builds_ics_url(client):
     assert "category=nightlife" in out["ics_url"]
     assert "exclude_sex_service_context=true" in out["ics_url"]
     assert "include_time_unknown=false" in out["ics_url"]
+    assert out["coverage_complete"] is None
+    assert out["coverage"] == []
 
     with_unknown_times = _call(client, "get_calendar_link", {
         "filters": {"categories": ["nightlife"]},
@@ -257,10 +280,12 @@ def test_get_calendar_link_builds_ics_url(client):
     semantic = _call(client, "get_calendar_link", {
         "filters": {
             "tags": ["salsa dancing"], "min_tag_match": 0.6,
+            "min_tag_concept_match": 0.4,
         },
     })
     assert "tags=salsa+dancing" in semantic["ics_url"]
     assert "min_tag_match=0.6" in semantic["ics_url"]
+    assert "min_tag_concept_match=0.4" in semantic["ics_url"]
 
     tentative = _call(client, "get_calendar_link", {
         "filters": {
@@ -298,6 +323,206 @@ def test_get_calendar_link_builds_ics_url(client):
     })
     assert "participant_count_min=300" in large["ics_url"]
     assert "min_scale_confidence=0.3" in large["ics_url"]
+
+
+def test_calendar_link_proves_highlighted_occurrence_coverage(conn, client):
+    occurrence_id = conn.execute(
+        "SELECT o.id FROM occurrence o JOIN event e ON e.id = o.event_id "
+        "WHERE e.title = 'Salsa Social'"
+    ).fetchone()["id"]
+
+    covered = _call(client, "get_calendar_link", {
+        "filters": {"categories": ["nightlife"]},
+        "accepted_occurrence_ids": [str(occurrence_id)],
+    })
+
+    assert covered["coverage_complete"] is True
+    assert covered["coverage"] == [{
+        "occurrence_id": str(occurrence_id),
+        "title": "Salsa Social",
+        "included": True,
+        "reasons": [],
+    }]
+    assert "limit=1000" in covered["ics_url"]
+    feed_url = urlsplit(covered["ics_url"])
+    rendered = client.get(f"{feed_url.path}?{feed_url.query}")
+    assert f"UID:{occurrence_id}@eventindex".encode() in rendered.content
+
+    omitted = _call(client, "get_calendar_link", {
+        "filters": {"categories": ["music"]},
+        "accepted_occurrence_ids": [str(occurrence_id)],
+    })
+    assert omitted["coverage_complete"] is False
+    assert omitted["ics_url"] is None
+    assert "category" in omitted["coverage"][0]["reasons"]
+
+
+def test_calendar_link_explains_time_geo_and_confidence_omissions(conn, client):
+    row = conn.execute(
+        "SELECT o.id, e.id AS event_id FROM occurrence o "
+        "JOIN event e ON e.id = o.event_id WHERE e.title = 'Salsa Social'"
+    ).fetchone()
+    conn.execute(
+        "UPDATE occurrence SET time_unknown = true WHERE id = %s", (row["id"],)
+    )
+    conn.execute(
+        "UPDATE event SET confidence = 0.2 WHERE id = %s", (row["event_id"],)
+    )
+    conn.commit()
+
+    out = _call(client, "get_calendar_link", {
+        "filters": {
+            "categories": ["nightlife"],
+            "near": "47.0,13.0",
+            "radius": "1km",
+        },
+        "accepted_occurrence_ids": [str(row["id"])],
+    })
+
+    assert out["ics_url"] is None
+    assert set(out["coverage"][0]["reasons"]) >= {
+        "time_unknown", "geography", "confidence",
+    }
+
+
+def test_calendar_link_serializes_geo_and_rejects_unpreservable_filters(client):
+    out = _call(client, "get_calendar_link", {
+        "filters": {
+            "categories": ["nightlife"],
+            "near": "48.3069,14.2858",
+            "radius": "3km",
+        },
+    })
+    assert "near=48.3069%2C14.2858" in out["ics_url"]
+    assert "radius=3km" in out["ics_url"]
+
+    for filters, expected in (
+        ({"categories": ["nightlife"], "age_min": 20}, "age"),
+        (
+            {"categories": ["nightlife"], "sex_service_context": True},
+            "sex_service_context=true",
+        ),
+    ):
+        body = _rpc(client, "tools/call", {
+            "name": "get_calendar_link", "arguments": {"filters": filters},
+        })
+        assert body["result"].get("isError") is True
+        assert expected in body["result"]["content"][0]["text"].lower()
+
+
+def test_calendar_radius_any_overrides_near_and_preserves_unknown_geo(
+    conn, client,
+):
+    occurrence_id = conn.execute(
+        "SELECT o.id FROM occurrence o JOIN event e ON e.id = o.event_id "
+        "WHERE e.title = 'Chamber Concert'"
+    ).fetchone()["id"]
+
+    out = _call(client, "get_calendar_link", {
+        "filters": {
+            "categories": ["music"],
+            "near": "47.0,13.0",
+            "radius": "any",
+        },
+        "accepted_occurrence_ids": [str(occurrence_id)],
+    })
+
+    assert out["coverage_complete"] is True
+    assert out["coverage"][0]["included"] is True
+    assert "radius=any" in out["ics_url"]
+
+
+def test_calendar_coverage_reports_non_scheduled_and_missing_ids(conn, client):
+    row = conn.execute(
+        "SELECT o.id FROM occurrence o JOIN event e ON e.id = o.event_id "
+        "WHERE e.title = 'Salsa Social'"
+    ).fetchone()
+    conn.execute(
+        "UPDATE occurrence SET status = 'moved' WHERE id = %s", (row["id"],)
+    )
+    conn.commit()
+
+    out = _call(client, "get_calendar_link", {
+        "filters": {"categories": ["nightlife"]},
+        "accepted_occurrence_ids": [str(row["id"]), str(uuid.uuid4())],
+    })
+
+    assert out["ics_url"] is None
+    assert out["coverage_complete"] is False
+    assert out["coverage"][0]["reasons"] == ["not_scheduled"]
+    assert out["coverage"][1]["reasons"] == ["not_found"]
+
+
+def test_calendar_coverage_does_not_reveal_safety_suppressed_title(conn, client):
+    row = conn.execute(
+        "SELECT o.id, e.id AS event_id FROM occurrence o "
+        "JOIN event e ON e.id = o.event_id WHERE e.title = 'Salsa Social'"
+    ).fetchone()
+    _mark_sex_service(conn, row["event_id"])
+    conn.commit()
+
+    out = _call(client, "get_calendar_link", {
+        "filters": {"categories": ["nightlife"]},
+        "accepted_occurrence_ids": [str(row["id"])],
+    })
+
+    assert out["ics_url"] is None
+    assert out["coverage_complete"] is False
+    assert out["coverage"] == [{
+        "occurrence_id": str(row["id"]),
+        "title": None,
+        "included": False,
+        "reasons": ["sex_service_safety"],
+    }]
+
+
+def test_calendar_coverage_caps_accepted_occurrence_ids(client):
+    body = _rpc(client, "tools/call", {
+        "name": "get_calendar_link",
+        "arguments": {
+            "filters": {"categories": ["music"]},
+            "accepted_occurrence_ids": [str(uuid.uuid4()) for _ in range(101)],
+        },
+    })
+    assert body["result"].get("isError") is True
+
+
+def test_calendar_coverage_reports_a_weak_requested_concept(
+    conn, client, monkeypatch,
+):
+    import numpy as np
+
+    from eventindex import embeddings, tags
+
+    event_id = _add_event(
+        conn, "Sound Session", starts=NOW + timedelta(days=3),
+        category=["learning"],
+    )
+    tags.upsert(conn, event_id, "singing", 0.8, "inferred")
+    tags.upsert(conn, event_id, "movement", 0.2, "inferred")
+    occurrence_id = conn.execute(
+        "SELECT id FROM occurrence WHERE event_id = %s", (event_id,)
+    ).fetchone()["id"]
+    conn.commit()
+    monkeypatch.setattr(
+        embeddings,
+        "embed_tags",
+        lambda values: np.zeros(
+            (len(values), embeddings.DIMENSIONS), dtype=np.float32
+        ),
+    )
+
+    out = _call(client, "get_calendar_link", {
+        "filters": {
+            "tags": ["singing", "movement"],
+            "min_tag_match": 0.25,
+            "min_tag_concept_match": 0.3,
+        },
+        "accepted_occurrence_ids": [str(occurrence_id)],
+    })
+
+    assert out["ics_url"] is None
+    assert out["coverage"][0]["reasons"] == ["tag_concept_match"]
 
 
 def test_get_calendar_link_rejects_an_unscoped_subscription(client):
@@ -604,7 +829,10 @@ def test_event_detail_never_returns_raw_claim_payload(conn, client):
     assert mcp_detail["sources"][0]["url"] == \
         "https://source.example/events/correct-event"
     assert len(mcp_detail["event"]["tags"]) == 16
-    assert set(mcp_detail["event"]["tags"][0]) == {"name", "confidence", "origins"}
+    assert set(mcp_detail["event"]["tags"][0]) == {
+        "name", "confidence", "origins", "evidence_bases",
+    }
+    assert mcp_detail["event"]["tags"][0]["evidence_bases"] == ["unknown"]
     public_detail = client.get(f"/v1/events/{event_id}").json()
     assert "claims" not in public_detail
     assert "SECRET PRIVATE ADDRESS" not in json.dumps(public_detail)

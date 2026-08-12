@@ -315,6 +315,28 @@ def test_min_tag_match_is_an_explicit_hard_filter():
     assert [row["title"] for row in ranked] == ["Salsa"]
 
 
+def test_min_tag_concept_match_bottlenecks_every_requested_concept():
+    f = _filters(
+        tags=["singing", "movement"],
+        min_tag_match=0.25,
+        min_tag_concept_match=0.3,
+    )
+    event_id = uuid.uuid4()
+    rows = [{
+        "event_id": event_id,
+        "title": "Singing Circle",
+        "confidence": 0.8,
+        "tag_weakest_concept_match": 0.2,
+    }]
+
+    assert rank(rows, f, tag_scores={event_id: 0.3}) == []
+
+
+def test_min_tag_concept_match_requires_tags():
+    with pytest.raises(ValidationError, match="requires at least one tag"):
+        _filters(min_tag_concept_match=0.3)
+
+
 # ------------------------------------------------------------- registry
 
 def test_filter_defaults_cover_the_whole_model():
@@ -322,7 +344,23 @@ def test_filter_defaults_cover_the_whole_model():
 
 
 def test_documented_any_radius_disables_geo_validation_gate():
-    assert _filters(radius="any").radius == "any"
+    filters = _filters(near="48.3069,14.2858", radius="any")
+    where, params = build_sql(filters)
+    assert filters.radius == "any"
+    assert "ST_DWithin" not in where
+    assert "g_m" not in params
+
+
+@pytest.mark.parametrize("values", [
+    {"near": "91,14"},
+    {"near": "48,nan"},
+    {"near": "48,14,15"},
+    {"radius": "."},
+    {"radius": "1..2km"},
+])
+def test_invalid_geo_values_never_reach_sql(values):
+    with pytest.raises(ValidationError):
+        _filters(**values)
 
 
 def test_registry_covers_every_soft_filter_field():

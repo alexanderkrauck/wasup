@@ -129,13 +129,41 @@ def _cache_verdict(pair_key, fp_a, fp_b, title_a, title_b, score, verdict, decid
 def _load_claims(tx) -> list[Claim]:
     rows = tx.execute(
         """
-        SELECT DISTINCT ON (c.source_id, c.fingerprint)
-               c.id, c.source_id, c.fingerprint, c.extracted_at, c.payload,
+        WITH latest AS (
+            SELECT DISTINCT ON (c.source_id, c.fingerprint)
+                   c.id, c.source_id, c.fingerprint, c.extracted_at, c.payload
+            FROM event_claim c
+            ORDER BY c.source_id, c.fingerprint, c.extracted_at DESC, c.id DESC
+        )
+        SELECT c.id, c.source_id, c.fingerprint, c.extracted_at, c.payload,
+               prior.rrule_raw AS prior_rrule_raw,
                s.trust, s.url AS source_url, s.crawl_interval,
                s.name AS source_name, s.extraction_hint AS source_hint,
                ST_Y(s.geo) AS source_lat, ST_X(s.geo) AS source_lon
-        FROM event_claim c JOIN source s ON s.id = c.source_id
-        ORDER BY c.source_id, c.fingerprint, c.extracted_at DESC
+        FROM latest c JOIN source s ON s.id = c.source_id
+        LEFT JOIN LATERAL (
+            SELECT old.payload -> 'rrule_raw' AS rrule_raw
+            FROM event_claim old
+            WHERE old.source_id = c.source_id
+              AND c.payload -> 'status' ->> 'value'
+                  IN ('cancelled', 'moved', 'postponed')
+              AND NOT (c.payload ? 'recurrence_id')
+              AND NOT (c.payload ? 'rrule_raw')
+              AND old.payload ? 'rrule_raw'
+              AND NOT (old.payload ? 'recurrence_id')
+              AND old.extracted_at <= c.extracted_at
+              AND (
+                  old.fingerprint = c.fingerprint
+                  OR (
+                      c.payload -> 'calendar_uid' ->> 'value' IS NOT NULL
+                      AND old.payload -> 'calendar_uid' ->> 'value'
+                          = c.payload -> 'calendar_uid' ->> 'value'
+                  )
+              )
+            ORDER BY old.extracted_at DESC, old.id DESC
+            LIMIT 1
+        ) prior ON true
+        ORDER BY c.source_id, c.fingerprint
         """
     ).fetchall()
     from eventindex.extract import (
@@ -144,11 +172,24 @@ def _load_claims(tx) -> list[Claim]:
 
     claims = []
     for r in rows:
+        r = dict(r)
+        prior_rrule_raw = r.pop("prior_rrule_raw", None)
         c = Claim(**r)
         # claims are immutable; hygiene added later (entity unescape, price
         # plausibility, non-event patterns) must therefore re-run at rebuild
         # time - this is what repairs the historical corpus for free
         c.payload = normalize_claim(dict(c.payload))
+        # An iTIP cancellation of a recurring master identifies the existing
+        # object by UID and need not repeat RRULE. Claims are append-only, so
+        # recover only that negative master's last structured recurrence set
+        # in memory; a positive omission continues to mean "not recurring".
+        if (
+            prior_rrule_raw
+            and c.value("status") in NEGATIVE_STATUSES
+            and c.value("recurrence_id") is None
+            and c.value("rrule_raw") is None
+        ):
+            c.payload["rrule_raw"] = prior_rrule_raw
         c.title = c.value("title") or ""
         c.starts_at = parse_dt(c.value("starts_at"))
         c.ends_at = parse_dt(c.value("ends_at"))
@@ -319,14 +360,68 @@ def _group_claims(tx, claims: list[Claim], venue_notes: list[str]) -> list[dict]
     groups: dict[str, dict] = {}
     oneoffs: list[Claim] = []
 
-    # pass 1: recurrence-bearing claims -> H1.3 series fingerprint
+    # Evaluate recurrence once. Detached RFC components must never derive a
+    # second text rule from their inherited description; their UID attaches
+    # them to the structured master below.
+    evaluated = []
     for c in claims:
         rec = _recurrence_of(c)
         rrule_raw = c.value("rrule_raw")
-        if rec is None and rrule_raw is None:
+        if (
+            rec is None and rrule_raw is None
+            and c.value("recurrence_id") is None
+        ):
             rec = _text_recurrence(tx, c)
         if rec is not None and not _rule_fits_claim(rec, c.starts_at):
             rec = None  # the claim's own date contradicts the rule
+        evaluated.append((c, rec, rrule_raw))
+
+    # RFC UID is scoped to its source calendar. It is stronger series lineage
+    # than title/venue and is specifically what lets a detached exception omit
+    # LOCATION (or change DTSTART) without becoming a separate event.
+    uid_masters: dict[tuple, tuple] = {}
+    for c, rec, rrule_raw in evaluated:
+        uid = c.value("calendar_uid")
+        if (
+            not uid or c.value("recurrence_id") is not None
+            or (rec is None and rrule_raw is None)
+        ):
+            continue
+        uid_key = (c.source_id, str(uid))
+        prior = uid_masters.get(uid_key)
+        if prior is None or (c.extracted_at, str(c.id)) > (
+            prior[0].extracted_at, str(prior[0].id)
+        ):
+            uid_masters[uid_key] = (c, rec, rrule_raw)
+
+    uid_groups: dict[tuple, str] = {}
+    for uid_key, (master, rec, rrule_raw) in uid_masters.items():
+        key = series_fingerprint(master.title, _venue_key(master))
+        uid_groups[uid_key] = key
+        groups.setdefault(
+            key,
+            {
+                "key": key, "claims": [], "recurrence": rec,
+                "rrule_raw": rrule_raw,
+            },
+        )
+
+    # pass 1: recurrence-bearing claims -> H1.3 series fingerprint; detached
+    # components join their exact source-calendar UID master first.
+    for c, rec, rrule_raw in evaluated:
+        uid = c.value("calendar_uid")
+        uid_key = (c.source_id, str(uid)) if uid else None
+        if uid_key in uid_groups and (
+            c.value("recurrence_id") is not None
+            or rec is not None or rrule_raw is not None
+        ):
+            g = groups[uid_groups[uid_key]]
+            g["claims"].append(c)
+            # The preselected newest master owns the rule; these fallbacks are
+            # for an otherwise-empty group only.
+            g["recurrence"] = g["recurrence"] or rec
+            g["rrule_raw"] = g["rrule_raw"] or rrule_raw
+            continue
         if rec is None and rrule_raw is None:
             oneoffs.append(c)
             continue
@@ -925,23 +1020,72 @@ def _merge_fields(g: dict) -> tuple[dict, dict]:
     return values, provenance
 
 
-def _merge_status(claims: list[Claim]) -> dict:
-    """Asymmetric recency-first status merge (§6), per Vienna day.
+def _merge_status(claims: list[Claim]) -> tuple[dict, dict, dict, dict | None]:
+    """Asymmetric recency-first status merge (§6).
 
     A trusted negative beats all OLDER positives; only a NEWER positive from
-    an equal-or-higher-trust source reverts it."""
+    an equal-or-higher-trust source reverts it. Recurring master status is
+    series-wide; RECURRENCE-ID exceptions are scoped to their exact original
+    start, and RFC THISANDFUTURE negatives begin at their stated boundary.
+    """
     per_day: dict = {}
+    per_start: dict = {}
+    from_start: dict = {}
+    series_status: dict | None = None
+    recurring_uids = {
+        (c.source_id, str(c.value("calendar_uid")))
+        for c in claims
+        if c.value("calendar_uid")
+        and c.value("recurrence_id") is None
+        and (c.value("rrule_raw") or c.value("recurrence"))
+    }
     for c in sorted(claims, key=lambda c: (c.extracted_at, str(c.id))):
         day = c.starts_at.astimezone(VIENNA).date()
+        recurrence_start = parse_dt(c.value("recurrence_id"))
         status = c.value("status")
         negative = status in NEGATIVE_STATUSES
-        current = per_day.get(day)
+        uid_key = (
+            (c.source_id, str(c.value("calendar_uid")))
+            if c.value("calendar_uid") else None
+        )
+        series_master = c.value("recurrence_id") is None and (
+            bool(c.value("rrule_raw") or c.value("recurrence"))
+            or uid_key in recurring_uids
+        )
+        if series_master:
+            target, key = None, None
+            current = series_status
+        elif recurrence_start is not None:
+            target = (
+                from_start
+                if c.value("recurrence_range") == "this_and_future"
+                else per_start
+            )
+            key = recurrence_start
+            current = target.get(key)
+        else:
+            target, key = per_day, day
+            current = target.get(key)
         if negative and c.trust > MIN_TRUST_FOR_NEGATIVE:
-            per_day[day] = {"status": status, "trust": c.trust, "at": c.extracted_at}
+            verdict = {
+                "status": status, "trust": c.trust, "at": c.extracted_at,
+            }
+            if series_master:
+                series_status = verdict
+            else:
+                target[key] = verdict
         elif not negative and current and c.extracted_at > current["at"] \
                 and c.trust >= current["trust"]:
-            per_day[day] = None  # reverted by newer equal-or-higher-trust positive
-    return {d: v for d, v in per_day.items() if v}
+            if series_master:
+                series_status = None
+            else:
+                target[key] = None
+    return (
+        {d: v for d, v in per_day.items() if v},
+        {start: v for start, v in per_start.items() if v},
+        {start: v for start, v in from_start.items() if v},
+        series_status,
+    )
 
 
 def _event_confidence(claims: list[Claim]) -> float:
@@ -1242,22 +1386,103 @@ def _occurrences_for(
     if g["rrule_raw"]:
         from dateutil.rrule import rrulestr
 
-        anchor = min(c.starts_at for c in g["claims"])
+        masters = [
+            c for c in g["claims"]
+            if c.value("recurrence_id") is None and c.value("rrule_raw")
+        ]
+        matching_masters = [
+            c for c in masters if c.value("rrule_raw") == g["rrule_raw"]
+        ]
+        master = max(
+            matching_masters or masters,
+            key=lambda c: (c.extracted_at, c.trust, str(c.id)),
+            default=None,
+        )
+        anchor = master.starts_at if master else min(
+            c.starts_at for c in g["claims"]
+        )
         try:
             rule = rrulestr(g["rrule_raw"], dtstart=anchor)
             horizon = now + recurrence.timedelta(weeks=recurrence.EXPANSION_WEEKS)
+            lower = now - recurrence.timedelta(hours=12)
             duration = None
-            first = g["claims"][0]
-            if first.ends_at and _sane_end(
-                first.starts_at, first.ends_at, first.value("category")
+            if master and master.ends_at and _sane_end(
+                master.starts_at, master.ends_at, master.value("category")
             ):
-                duration = first.ends_at - first.starts_at
-            pairs = [
-                (o, o + duration if duration else None)
-                for o in rule.between(now - recurrence.timedelta(hours=12), horizon, inc=True)
-            ]
+                duration = master.ends_at - master.starts_at
+            pair_by_start = {
+                occurrence: (
+                    occurrence,
+                    occurrence + duration if duration else None,
+                )
+                for occurrence in rule.between(lower, horizon, inc=True)
+            }
+
+            # Detached RFC components replace one generated beat. UID grouping
+            # has already attached them even when they omit LOCATION. Keep only
+            # the latest version from each source calendar: a moved DTSTART can
+            # otherwise leave both historical replacements in immutable claims.
+            detached: dict[tuple, Claim] = {}
+            for claim in g["claims"]:
+                original = parse_dt(claim.value("recurrence_id"))
+                if original is None:
+                    continue
+                identity = (
+                    claim.source_id,
+                    str(claim.value("calendar_uid") or ""),
+                    original,
+                )
+                current = detached.get(identity)
+                if current is None or (
+                    claim.extracted_at, claim.trust, str(claim.id)
+                ) > (current.extracted_at, current.trust, str(current.id)):
+                    detached[identity] = claim
+
+            for claim in sorted(
+                detached.values(),
+                key=lambda c: (c.extracted_at, c.trust, str(c.id)),
+            ):
+                original = parse_dt(claim.value("recurrence_id"))
+                negative = claim.value("status") in NEGATIVE_STATUSES
+                affects_future = (
+                    claim.value("recurrence_range") == "this_and_future"
+                )
+                if negative:
+                    # Preserve a cancellation row even when the source also
+                    # encoded the exception as EXDATE; the exact/range status
+                    # merge below keeps it out of public scheduled results.
+                    if lower <= original <= horizon and original not in pair_by_start:
+                        pair_by_start[original] = (
+                            original,
+                            original + duration if duration else None,
+                        )
+                    continue
+
+                if affects_future:
+                    # A positive THISANDFUTURE can change cadence as well as
+                    # time. The current contract cannot safely recompile that
+                    # rule, so fail closed after the boundary and retain only
+                    # the explicitly grounded replacement below.
+                    pair_by_start = {
+                        starts: pair for starts, pair in pair_by_start.items()
+                        if starts < original
+                    }
+                else:
+                    pair_by_start.pop(original, None)
+
+                replacement = claim.starts_at
+                if lower <= replacement <= horizon:
+                    replacement_end = _sane_end(
+                        replacement, claim.ends_at, claim.value("category")
+                    )
+                    if replacement_end is None and duration:
+                        replacement_end = replacement + duration
+                    pair_by_start[replacement] = (
+                        replacement, replacement_end,
+                    )
+            pairs = sorted(pair_by_start.values(), key=lambda pair: pair[0])
             return pairs, g["rrule_raw"], set()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             pass
     # explicit dates: union over claims, folded per local day
     pairs = _fold_pairs(
@@ -1397,7 +1622,10 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             if not pairs:
                 continue
             values, provenance = _merge_fields(g)
-            status_by_day = _merge_status(g["claims"])
+            (
+                status_by_day, status_by_start, status_from_start,
+                series_status,
+            ) = _merge_status(g["claims"])
             last_seen = max(c.extracted_at for c in g["claims"])
             is_series = bool(g["key"].startswith("series|"))
             rep = max(g["claims"], key=lambda c: (c.trust, str(c.id)))
@@ -1535,7 +1763,21 @@ def rebuild(conn, now: datetime | None = None) -> dict:
             )
             for starts, ends in pairs:
                 day = starts.astimezone(VIENNA).date()
-                neg = status_by_day.get(day)
+                range_candidates = [
+                    (boundary, verdict)
+                    for boundary, verdict in status_from_start.items()
+                    if boundary <= starts
+                ]
+                range_status = (
+                    max(range_candidates, key=lambda item: item[0])[1]
+                    if range_candidates else None
+                )
+                neg = (
+                    status_by_start.get(starts)
+                    or status_by_day.get(day)
+                    or range_status
+                    or series_status
+                )
                 occ_status = neg["status"] if neg else "scheduled"
                 occ_id = uuid.uuid5(OCC_NS, f"{g['event_id']}|{starts.isoformat()}")
                 conn.execute(

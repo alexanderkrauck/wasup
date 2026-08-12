@@ -130,9 +130,10 @@ class Enrichment(BaseModel):
     tags: list[_TagEst] = Field(
         min_length=6,
         max_length=12,
-        description="6-12 useful event concepts, each 1-3 lowercase words "
-        "with its own confidence, including the core named format and useful "
-        "atmosphere/style; no synonyms, translations, or commentary")
+        description="6-12 retrieval concepts covering the core activity, "
+        "participant actions, format, interaction, distinctive experience, "
+        "and explicit secondary activities; no structured-metadata filler, "
+        "mechanical parent expansion, synonyms, translations, or commentary")
     venue: _TextEst
     price: _PriceEst
     start_time: _TimeEst
@@ -143,14 +144,20 @@ class Enrichment(BaseModel):
             raise ValueError("age estimates must satisfy 0 <= min <= max <= 100")
         if not 0 <= self.gender_split.value <= 1:
             raise ValueError("gender_split must be between 0 and 1")
-        if len({tag.name for tag in self.tags}) < 6:
-            raise ValueError("tags must contain at least 6 distinct concepts")
+        cleaned_tags = tag_store.clean_estimates(
+            tag.model_dump() for tag in self.tags
+        )
+        if len(cleaned_tags) < MIN_INFERRED_TAGS:
+            raise ValueError(
+                "tags must contain at least 6 distinct useful concepts after "
+                "structured-metadata filler is removed"
+            )
         return self
 
 
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
@@ -255,15 +262,33 @@ def enrich_event(tx, event: dict, job_id=None) -> dict:
         "and finally event-format world knowledge. Put short basis labels in "
         "basis; confidence ~0.2 for a pure guess, ~0.35 for a normal type/venue "
         "estimate, and up to 0.8 only for explicit text. "
-        "tags: provide 6-12 distinct, useful concepts covering activity/topic, "
-        "format, audience, atmosphere/style, and setting. Always include the "
-        "core named activity or event format when the title states it; explicit "
-        "title evidence may have confidence 0.8. Also include a broader parent "
-        "activity when it is useful for retrieval and not merely a synonym. "
-        "Each tag is 1-3 lowercase words. "
-        "Do not emit generic tags like 'event' or 'linz', commentary, duplicate "
-        "synonyms, or translations of the same concept. A tag may use world "
-        "knowledge at low confidence; quote evidence when explicit. "
+        "tags: propose 8-12 distinct retrieval concepts so at least 6 useful "
+        "ones remain after validation. Cover the core activity/topic, event "
+        "format, what participants actually do, social/interaction mechanics, "
+        "distinctive atmosphere/style or experience, and meaningful secondary "
+        "activities. Include an optional or secondary participant action when "
+        "the description explicitly offers it; do not omit it merely because "
+        "it is not the title's primary noun. Examples of actions include sing, "
+        "move or dance, pair up, converse, network, cook, improvise, compete, "
+        "and collaborate. Always include the core named activity or event format "
+        "when the title states it; explicit title evidence may have confidence "
+        "0.8. Each tag is 1-3 lowercase words. "
+        "Do not spend tags on information already represented by structured "
+        "fields: city/metro area, time of day, price, indoor setting, age or "
+        "gender estimates, audience size, language, or generic category. Do "
+        "not emit generic tags like 'event' or 'linz', commentary, duplicate "
+        "synonyms, or translations of the same concept. "
+        "For an important specific 2-3 word activity, include a broader parent "
+        "only when it materially broadens a plausible discovery query and is "
+        "a genuinely distinct concept: movement to music + movement and mantra "
+        "singing + singing can help; night out + night and running club + club "
+        "do not. Never add one-word head tags mechanically or to fill quota. "
+        "A normalized tag may be English while its evidence remains German or "
+        "another source language. Evidence must always be the exact original "
+        "source-language quote, never its translation or a paraphrase (for "
+        "example tag 'movement' may quote 'Bewegen zu den Klangwelten'). An "
+        "explicitly stated or clearly text-entailed activity may use confidence "
+        "up to 0.8 with that quote; world knowledge stays low-confidence. "
         "venue: only a public venue/organization name explicitly present in "
         "TITLE or DESCRIPTION; never guess and never return an address. "
         "price: ALWAYS return the best EUR admission-price range. If TITLE, "

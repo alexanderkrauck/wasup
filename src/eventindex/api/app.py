@@ -363,10 +363,32 @@ def _attach_public_price_and_scale(row: dict) -> dict:
 
 
 def _parse_radius(radius: str) -> float:
-    m = re.fullmatch(r"([\d.]+)\s*(km|m)?", radius.strip())
-    if not m:
-        raise HTTPException(422, "radius must look like '5km' or '500m'")
-    return float(m.group(1)) * (1000 if (m.group(2) or "km") == "km" else 1)
+    from eventindex.api.search import _radius_m
+
+    try:
+        return _radius_m(radius)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+def _parse_bbox(value: str) -> tuple[float, float, float, float]:
+    try:
+        pieces = value.split(",")
+        if len(pieces) != 4:
+            raise ValueError
+        x1, y1, x2, y2 = (float(piece) for piece in pieces)
+    except ValueError:
+        raise HTTPException(
+            422, "bbox must be 'min_lon,min_lat,max_lon,max_lat'"
+        )
+    if not all(math.isfinite(item) for item in (x1, y1, x2, y2)):
+        raise HTTPException(422, "bbox coordinates must be finite")
+    if not (-180 <= x1 <= x2 <= 180 and -90 <= y1 <= y2 <= 90):
+        raise HTTPException(
+            422,
+            "bbox must have ordered longitude -180..180 and latitude -90..90",
+        )
+    return x1, y1, x2, y2
 
 
 def _encode_cursor(ts: datetime, row_id) -> str:
@@ -389,71 +411,76 @@ def _parse_cursor(cursor: str) -> tuple[datetime, UUID]:
         raise HTTPException(422, "invalid cursor")
 
 
-def _occurrence_filters(
+def _occurrence_filter_parts(
     from_, to, near, radius, bbox, category, min_confidence,
     name=None, organizer=None, venue=None, source=None,
     exclude_sex_service_context: bool = False,
-) -> tuple[list[str], dict]:
-    """The shared filter set of /v1/occurrences and /v1/feed.ics."""
-    from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER
+) -> tuple[list[tuple[str, str]], dict]:
+    """Labelled shared filters for listings, feeds, and feed audits."""
+    from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER, _lat_lon
 
     # overlap semantics: something still running at `from` is in the window
     # (audit A21: ongoing exhibitions were invisible from day 2)
-    conditions = [
-        "coalesce(o.ends_at, o.starts_at) >= %(from)s",
-        "o.status != 'cancelled'",
+    parts = [
+        ("date_window", "coalesce(o.ends_at, o.starts_at) >= %(from)s"),
+        ("not_scheduled", "o.status = 'scheduled'"),
     ]
     params: dict = {"from": from_ or datetime.now(timezone.utc)}
 
     if to is not None:
-        conditions.append("o.starts_at <= %(to)s")
+        parts.append(("date_window", "o.starts_at <= %(to)s"))
         params["to"] = to
     radius_norm = radius.strip().lower()
     explicit_radius = radius_norm not in ("", "any", "default")
+    parsed_near = None
     if near is not None:
         try:
-            lat, lon = (float(x) for x in near.split(","))
-        except ValueError:
-            raise HTTPException(422, "near must be 'lat,lon'")
-        conditions.append(
+            parsed_near = _lat_lon(near)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    if radius_norm != "any" and parsed_near is not None:
+        lat, lon = parsed_near
+        parts.append(("geography", (
             "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
             "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, %(meters)s)"
-        )
+        )))
         params.update(
             lat=lat, lon=lon,
             meters=_parse_radius(radius if explicit_radius else "5km"),
         )
     elif explicit_radius:  # radius without near = circle around Linz center
-        conditions.append(
+        parts.append(("geography", (
             "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
             "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, "
             "%(meters)s)"
-        )
+        )))
         params.update(lat=LINZ_CENTER[0], lon=LINZ_CENTER[1],
                       meters=_parse_radius(radius))
     elif bbox is None and radius_norm != "any":
         # default gate: the index is Linz (15km circle) - but events with
         # UNKNOWN location stay in (null = unknown, audit decision 2026-07-13)
-        conditions.append(
+        parts.append(("geography", (
             "(coalesce(e.geo, v.geo) IS NULL OR "
             "ST_DWithin(coalesce(e.geo, v.geo)::geography, "
             "ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography, "
             "%(meters)s))"
-        )
+        )))
         params.update(lat=LINZ_CENTER[0], lon=LINZ_CENTER[1],
                       meters=DEFAULT_RADIUS_KM * 1000)
     if bbox is not None:
-        try:
-            x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
-        except ValueError:
-            raise HTTPException(422, "bbox must be 'min_lon,min_lat,max_lon,max_lat'")
-        conditions.append("e.geo && ST_MakeEnvelope(%(x1)s, %(y1)s, %(x2)s, %(y2)s, 4326)")
+        x1, y1, x2, y2 = _parse_bbox(bbox)
+        parts.append((
+            "geography",
+            "e.geo && ST_MakeEnvelope(%(x1)s, %(y1)s, %(x2)s, %(y2)s, 4326)",
+        ))
         params.update(x1=x1, y1=y1, x2=x2, y2=y2)
     if category is not None:
         # null category = unknown: never matches a category filter (§7)
-        conditions.append("e.category && %(cats)s")
+        parts.append(("category", "e.category && %(cats)s"))
         params["cats"] = [c.strip() for c in category.split(",")]
-    conditions.append(f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s")
+    parts.append((
+        "confidence", f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s",
+    ))
     params["min_conf"] = (
         DEFAULT_MIN_CONFIDENCE
         if min_confidence is None else min_confidence
@@ -462,33 +489,46 @@ def _occurrence_filters(
         # Same event-title scope and German compound-suffix behavior as the
         # structured query core.
         pat = r"[-\s]?".join(re.escape(tok) for tok in name.split())
-        conditions.append("e.title ~* %(event_name)s")
+        parts.append(("name", "e.title ~* %(event_name)s"))
         params["event_name"] = rf"{pat}\M"
     if organizer:
-        conditions.append("e.organizer ILIKE %(organizer_name)s")
+        parts.append(("organizer", "e.organizer ILIKE %(organizer_name)s"))
         params["organizer_name"] = f"%{organizer}%"
     if venue:
-        conditions.append("v.name ILIKE %(venue_name)s")
+        parts.append(("venue", "v.name ILIKE %(venue_name)s"))
         params["venue_name"] = f"%{venue}%"
     if source:
-        conditions.append(
+        parts.append(("source", (
             "EXISTS (SELECT 1 FROM identity src_i "
             "JOIN event_claim src_c ON src_c.fingerprint = src_i.fingerprint "
             "JOIN source src_s ON src_s.id = src_c.source_id "
             "WHERE src_i.event_id = e.id AND src_s.kind <> 'internal' "
             "AND (src_s.name ILIKE %(source_name)s "
             "OR src_s.url ILIKE %(source_name)s))"
-        )
+        )))
         params["source_name"] = f"%{source}%"
     if exclude_sex_service_context:
         # Keep unknown classifications: the MCP safety policy suppresses
         # only events positively identified as commercial sex services.
-        conditions.append(
+        parts.append(("sex_service_safety", (
             "coalesce(v.sex_service, false) IS DISTINCT FROM TRUE AND "
             "(e.inferred->'sex_service_context'->>'value')::bool "
             "IS DISTINCT FROM TRUE"
-        )
-    return conditions, params
+        )))
+    return parts, params
+
+
+def _occurrence_filters(
+    from_, to, near, radius, bbox, category, min_confidence,
+    name=None, organizer=None, venue=None, source=None,
+    exclude_sex_service_context: bool = False,
+) -> tuple[list[str], dict]:
+    """The shared filter set of /v1/occurrences and /v1/feed.ics."""
+    parts, params = _occurrence_filter_parts(
+        from_, to, near, radius, bbox, category, min_confidence,
+        name, organizer, venue, source, exclude_sex_service_context,
+    )
+    return [condition for _, condition in parts], params
 
 
 @app.get("/v1/occurrences")
@@ -515,6 +555,7 @@ def occurrences(
         None, description="comma-separated semantic event tags; supplying "
         "tags makes this chronological listing a certainty-weighted filter"),
     min_tag_match: float = Query(0.5, ge=0, le=1),
+    min_tag_concept_match: float | None = Query(None, ge=0, le=1),
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
@@ -526,10 +567,15 @@ def occurrences(
         name, organizer, venue, source,
     )
     desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
+    if min_tag_concept_match is not None and not desired_tags:
+        raise HTTPException(
+            422, "min_tag_concept_match requires at least one tag"
+        )
     if desired_tags:
         try:
             condition, desired_tags = tag_store.semantic_threshold_sql(
-                desired_tags, min_tag_match, params, prefix="occ_tag"
+                desired_tags, min_tag_match, params, prefix="occ_tag",
+                min_concept_match=min_tag_concept_match,
             )
         except ValueError as exc:
             raise HTTPException(422, str(exc))
@@ -565,16 +611,26 @@ def occurrences(
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()
         if desired_tags:
-            tag_scores = tag_store.semantic_scores(
+            matches = tag_store.semantic_matches(
                 conn, [row["event_id"] for row in rows], desired_tags
             )
-            rows = [
-                row for row in rows
-                if tag_scores.get(row["event_id"], 0.0) >= min_tag_match
-            ]
             for row in rows:
-                row["tag_match"] = round(tag_scores[row["event_id"]], 4)
-            rows = rows[:limit]
+                match = matches.get(row["event_id"])
+                row["tag_match"] = (
+                    round(match["score"], 4) if match else None
+                )
+                row["tag_weakest_concept_match"] = (
+                    round(match["weakest_concept_score"], 4)
+                    if match else None
+                )
+                row["tag_weakest_concept"] = (
+                    match["weakest_concept_query"] if match else None
+                )
+                row["tag_context_match"] = (
+                    round(match["combined_context_score"], 4)
+                    if match and match["combined_context_score"] is not None
+                    else None
+                )
         rows = [_attach_public_price_and_scale(row) for row in rows]
         freshness = _data_freshness(conn)
 
@@ -588,6 +644,241 @@ def occurrences(
         "occurrences": rows,
         "next_cursor": next_cursor,
     }
+
+
+def _feed_filter_parts(
+    from_, to, near, radius, bbox, category, min_confidence,
+    name, organizer, venue, source, weekdays, max_price, is_free,
+    participant_count_min, participant_count_max, min_scale_confidence,
+    tags, min_tag_match, min_tag_concept_match,
+    exclude_sex_service_context, include_time_unknown,
+) -> tuple[list[tuple[str, str]], dict]:
+    """One feed-membership definition shared by rendering and auditing."""
+    parts, params = _occurrence_filter_parts(
+        from_, to, near, radius, bbox, category, min_confidence,
+        name, organizer, venue, source,
+        exclude_sex_service_context,
+    )
+    if weekdays:
+        from eventindex.api.search import WEEKDAY_NUMBERS
+
+        desired_weekdays = [
+            day.strip().lower() for day in weekdays.split(",") if day.strip()
+        ]
+        unknown_weekdays = set(desired_weekdays) - set(WEEKDAY_NUMBERS)
+        if unknown_weekdays:
+            raise HTTPException(
+                422,
+                f"unknown weekdays {sorted(unknown_weekdays)}; "
+                f"valid: {sorted(WEEKDAY_NUMBERS)}",
+            )
+        parts.append(("weekday", (
+            "extract(isodow from o.starts_at AT TIME ZONE 'Europe/Vienna')::int "
+            "= ANY(%(feed_weekdays)s)"
+        )))
+        params["feed_weekdays"] = [
+            WEEKDAY_NUMBERS[day] for day in desired_weekdays
+        ]
+    if (
+        participant_count_min is not None
+        and participant_count_max is not None
+        and participant_count_min > participant_count_max
+    ):
+        raise HTTPException(
+            422, "participant_count_min is greater than participant_count_max"
+        )
+    has_participant_bound = (
+        participant_count_min is not None or participant_count_max is not None
+    )
+    if min_scale_confidence is not None and not has_participant_bound:
+        raise HTTPException(
+            422,
+            "min_scale_confidence requires participant_count_min or "
+            "participant_count_max",
+        )
+    scale_confidence = (
+        0 if min_scale_confidence is None else min_scale_confidence
+    )
+    if not include_time_unknown:
+        parts.append(("time_unknown", "NOT o.time_unknown"))
+    if is_free:
+        parts.append(("stated_price", "e.price_min = 0"))
+    elif max_price is not None:
+        parts.append(("stated_price", "e.price_min <= %(feed_max_price)s"))
+        params["feed_max_price"] = max_price
+    if participant_count_min is not None:
+        parts.append(("event_scale", (
+            "e.expected_attendance >= %(feed_scale_min)s AND "
+            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
+        )))
+        params.update(
+            feed_scale_min=participant_count_min,
+            feed_scale_conf=scale_confidence,
+        )
+    if participant_count_max is not None:
+        parts.append(("event_scale", (
+            "e.expected_attendance <= %(feed_scale_max)s AND "
+            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
+        )))
+        params.update(
+            feed_scale_max=participant_count_max,
+            feed_scale_conf=scale_confidence,
+        )
+    desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
+    if min_tag_concept_match is not None and not desired_tags:
+        raise HTTPException(
+            422, "min_tag_concept_match requires at least one tag"
+        )
+    if desired_tags:
+        try:
+            condition, desired_tags = tag_store.semantic_threshold_sql(
+                desired_tags, min_tag_match, params, prefix="feed_tag",
+                min_concept_match=min_tag_concept_match,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        parts.append((
+            "tag_membership" if min_tag_concept_match is not None else "tag_match",
+            condition,
+        ))
+    return parts, params
+
+
+def _feed_rows(
+    *, from_=None, to=None, near=None, radius="default", bbox=None,
+    category=None, min_confidence=DEFAULT_MIN_CONFIDENCE, name=None,
+    organizer=None, venue=None, source=None, weekdays=None, max_price=None,
+    is_free=None, participant_count_min=None, participant_count_max=None,
+    min_scale_confidence=None, tags=None, min_tag_match=0.5,
+    min_tag_concept_match=None,
+    exclude_sex_service_context=False, include_time_unknown=True, limit=500,
+) -> list[dict]:
+    parts, params = _feed_filter_parts(
+        from_, to, near, radius, bbox, category, min_confidence,
+        name, organizer, venue, source, weekdays, max_price, is_free,
+        participant_count_min, participant_count_max, min_scale_confidence,
+        tags, min_tag_match, min_tag_concept_match,
+        exclude_sex_service_context, include_time_unknown,
+    )
+    params["limit"] = limit
+    sql = f"""
+        SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
+               e.title, e.url, v.name AS venue_name
+        FROM occurrence o JOIN event e ON e.id = o.event_id
+        LEFT JOIN venue v ON v.id = e.venue_id
+        WHERE {" AND ".join(condition for _, condition in parts)}
+        ORDER BY o.starts_at, o.id
+        LIMIT %(limit)s
+    """
+    with db.connect() as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def _feed_coverage(occurrence_ids: list[UUID], **feed_options) -> list[dict]:
+    """Explain whether highlighted occurrences survive the exact feed."""
+    if not occurrence_ids:
+        return []
+    # One timestamp and one SQL snapshot must define both the per-filter audit
+    # and limited feed membership. Recomputing a default `now()` in a second
+    # query could mislabel a boundary event as truncated.
+    feed_options = dict(feed_options)
+    feed_options["from_"] = (
+        feed_options.get("from_") or datetime.now(timezone.utc)
+    )
+    parts, params = _feed_filter_parts(
+        feed_options.get("from_"), feed_options.get("to"),
+        feed_options.get("near"), feed_options.get("radius", "default"),
+        feed_options.get("bbox"), feed_options.get("category"),
+        feed_options.get("min_confidence", DEFAULT_MIN_CONFIDENCE),
+        feed_options.get("name"), feed_options.get("organizer"),
+        feed_options.get("venue"), feed_options.get("source"),
+        feed_options.get("weekdays"), feed_options.get("max_price"),
+        feed_options.get("is_free"),
+        feed_options.get("participant_count_min"),
+        feed_options.get("participant_count_max"),
+        feed_options.get("min_scale_confidence"),
+        feed_options.get("tags"), feed_options.get("min_tag_match", 0.5),
+        feed_options.get("min_tag_concept_match"),
+        feed_options.get("exclude_sex_service_context", False),
+        feed_options.get("include_time_unknown", True),
+    )
+    check_columns = [
+        f"coalesce(({condition}), false) AS check_{index}"
+        for index, (_, condition) in enumerate(parts)
+    ]
+    params["audit_ids"] = occurrence_ids
+    params["limit"] = feed_options.get("limit", 500)
+    conditions_sql = " AND ".join(condition for _, condition in parts)
+    checks_sql = ", ".join(check_columns)
+    audit_sql = f"""
+        WITH included AS (
+            SELECT o.id
+            FROM occurrence o JOIN event e ON e.id = o.event_id
+            LEFT JOIN venue v ON v.id = e.venue_id
+            WHERE {conditions_sql}
+            ORDER BY o.starts_at, o.id
+            LIMIT %(limit)s
+        )
+        SELECT o.id, o.event_id, e.title,
+               (included.id IS NOT NULL) AS included,
+               {checks_sql}
+        FROM occurrence o JOIN event e ON e.id = o.event_id
+        LEFT JOIN venue v ON v.id = e.venue_id
+        LEFT JOIN included ON included.id = o.id
+        WHERE o.id = ANY(%(audit_ids)s)
+    """
+    with db.connect() as conn:
+        audit_rows = conn.execute(audit_sql, params).fetchall()
+        tag_audits = {}
+        if feed_options.get("tags") \
+                and feed_options.get("min_tag_concept_match") is not None:
+            desired = [
+                tag.strip()
+                for tag in feed_options["tags"].split(",") if tag.strip()
+            ]
+            tag_audits = tag_store.semantic_matches(
+                conn, [row["event_id"] for row in audit_rows], desired
+            )
+    by_id = {row["id"]: row for row in audit_rows}
+    coverage = []
+    for occurrence_id in occurrence_ids:
+        row = by_id.get(occurrence_id)
+        if row is None:
+            coverage.append({
+                "occurrence_id": occurrence_id, "title": None,
+                "included": False, "reasons": ["not_found"],
+            })
+            continue
+        reasons = list(dict.fromkeys(
+            label
+            for index, (label, _) in enumerate(parts)
+            if not row[f"check_{index}"]
+        ))
+        if "tag_membership" in reasons:
+            match = tag_audits.get(row["event_id"], {})
+            final_score = round(float(match.get("score", 0)), 4)
+            weakest_score = round(
+                float(match.get("weakest_concept_score", 0)), 4
+            )
+            reasons.remove("tag_membership")
+            if final_score < feed_options.get("min_tag_match", 0.5):
+                reasons.append("tag_match")
+            if weakest_score < feed_options["min_tag_concept_match"]:
+                reasons.append("tag_concept_match")
+        if not reasons and not row["included"]:
+            reasons = ["feed_limit"]
+        coverage.append({
+            "occurrence_id": occurrence_id,
+            # The audit accepts caller-supplied UUIDs. Do not turn that into
+            # a title lookup for events the mandatory MCP safety gate would
+            # otherwise suppress.
+            "title": (
+                None if "sex_service_safety" in reasons else row["title"]
+            ),
+            "included": bool(row["included"]),
+            "reasons": reasons,
+        })
+    return coverage
 
 
 @app.get("/v1/feed.ics")
@@ -616,12 +907,18 @@ def feed_ics(
         None, description="true requires an explicitly free event"),
     participant_count_min: int | None = Query(None, ge=1),
     participant_count_max: int | None = Query(None, ge=1),
-    min_scale_confidence: float = Query(0, ge=0, le=1),
+    min_scale_confidence: float | None = Query(
+        None, ge=0, le=1,
+        description="requires participant_count_min or participant_count_max",
+    ),
     tags: str | None = Query(
         None, description="comma-separated semantic event tags"),
     min_tag_match: float = Query(
         0.5, ge=0, le=1,
         description="minimum certainty-weighted semantic tag match"),
+    min_tag_concept_match: float | None = Query(
+        None, ge=0, le=1,
+        description="optional minimum match for every requested tag concept"),
     exclude_sex_service_context: bool = Query(
         False,
         description="exclude events positively identified as taking place "
@@ -637,85 +934,19 @@ def feed_ics(
     """Any filter combo as a calendar subscription (§9)."""
     from icalendar import Calendar, Event as ICalEvent
 
-    conditions, params = _occurrence_filters(
-        from_, to, near, radius, bbox, category, min_confidence,
-        name, organizer, venue, source,
-        exclude_sex_service_context,
+    rows = _feed_rows(
+        from_=from_, to=to, near=near, radius=radius, bbox=bbox,
+        category=category, min_confidence=min_confidence, name=name,
+        organizer=organizer, venue=venue, source=source, weekdays=weekdays,
+        max_price=max_price, is_free=is_free,
+        participant_count_min=participant_count_min,
+        participant_count_max=participant_count_max,
+        min_scale_confidence=min_scale_confidence, tags=tags,
+        min_tag_match=min_tag_match,
+        min_tag_concept_match=min_tag_concept_match,
+        exclude_sex_service_context=exclude_sex_service_context,
+        include_time_unknown=include_time_unknown, limit=limit,
     )
-    if weekdays:
-        from eventindex.api.search import WEEKDAY_NUMBERS
-
-        desired_weekdays = [
-            day.strip().lower() for day in weekdays.split(",") if day.strip()
-        ]
-        unknown_weekdays = set(desired_weekdays) - set(WEEKDAY_NUMBERS)
-        if unknown_weekdays:
-            raise HTTPException(
-                422,
-                f"unknown weekdays {sorted(unknown_weekdays)}; "
-                f"valid: {sorted(WEEKDAY_NUMBERS)}",
-            )
-        conditions.append(
-            "extract(isodow from o.starts_at AT TIME ZONE 'Europe/Vienna')::int "
-            "= ANY(%(feed_weekdays)s)"
-        )
-        params["feed_weekdays"] = [
-            WEEKDAY_NUMBERS[day] for day in desired_weekdays
-        ]
-    if (
-        participant_count_min is not None
-        and participant_count_max is not None
-        and participant_count_min > participant_count_max
-    ):
-        raise HTTPException(
-            422, "participant_count_min is greater than participant_count_max"
-        )
-    if not include_time_unknown:
-        conditions.append("NOT o.time_unknown")
-    if is_free:
-        conditions.append("e.price_min = 0")
-    elif max_price is not None:
-        conditions.append("e.price_min <= %(feed_max_price)s")
-        params["feed_max_price"] = max_price
-    if participant_count_min is not None:
-        conditions.append(
-            "e.expected_attendance >= %(feed_scale_min)s AND "
-            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
-        )
-        params.update(
-            feed_scale_min=participant_count_min,
-            feed_scale_conf=min_scale_confidence,
-        )
-    if participant_count_max is not None:
-        conditions.append(
-            "e.expected_attendance <= %(feed_scale_max)s AND "
-            "e.expected_attendance_confidence >= %(feed_scale_conf)s"
-        )
-        params.update(
-            feed_scale_max=participant_count_max,
-            feed_scale_conf=min_scale_confidence,
-        )
-    desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
-    if desired_tags:
-        try:
-            condition, desired_tags = tag_store.semantic_threshold_sql(
-                desired_tags, min_tag_match, params, prefix="feed_tag"
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc))
-        conditions.append(condition)
-    params["limit"] = limit
-    sql = f"""
-        SELECT o.id, o.event_id, o.starts_at, o.ends_at, o.projected, o.time_unknown,
-               e.title, e.url, v.name AS venue_name
-        FROM occurrence o JOIN event e ON e.id = o.event_id
-        LEFT JOIN venue v ON v.id = e.venue_id
-        WHERE {" AND ".join(conditions)}
-        ORDER BY o.starts_at, o.id
-        LIMIT %(limit)s
-    """
-    with db.connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
 
     cal = Calendar()
     cal.add("prodid", "-//eventindex//linz//")
@@ -813,9 +1044,18 @@ def _run_filters(filters, limit: int,
         freshness = _data_freshness(conn)
     for r in rows:
         r["age_range"] = str(r["age_range"]) if r["age_range"] else None
-        r["tag_matches"] = (
-            tag_matches.get(r["event_id"], {}).get("concepts", [])
-            if filters.tags else []
+        match = tag_matches.get(r["event_id"], {}) if filters.tags else {}
+        r["tag_matches"] = match.get("concepts", [])
+        r["tag_weakest_concept_match"] = (
+            round(match["weakest_concept_score"], 4) if match else None
+        )
+        r["tag_weakest_concept"] = (
+            match.get("weakest_concept_query") if match else None
+        )
+        r["tag_context_match"] = (
+            round(match["combined_context_score"], 4)
+            if match and match.get("combined_context_score") is not None
+            else None
         )
     # The MCP safety policy already enforces known commercial-sex exclusion
     # in SQL. Do not also reward a positive "known safe" classification over

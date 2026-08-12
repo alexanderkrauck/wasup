@@ -220,6 +220,354 @@ def test_explicit_multidate_becomes_one_series(conn):
     assert len(occs) == 3
 
 
+def test_ics_rrule_expands_from_a_past_anchor(conn):
+    """Teamup keeps the first beat as DTSTART after it is in the past."""
+    sid = _source(conn, "teamup", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Traunsee-Jam",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Rinnholzplatz Gmunden",
+            rrule_raw=(
+                "FREQ=WEEKLY;UNTIL=20260915T163100Z;INTERVAL=2", 0.95
+            ),
+        ),
+        "traunsee jam|2026-08-04|g",
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    starts = [
+        row["starts_at"].astimezone(recurrence.VIENNA).isoformat()
+        for row in conn.execute(
+            "SELECT starts_at FROM occurrence ORDER BY starts_at"
+        )
+    ]
+    assert starts == [
+        "2026-08-18T18:30:00+02:00",
+        "2026-09-01T18:30:00+02:00",
+        "2026-09-15T18:30:00+02:00",
+    ]
+
+
+def test_ics_recurrence_set_applies_exdate_and_rdate(conn):
+    sid = _source(conn, "calendar", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Open Jam",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Studio",
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T183000\n"
+                "RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=4\n"
+                "EXDATE:20260818T163000Z\n"
+                "RDATE:20260825T163000Z",
+                0.95,
+            ),
+        ),
+        "open jam|2026-08-04|studio",
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    starts = [
+        row["starts_at"].astimezone(recurrence.VIENNA).isoformat()
+        for row in conn.execute(
+            "SELECT starts_at FROM occurrence ORDER BY starts_at"
+        )
+    ]
+    assert starts == [
+        "2026-08-25T18:30:00+02:00",
+        "2026-09-01T18:30:00+02:00",
+        "2026-09-15T18:30:00+02:00",
+    ]
+
+
+def test_cancelled_recurring_master_cancels_every_expanded_beat(conn):
+    sid = _source(conn, "calendar", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Blind Jam",
+            starts="2026-08-04T19:00:00+02:00",
+            venue="Studio",
+            rrule_raw=(
+                "FREQ=WEEKLY;COUNT=5", 0.95
+            ),
+            status=("cancelled", 0.95),
+        ),
+        "blind jam|2026-08-04|studio",
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    statuses = [
+        row["status"]
+        for row in conn.execute(
+            "SELECT status FROM occurrence ORDER BY starts_at"
+        )
+    ]
+    assert statuses == ["cancelled", "cancelled", "cancelled"]
+
+
+def test_detached_ics_override_moves_one_beat_and_uses_master_duration(conn):
+    sid = _source(conn, "calendar-override", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Open Jam",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Studio",
+            ends_at=("2026-08-04T21:30:00+02:00", 0.95),
+            calendar_uid=("open-jam@example.at", 0.95),
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T183000\n"
+                "RRULE:FREQ=WEEKLY;COUNT=6",
+                0.95,
+            ),
+        ),
+        "zzz-master",
+    )
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Open Jam",
+            starts="2026-08-18T20:00:00+02:00",
+            venue=None,
+            calendar_uid=("open-jam@example.at", 0.95),
+            recurrence_id=("2026-08-18T18:30:00+02:00", 0.95),
+        ),
+        "aaa-detached",
+        NOW + timedelta(hours=1),
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    rows = conn.execute(
+        "SELECT starts_at, ends_at FROM occurrence ORDER BY starts_at"
+    ).fetchall()
+    local = [
+        (
+            row["starts_at"].astimezone(recurrence.VIENNA).isoformat(),
+            row["ends_at"].astimezone(recurrence.VIENNA).isoformat(),
+        )
+        for row in rows
+    ]
+    assert local == [
+        ("2026-08-18T20:00:00+02:00", "2026-08-18T23:00:00+02:00"),
+        ("2026-08-25T18:30:00+02:00", "2026-08-25T21:30:00+02:00"),
+        ("2026-09-01T18:30:00+02:00", "2026-09-01T21:30:00+02:00"),
+        ("2026-09-08T18:30:00+02:00", "2026-09-08T21:30:00+02:00"),
+    ]
+    assert conn.execute("SELECT count(*) AS n FROM event").fetchone()["n"] == 1
+
+
+def test_detached_cancellation_without_venue_is_exact_not_whole_day(conn):
+    sid = _source(conn, "calendar-exact-cancel", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Open Jam",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Studio",
+            calendar_uid=("two-beats@example.at", 0.95),
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T183000\n"
+                "RRULE:FREQ=WEEKLY;COUNT=5\n"
+                "RDATE:20260818T183000Z",
+                0.95,
+            ),
+        ),
+        "two-beats-master",
+    )
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Open Jam",
+            starts="2026-08-18T18:30:00+02:00",
+            venue=None,
+            calendar_uid=("two-beats@example.at", 0.95),
+            recurrence_id=("2026-08-18T18:30:00+02:00", 0.95),
+            status=("cancelled", 0.95),
+        ),
+        "two-beats-cancel",
+        NOW + timedelta(hours=1),
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    rows = conn.execute(
+        "SELECT starts_at, status FROM occurrence "
+        "WHERE starts_at < '2026-08-19' ORDER BY starts_at"
+    ).fetchall()
+    assert [
+        (row["starts_at"].astimezone(recurrence.VIENNA).strftime("%H:%M"),
+         row["status"])
+        for row in rows
+    ] == [("18:30", "cancelled"), ("20:30", "scheduled")]
+    assert conn.execute("SELECT count(*) AS n FROM event").fetchone()["n"] == 1
+
+
+def test_cancelled_master_without_rrule_inherits_prior_master_rule(conn):
+    sid = _source(conn, "calendar-master-cancel", 0.8)
+    fingerprint = "blind-jam-master"
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Blind Jam",
+            starts="2026-08-04T19:00:00+02:00",
+            venue="Studio",
+            calendar_uid=("blind-master@example.at", 0.95),
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T190000\n"
+                "RRULE:FREQ=WEEKLY;COUNT=5",
+                0.95,
+            ),
+        ),
+        fingerprint,
+        datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc),
+    )
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Blind Jam",
+            starts="2026-08-04T19:00:00+02:00",
+            venue="Studio",
+            calendar_uid=("blind-master@example.at", 0.95),
+            status=("cancelled", 0.95),
+        ),
+        fingerprint,
+        datetime(2026, 8, 11, 10, 0, tzinfo=timezone.utc),
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    rows = conn.execute(
+        "SELECT status FROM occurrence ORDER BY starts_at"
+    ).fetchall()
+    assert [row["status"] for row in rows] == [
+        "cancelled", "cancelled", "cancelled",
+    ]
+
+
+def test_this_and_future_cancellation_begins_at_exact_boundary(conn):
+    sid = _source(conn, "calendar-range-cancel", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Range Jam",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Studio",
+            calendar_uid=("range-cancel@example.at", 0.95),
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T183000\n"
+                "RRULE:FREQ=WEEKLY;COUNT=6",
+                0.95,
+            ),
+        ),
+        "range-cancel-master",
+    )
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Range Jam",
+            starts="2026-08-25T18:30:00+02:00",
+            venue=None,
+            calendar_uid=("range-cancel@example.at", 0.95),
+            recurrence_id=("2026-08-25T18:30:00+02:00", 0.95),
+            recurrence_range=("this_and_future", 0.95),
+            status=("cancelled", 0.95),
+        ),
+        "range-cancel-exception",
+        NOW + timedelta(hours=1),
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    rows = conn.execute(
+        "SELECT starts_at, status FROM occurrence ORDER BY starts_at"
+    ).fetchall()
+    assert [row["status"] for row in rows] == [
+        "scheduled", "cancelled", "cancelled", "cancelled",
+    ]
+
+
+def test_positive_this_and_future_fails_closed_after_grounded_override(conn):
+    sid = _source(conn, "calendar-range-shift", 0.8)
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Range Move",
+            starts="2026-08-04T18:30:00+02:00",
+            venue="Studio",
+            calendar_uid=("range-move@example.at", 0.95),
+            rrule_raw=(
+                "DTSTART;TZID=Europe/Vienna:20260804T183000\n"
+                "RRULE:FREQ=WEEKLY;COUNT=6",
+                0.95,
+            ),
+        ),
+        "range-move-master",
+    )
+    _claim(
+        conn,
+        sid,
+        _concert(
+            "Range Move",
+            starts="2026-08-25T20:00:00+02:00",
+            venue=None,
+            calendar_uid=("range-move@example.at", 0.95),
+            recurrence_id=("2026-08-25T18:30:00+02:00", 0.95),
+            recurrence_range=("this_and_future", 0.95),
+        ),
+        "range-move-exception",
+        NOW + timedelta(hours=1),
+    )
+
+    rb.rebuild(
+        conn, now=datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    )
+
+    starts = [
+        row["starts_at"].astimezone(recurrence.VIENNA).isoformat()
+        for row in conn.execute(
+            "SELECT starts_at FROM occurrence ORDER BY starts_at"
+        )
+    ]
+    assert starts == [
+        "2026-08-18T18:30:00+02:00",
+        "2026-08-25T20:00:00+02:00",
+    ]
+
+
 def test_weekly_implicit_series_projects_beyond_feed_horizon(conn):
     """Completeness contract: a 7-day-capped feed showing a weekly series
     gets projected forward - but only past what the feed could have shown."""

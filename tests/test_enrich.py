@@ -38,7 +38,7 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
             {"name": "loud", "confidence": 0.3, "evidence": None},
             {"name": "dance", "confidence": 0.3, "evidence": None},
             {"name": "night out", "confidence": 0.3, "evidence": None},
-            {"name": "indoor", "confidence": 0.3, "evidence": None},
+            {"name": "club music", "confidence": 0.3, "evidence": None},
         ],
         "venue": {"value": "Kellerclub", "confidence": 0.8, "evidence": "im Kellerclub"},
         "price": {
@@ -80,6 +80,11 @@ def test_enrich_caches_and_never_pays_twice(conn, event_row, monkeypatch):
     assert len(calls) == 1  # second hit came from the cache
     assert "core named activity or event format" in calls[0]
     assert "atmosphere/style" in calls[0]
+    assert "what participants actually do" in calls[0]
+    assert "meaningful secondary activities" in calls[0]
+    assert "already represented by structured fields" in calls[0]
+    assert "Never add one-word head tags mechanically" in calls[0]
+    assert "exact original source-language quote" in calls[0]
     assert first == second
 
 
@@ -149,6 +154,48 @@ def test_unsupported_tag_certainty_is_capped_at_prior_tier(
     assert dance["confidence"] == 0.35
 
 
+def test_enrichment_schema_requires_six_tags_after_filler_cleanup():
+    raw = _fake_enrichment().model_dump()
+    raw["tags"][-1] = {
+        "name": "evening event", "confidence": 0.35, "evidence": None,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="at least 6 distinct useful concepts after.*filler is removed",
+    ):
+        Enrichment.model_validate(raw)
+
+
+def test_normalized_tag_keeps_high_confidence_with_german_evidence(
+    conn, event_row, monkeypatch,
+):
+    raw = _fake_enrichment().model_dump()
+    raw["tags"][3] = {
+        "name": "movement",
+        "confidence": 0.8,
+        "evidence": "Bewegen zu den Klangwelten",
+    }
+    event = dict(
+        event_row,
+        description=(
+            "Der Raum ist offen für Lauschen und Bewegen zu den Klangwelten."
+        ),
+    )
+    monkeypatch.setattr(
+        en.llm, "complete", lambda *a, **k: Enrichment.model_validate(raw)
+    )
+
+    attrs = enrich_event(conn, event)
+
+    movement = next(tag for tag in attrs["tags"] if tag["name"] == "movement")
+    assert movement == {
+        "name": "movement",
+        "confidence": 0.8,
+        "evidence": "Bewegen zu den Klangwelten",
+    }
+
+
 def test_explanatory_non_quote_does_not_unlock_high_certainty(
     conn, event_row, monkeypatch,
 ):
@@ -196,7 +243,8 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
         (event_row["id"],),
     ).fetchall()
     assert {tag["name"] for tag in tags} == {
-        "techno", "student nightlife", "loud", "dance", "night out", "indoor",
+        "techno", "student nightlife", "loud", "dance", "night out",
+        "club music",
     }
     assert next(tag for tag in tags if tag["name"] == "techno")["confidence"] == 0.8
 

@@ -30,7 +30,8 @@ confidence-scored. Machine-readable spec: `/openapi.json` (RFC 9727 catalog:
 - **Geography default**: results are gated to ~15 km around Linz; events
   with UNKNOWN location always pass the gate. Override with `near=lat,lon`
   + `radius=` (then unknown-location events are excluded - it's a hard
-  filter); `radius=any` disables the gate.
+  filter); `radius=any` disables all distance gating even if `near` is also
+  present.
 - **`confidence`** on results decays with staleness (missed re-confirmation
   cycles); `last_confirmed_at` says when a source last showed the event.
   Every search/list/feed defaults to effective confidence >=0.4. Set
@@ -72,7 +73,8 @@ as `thursday`/`friday`), `near`+`radius` (geo circle),
 (literal event-title lookup; `ball` also matches compounds such as
 `Maturaball`), `organizer` and `venue` (literal substrings in their own
 fields), `source` (literal reporting-source name or URL), `max_price`,
-`is_free`, `required_attributes`, and `min_tag_match` when `tags` are present.
+`is_free`, `required_attributes`, `min_tag_match`, and the optional
+per-requested-concept `min_tag_concept_match` when `tags` are present.
 
 SOFT preference fields (ranked, never dropped): `age_min`+`age_max`,
 `gender_split_min` (0=all male..1=all female), `kid_friendly`,
@@ -95,6 +97,8 @@ one name for the age_min/age_max pair), `gender_split_min`, `kid_friendly`,
 `energy`, `language`, `sex_service_context`, `event_scale`; `importance`
 also accepts `price` and `tags`. Price becomes a hard exact-fact constraint
 through `max_price`/`is_free`, not `required_attributes`.
+`min_scale_confidence` is meaningful only with `participant_count_min` or
+`participant_count_max`; sending it alone is invalid.
 
 Ranking combines **your importance x the stored certainty**, anchored at the
 coin flip: an event scores `0.5 + certainty/2` when it satisfies a
@@ -109,12 +113,16 @@ excluded - use sparingly, most events have estimated attributes only).
 in one list. They match the one confidence-bearing event-tag collection with
 a calibrated local multilingual model. Each requested concept keeps its own
 evidence. Multi-concept requests average the two strongest supporting tags and
-give half the score to an order-invariant joint phrase, which suppresses
-single-tag embedding hubs and disambiguates senses such as salsa food versus
-salsa dance. The returned `joint=true` evidence row makes that contribution
-visible. They rank softly by default. Set `min_tag_match` only when the
-combined concepts are a hard requirement; exact exclusions never use
-embeddings.
+combine requested concepts with a harmonic mean, so weak coverage is a
+bottleneck. An order-invariant combined phrase is a context diagnostic only:
+it can reduce the harmonic result by at most 10% and can never raise it. The
+returned `joint=true`, `role=combined_phrase_context` row is therefore not the
+final score; read `tag_match` for the final result,
+`tag_weakest_concept_match` for the weakest requested concept, and
+`tag_context_match` for that diagnostic. Tags rank softly by default. Set
+`min_tag_match` only when the combined concepts are a hard requirement; add
+`min_tag_concept_match` when every requested concept needs its own hard floor.
+Exact exclusions never use embeddings.
 
 When tags are combined with secondary soft preferences such as
 `preferred_max_price` or estimated crowd size, semantic fit leads by default;
@@ -190,16 +198,24 @@ queries are COMPOSITIONS you build at query time. Examples:
 ## Other endpoints
 
 - `GET /v1/occurrences?from=&to=&near=lat,lon&radius=5km&category=&min_confidence=&cursor=` - plain listing, keyset-paginated.
-- `GET /v1/events/{id}` - sanitized public fields, occurrences, and source
-  provenance; no raw claims/evidence.
+- `GET /v1/events/{id}` - sanitized public fields, occurrences, source
+  provenance, and safe tag `evidence_bases`; `inferred` is an enrichment
+  origin, not a claim of missing support. No raw claims/evidence are returned.
 - `GET /v1/feed.ics?tags=dancing&min_tag_match=0.5...` - category and/or
   semantic-tag calendar subscription. The MCP `get_calendar_link` tool accepts
   the same filter object as `search_events`; feed membership cannot use
   ranking-only preferences, so use explicit `min_tag_match`, exact
   `max_price`/`is_free`, and required event-scale bounds. When preserving
   accepted search results, set `min_tag_match` at or below the weakest
-  accepted result's `tag_match`; there is no implicit threshold.
+  accepted result's `tag_match`. If using `min_tag_concept_match`, set it at
+  or below the weakest accepted `tag_weakest_concept_match`. Pass the accepted
+  occurrence IDs so the tool verifies and reports exact feed coverage before
+  returning a link; there is no implicit threshold. `coverage_complete` is
+  null when no accepted IDs were supplied (not checked), true when all were
+  preserved, and false with omission reasons when any were not.
   Feed membership uses the same default `min_confidence=0.4` as search.
+  Only occurrences whose current status is `scheduled` are published;
+  cancelled, moved, and postponed occurrences are excluded.
   `exclude_sex_service_context=true` removes positively known commercial
   sex-service contexts while retaining unknowns. Set
   `include_time_unknown=false` for a quieter timed-events-only feed; the

@@ -94,6 +94,12 @@ def test_default_excludes_past_and_gates_to_linz(client):
     # radius=any disables the gate
     all_titles = _titles(client.get("/v1/occurrences", params={"radius": "any"}))
     assert "Far Away Fest" in all_titles and len(all_titles) == 4
+    # `any` is a true opt-out even if a stale caller also sends `near`.
+    any_near_titles = _titles(client.get(
+        "/v1/occurrences",
+        params={"near": "48.3069,14.2858", "radius": "any"},
+    ))
+    assert set(any_near_titles) == set(all_titles)
 
 
 def test_near_filter_includes_only_known_close_geo(client):
@@ -123,6 +129,48 @@ def test_keyset_pagination_walks_everything_once(client):
         if cursor is None:
             break
     assert len(seen) == len(set(seen)) == 3
+
+
+def test_semantic_sql_membership_remains_cursor_authoritative(
+    client, monkeypatch,
+):
+    """Post-LIMIT diagnostics must never erase an otherwise valid page."""
+    from eventindex.api import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod.tag_store,
+        "semantic_threshold_sql",
+        lambda desired, min_match, params, *, prefix,
+        min_concept_match=None: ("TRUE", desired),
+    )
+    monkeypatch.setattr(
+        app_mod.tag_store,
+        "semantic_matches",
+        lambda tx, event_ids, desired: {
+            event_id: {
+                "score": 0.4999,
+                "weakest_concept_score": 0.4999,
+                "weakest_concept_query": desired[0],
+                "combined_context_score": None,
+            }
+            for event_id in event_ids
+        },
+    )
+
+    first = client.get("/v1/occurrences", params={
+        "tags": "dance", "min_tag_match": 0.5,
+        "radius": "any", "limit": 1,
+    }).json()
+    assert len(first["occurrences"]) == 1
+    assert first["occurrences"][0]["tag_match"] == 0.4999
+    assert first["next_cursor"] is not None
+
+    second = client.get("/v1/occurrences", params={
+        "tags": "dance", "min_tag_match": 0.5,
+        "radius": "any", "limit": 1, "cursor": first["next_cursor"],
+    }).json()
+    assert len(second["occurrences"]) == 1
+    assert second["occurrences"][0]["id"] != first["occurrences"][0]["id"]
 
 
 def test_event_detail_404(client):
@@ -181,6 +229,27 @@ def test_feed_ics_serves_filtered_calendar(client):
     ).status_code == 422
 
 
+def test_feed_and_listing_exclude_non_scheduled_occurrences(conn, client):
+    event_id = _add_event(
+        conn, "Moved Concert", starts=NOW + timedelta(days=4),
+        lat=48.3069, lon=14.2858, category=["music"],
+    )
+    conn.execute(
+        "UPDATE occurrence SET status = 'moved' WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+
+    listing = client.get(
+        "/v1/occurrences", params={"radius": "any", "name": "Moved Concert"}
+    )
+    feed = client.get(
+        "/v1/feed.ics", params={"radius": "any", "name": "Moved Concert"}
+    )
+    assert _titles(listing) == []
+    assert b"Moved Concert" not in feed.content
+
+
 def test_feed_semantic_tags_filter_before_calendar_membership(
     conn, client, monkeypatch,
 ):
@@ -193,7 +262,10 @@ def test_feed_semantic_tags_filter_before_calendar_membership(
             "('Nearby Concert', 'Unknown Location Talk')"
         )
     }
-    def tag_sql(desired, min_match, params, prefix):
+    def tag_sql(
+        desired, min_match, params, *, prefix, min_concept_match=None,
+    ):
+        assert min_concept_match is None
         params["selected_tag_event"] = ids["Unknown Location Talk"]
         return "e.id = %(selected_tag_event)s", desired
 
@@ -203,6 +275,55 @@ def test_feed_semantic_tags_filter_before_calendar_membership(
     )
     assert b"Unknown Location Talk" in response.content
     assert b"Nearby Concert" not in response.content
+
+
+def test_rest_tag_concept_floor_requires_tags(client):
+    for path in ("/v1/occurrences", "/v1/feed.ics"):
+        response = client.get(path, params={"min_tag_concept_match": 0.3})
+        assert response.status_code == 422
+        assert "requires at least one tag" in response.json()["detail"]
+
+
+def test_feed_scale_confidence_requires_a_participant_bound(client):
+    response = client.get(
+        "/v1/feed.ics", params={"min_scale_confidence": 0.3}
+    )
+    assert response.status_code == 422
+    assert "requires participant_count" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("params", [
+    {"near": "91,14", "radius": "5km"},
+    {"near": "nan,14", "radius": "5km"},
+    {"near": "nan,14", "radius": "any"},
+    {"near": "48,14", "radius": "."},
+    {"bbox": "15,48,14,49"},
+    {"bbox": "14,48,15,inf"},
+])
+def test_public_geo_inputs_fail_as_422(client, params):
+    for path in ("/v1/occurrences", "/v1/feed.ics"):
+        assert client.get(path, params=params).status_code == 422
+
+
+def test_feed_coverage_distinguishes_missing_from_limit(conn, client):
+    from eventindex.api.app import _feed_coverage
+
+    event_id = _add_event(
+        conn, "Late Music Event", starts=NOW + timedelta(days=10),
+        lat=48.3069, lon=14.2858, category=["music"],
+    )
+    occurrence_id = conn.execute(
+        "SELECT id FROM occurrence WHERE event_id = %s", (event_id,)
+    ).fetchone()["id"]
+    conn.commit()
+
+    coverage = _feed_coverage(
+        [uuid.uuid4(), occurrence_id], from_=NOW, radius="any",
+        category="music", min_confidence=0,
+        include_time_unknown=True, limit=1,
+    )
+    assert coverage[0]["reasons"] == ["not_found"]
+    assert coverage[1]["reasons"] == ["feed_limit"]
 
 
 def test_feed_all_day_dates_are_local_and_use_date_typed_exclusive_end(conn, client):
@@ -336,13 +457,21 @@ def test_query_endpoint_exposes_semantic_tag_score(conn, client, monkeypatch):
         lambda tx, event_ids, desired: {
             ids["Nearby Concert"]: {
                 "score": 0.1, "concepts": [],
+                "weakest_concept_score": 0.1,
+                "weakest_concept_query": "learning",
+                "combined_context_score": None,
             },
             ids["Unknown Location Talk"]: {
                 "score": 0.8,
+                "weakest_concept_score": 0.8,
+                "weakest_concept_query": "learning",
+                "combined_context_score": None,
                 "concepts": [{
                     "query": "learning", "score": 0.8,
                     "event_tag": "learning", "tag_confidence": 0.8,
                     "relatedness": 1.0,
+                    "origin": "event_tag", "supports": [],
+                    "joint": False, "role": "requested_concept",
                 }],
             },
         },

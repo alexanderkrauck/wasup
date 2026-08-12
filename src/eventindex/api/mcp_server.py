@@ -101,6 +101,10 @@ mcp = _StrictToolInputsFastMCP(
         "records labeled tentative; never reinterpret that label, or an "
         "empty result whose diagnostics report tentative matches, as absent "
         "from the index. "
+        "For event tags, origins describe the ingestion path: `inferred` "
+        "means model-normalized enrichment, not unsupported. Consult "
+        "evidence_bases to distinguish title/text support from world-knowledge "
+        "estimates. "
         "Do not use Wasup for Vienna, restaurants, private-event creation, "
         "or invitations. Known commercial sex-service contexts are excluded "
         "unless a supported tool receives an explicit true opt-in. Null "
@@ -165,13 +169,28 @@ class TagConceptMatch(_Output):
     relatedness: float
     origin: Literal["title", "event_tag"] | None
     supports: list[TagSupport] = Field(default_factory=list)
-    joint: bool = False
+    joint: bool = Field(
+        False,
+        description="True only for a combined-phrase context diagnostic; "
+        "this row is never the final multi-concept score.",
+    )
+    role: Literal["requested_concept", "combined_phrase_context"]
 
 
 class EventTag(_Output):
     name: str
     confidence: float
-    origins: list[str]
+    origins: list[str] = Field(
+        description="Ingestion provenance. `inferred` means model-enriched or "
+        "normalized and does not by itself mean unsupported."
+    )
+    evidence_bases: list[Literal[
+        "source", "category", "title", "explicit_text", "world_knowledge",
+        "unknown",
+    ]] = Field(
+        description="Safe support classification; raw source quotes are never "
+        "published."
+    )
 
 
 class EventEstimates(_Output):
@@ -213,7 +232,18 @@ class SearchOccurrence(_Output):
     event_status: str
     confidence: float
     match_score: float
-    tag_match: float | None
+    tag_match: float | None = Field(
+        description="Final semantic score. Multiple concepts use harmonic "
+        "coverage with at most a 10% downward context adjustment."
+    )
+    tag_weakest_concept_match: float | None = Field(
+        description="Score of the weakest individually requested concept."
+    )
+    tag_weakest_concept: str | None
+    tag_context_match: float | None = Field(
+        description="Combined-phrase context diagnostic. It never raises "
+        "tag_match and is not itself the final score."
+    )
     tag_matches: list[TagConceptMatch]
     provenance_summary: list[str]
 
@@ -287,8 +317,25 @@ class EventDetailResponse(_Output):
     sources: list[EventSource]
 
 
+class CalendarCoverage(_Output):
+    occurrence_id: UUID
+    title: str | None
+    included: bool
+    reasons: list[Literal[
+        "not_found", "date_window", "not_scheduled", "geography", "category",
+        "confidence", "name", "organizer", "venue", "source",
+        "sex_service_safety", "weekday", "time_unknown", "stated_price",
+        "event_scale", "tag_match", "tag_concept_match", "feed_limit",
+    ]]
+
+
 class CalendarLinkResponse(_Output):
-    ics_url: str
+    ics_url: str | None
+    coverage_complete: bool | None = Field(
+        description="True/false only when accepted occurrence IDs were "
+        "checked; null means no coverage audit was requested."
+    )
+    coverage: list[CalendarCoverage] = Field(default_factory=list)
 
 
 class SearchResultStub(_Output):
@@ -371,6 +418,9 @@ def _search_occurrence(row: dict) -> SearchOccurrence:
         confidence=row["confidence"],
         match_score=row["match_score"],
         tag_match=row.get("tag_match"),
+        tag_weakest_concept_match=row.get("tag_weakest_concept_match"),
+        tag_weakest_concept=row.get("tag_weakest_concept"),
+        tag_context_match=row.get("tag_context_match"),
         tag_matches=[
             TagConceptMatch.model_validate(match)
             for match in row.get("tag_matches", [])
@@ -482,11 +532,13 @@ def search_events(
     `name`; put literal organizer, venue, and reporting-source names in their
     own filters; put every jointly desired activity/topic/format/atmosphere concept in the
     single `tags` list. Tags are soft by default and jointly scored. With two
-    or three concepts the response also shows a `joint=true` context match:
-    it disambiguates phrases such as salsa+dance from salsa food, while two
-    supporting event tags prevent one accidental embedding neighbour from
-    dominating the result.
-    Set `min_tag_match` only for an explicit must/only requirement.
+    or three concepts the response also shows a `joint=true`,
+    role=combined_phrase_context diagnostic: it disambiguates phrases such as
+    salsa+dance from salsa food, but is NOT the final score and can only reduce
+    final tag_match by at most 10%. tag_weakest_concept_match exposes the
+    weakest requested concept. Set `min_tag_match` only for an explicit
+    must/only requirement; add `min_tag_concept_match` when every requested
+    concept needs its own hard floor.
 
     Hard versus soft examples:
     - "balls, ideally dancing and elegant":
@@ -577,12 +629,15 @@ def search_events(
                     "and use preferred_max_price."
                 ),
             )
-        elif parsed.min_tag_match is not None:
+        elif (
+            parsed.min_tag_match is not None
+            or parsed.min_tag_concept_match is not None
+        ):
             diagnostics = SearchDiagnostics(
-                message="No event reached the required joint semantic-tag threshold.",
+                message="No event reached every required semantic-tag threshold.",
                 suggested_retry=(
                     "If the concepts were preferences, omit min_tag_match and "
-                    "keep all concepts together in tags."
+                    "min_tag_concept_match, and keep all concepts together in tags."
                 ),
             )
         else:
@@ -609,7 +664,8 @@ def get_event(
 ) -> EventDetailResponse:
     """Use this when the user selected a Wasup event and wants its sanitized
     public details, future and historical occurrences, confidence estimates,
-    and source provenance. Raw source claims and suppressed private-location
+    source provenance, and safe tag evidence_bases. An inferred tag can still
+    be explicitly supported; raw source claims/quotes and suppressed private-location
     evidence are never returned. A known commercial sex-service event is
     unavailable unless include_sex_service_context is explicitly true."""
     return _event_detail(event_id, include_sex=include_sex_service_context)
@@ -625,6 +681,15 @@ def get_calendar_link(
             "unknown. Keep false unless the user explicitly asks for them."
         ),
     ] = False,
+    accepted_occurrence_ids: Annotated[
+        list[UUID] | None,
+        Field(
+            max_length=100,
+            description="Occurrence IDs from the accepted search_events rows. "
+            "Pass these when converting recommendations into a feed so Wasup "
+            "can prove that none are silently omitted.",
+        ),
+    ] = None,
 ) -> CalendarLinkResponse:
     """Use this when the user wants a read-only .ics subscription URL for
     public Linz-area events. This only builds a link; it does not subscribe,
@@ -636,13 +701,18 @@ def get_calendar_link(
     audience preferences, and importance weights are rejected with a
     correction message.
 
-    When converting accepted search results into a subscription, set
-    min_tag_match at or below the weakest accepted result's tag_match. Do not
+    When converting accepted search results into a subscription, pass every
+    accepted search row's `id` in accepted_occurrence_ids and set
+    min_tag_match at or below the weakest accepted result's tag_match. When
+    every requested concept must remain represented, also set
+    min_tag_concept_match at or below the weakest accepted result's
+    tag_weakest_concept_match. Do not
     assume 0.5: for example, a WKO/startup search may warrant
     filters={"source":"WKO","tags":["startup"],"min_tag_match":0.2}.
     If an accepted search row has time_unknown=true, either omit that row from
     the accepted set or pass include_time_unknown=true; the default timed-only
-    feed intentionally cannot preserve it.
+    feed intentionally cannot preserve it. With no accepted IDs,
+    coverage_complete is null (not checked), not true.
     Example: filters={"name":"ball","tags":["dance","elegant"],
     "min_tag_match":0.5}. Example large-event feed:
     filters={"categories":["music"],"participant_count_min":300,
@@ -670,6 +740,16 @@ def get_calendar_link(
             "Calendar tag filters require an explicit min_tag_match membership "
             "threshold. When preserving accepted search results, set it at or "
             "below the weakest accepted result's tag_match; do not assume 0.5."
+        )
+    if parsed.age_min is not None or parsed.age_max is not None:
+        raise ValueError(
+            "Calendar links do not support age ranking/filtering; remove "
+            "age_min/age_max instead of silently changing membership."
+        )
+    if parsed.sex_service_context is True:
+        raise ValueError(
+            "Generated calendar links always exclude commercial sex-service "
+            "contexts and cannot preserve sex_service_context=true searches."
         )
     soft_fields = [
         name for name in (
@@ -715,6 +795,8 @@ def get_calendar_link(
             ("organizer", parsed.organizer),
             ("venue", parsed.venue),
             ("source", parsed.source),
+            ("near", parsed.near),
+            ("radius", parsed.radius),
             ("weekdays", ",".join(parsed.weekdays)),
             ("from", parsed.from_dt),
             ("to", parsed.to_dt),
@@ -730,12 +812,56 @@ def get_calendar_link(
     if parsed.tags:
         params["tags"] = ",".join(parsed.tags)
         params["min_tag_match"] = parsed.min_tag_match
+        if parsed.min_tag_concept_match is not None:
+            params["min_tag_concept_match"] = parsed.min_tag_concept_match
     params["exclude_sex_service_context"] = "true"
     params["include_time_unknown"] = (
         "true" if include_time_unknown else "false"
     )
+    params["limit"] = 1000
+    ics_url = f"{BASE_URL}/v1/feed.ics?{urlencode(params)}"
+    coverage_requested = accepted_occurrence_ids is not None
+    accepted_ids = list(dict.fromkeys(accepted_occurrence_ids or []))
+    coverage = []
+    if accepted_ids:
+        from eventindex.api import app as api
+
+        coverage = api._feed_coverage(
+            accepted_ids,
+            from_=(
+                datetime.fromisoformat(parsed.from_dt)
+                if parsed.from_dt else None
+            ),
+            to=datetime.fromisoformat(parsed.to_dt) if parsed.to_dt else None,
+            near=parsed.near,
+            radius=parsed.radius or "default",
+            category=",".join(parsed.categories or []) or None,
+            min_confidence=parsed.min_confidence,
+            name=parsed.name,
+            organizer=parsed.organizer,
+            venue=parsed.venue,
+            source=parsed.source,
+            weekdays=",".join(parsed.weekdays) or None,
+            max_price=parsed.max_price,
+            is_free=parsed.is_free,
+            participant_count_min=parsed.participant_count_min,
+            participant_count_max=parsed.participant_count_max,
+            min_scale_confidence=parsed.min_scale_confidence,
+            tags=",".join(parsed.tags) or None,
+            min_tag_match=parsed.min_tag_match or 0,
+            min_tag_concept_match=parsed.min_tag_concept_match,
+            exclude_sex_service_context=True,
+            include_time_unknown=include_time_unknown,
+            limit=1000,
+        )
+    coverage_complete = (
+        all(item["included"] for item in coverage)
+        if coverage_requested else None
+    )
     return CalendarLinkResponse(
-        ics_url=f"{BASE_URL}/v1/feed.ics?{urlencode(params)}"
+        ics_url=ics_url if coverage_complete is not False else None,
+        coverage_complete=coverage_complete,
+        coverage=[CalendarCoverage.model_validate(item) for item in coverage],
     )
 
 

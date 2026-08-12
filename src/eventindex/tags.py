@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from uuid import UUID
 
@@ -19,6 +20,21 @@ JOINT_CONTEXT_WEIGHT = 0.1
 # embedding neighbours so "Yoga am See" cannot rank below "dance training".
 TITLE_EVIDENCE_CONFIDENCE = 1.0
 MIN_COMPOUND_FRAGMENT_LENGTH = 4
+
+# These are already represented by typed event fields and repeatedly appeared
+# as quota-filling inferred tags in production. Keep this deliberately narrow:
+# a semantic concept such as "outdoor cinema" or "women's run" must not be
+# erased merely because it contains a structured attribute.
+_REDUNDANT_INFERRED_TAGS = frozenset({
+    "adult", "adults", "adult audience", "female led", "male led",
+    "evening event", "morning event", "daytime event", "weekend event",
+    "intimate audience", "small audience", "medium audience",
+    "large audience", "linz metro", "linz area", "indoor",
+})
+_EVIDENCE_BASIS_ORDER = (
+    "source", "category", "title", "explicit_text", "world_knowledge",
+    "unknown",
+)
 
 
 def clean_name(value: str) -> str | None:
@@ -40,7 +56,7 @@ def clean_estimates(values: Iterable[dict]) -> list[dict]:
     merged: dict[str, dict] = {}
     for value in values:
         name = clean_name(value.get("name", ""))
-        if name is None:
+        if name is None or name in _REDUNDANT_INFERRED_TAGS:
             continue
         confidence = min(1.0, max(0.0, float(value.get("confidence", 0))))
         candidate = {
@@ -205,11 +221,55 @@ def replace_inferred(tx, event_id: UUID, estimates: Iterable[dict]) -> None:
 
 
 def public_for_event(tx, event_id: UUID) -> list[dict]:
-    return tx.execute(
-        "SELECT name, confidence, origins FROM event_tag "
-        "WHERE event_id = %s ORDER BY confidence DESC, name LIMIT %s",
+    rows = tx.execute(
+        """
+        SELECT et.name, et.confidence, et.origins, e.title,
+               cached.tag->>'evidence' AS inferred_evidence,
+               cached.tag IS NOT NULL AS has_cached_inferred_tag
+        FROM event_tag et
+        JOIN event e ON e.id = et.event_id
+        LEFT JOIN enrichment en
+          ON en.content_key = e.inferred->'_enrichment'->>'content_key'
+        LEFT JOIN LATERAL (
+            SELECT tag
+            FROM jsonb_array_elements(coalesce(en.attributes->'tags', '[]')) tag
+            WHERE tag->>'name' = et.name
+            LIMIT 1
+        ) cached(tag) ON true
+        WHERE et.event_id = %s
+        ORDER BY et.confidence DESC, et.name
+        LIMIT %s
+        """,
         (event_id, MAX_TAGS_PER_EVENT),
     ).fetchall()
+    public = []
+    for row in rows:
+        bases = set()
+        for origin in row["origins"]:
+            if origin in {"source", "category"}:
+                bases.add(origin)
+            elif origin == "inferred":
+                if not row["has_cached_inferred_tag"]:
+                    bases.add("unknown")
+                elif evidence := str(row["inferred_evidence"] or "").strip():
+                    bases.add(
+                        "title"
+                        if evidence.casefold() in row["title"].casefold()
+                        else "explicit_text"
+                    )
+                else:
+                    bases.add("world_knowledge")
+            else:
+                bases.add("unknown")
+        public.append({
+            "name": row["name"],
+            "confidence": row["confidence"],
+            "origins": row["origins"],
+            "evidence_bases": [
+                basis for basis in _EVIDENCE_BASIS_ORDER if basis in bases
+            ],
+        })
+    return public
 
 
 def semantic_matches(
@@ -257,6 +317,9 @@ def semantic_matches(
     exact_confidences: dict[UUID, list[float]] = {
         event_id: [0.0 for _ in desired] for event_id in event_ids
     }
+    title_confidences: dict[UUID, list[float]] = {
+        event_id: [0.0 for _ in desired] for event_id in event_ids
+    }
     titles = {
         row["id"]: row["title"]
         for row in tx.execute(
@@ -268,6 +331,7 @@ def semantic_matches(
             title_word = _title_evidence(title or "", concept)
             if title_word is None:
                 continue
+            title_confidences[event_id][index] = TITLE_EVIDENCE_CONFIDENCE
             evidence[event_id][index].append({
                 "score": TITLE_EVIDENCE_CONFIDENCE,
                 "event_tag": title_word,
@@ -316,7 +380,11 @@ def semantic_matches(
                 sum(item["score"] for item in supports) / len(supports)
                 if supports else 0.0
             )
-            score = max(exact, semantic_support)
+            title_confidence = (
+                title_confidences[event_id][index]
+                if not spec["joint"] else 0.0
+            )
+            score = max(exact, semantic_support, title_confidence)
             best = supports[0] if supports else {
                 "event_tag": None, "tag_confidence": None, "relatedness": 0.0,
                 "origin": None,
@@ -330,6 +398,10 @@ def semantic_matches(
                 "origin": best["origin"],
                 "supports": supports,
                 "joint": spec["joint"],
+                "role": (
+                    "combined_phrase_context"
+                    if spec["joint"] else "requested_concept"
+                ),
             })
         individual_scores = [
             concept["score"] for concept in concepts[:len(desired)]
@@ -351,9 +423,19 @@ def semantic_matches(
                 )
             else:
                 semantic_score = coverage
+        weakest = min(
+            concepts[:len(desired)],
+            key=lambda concept: (concept["score"], concept["query"]),
+        )
         result[event_id] = {
             "score": semantic_score,
             "concepts": concepts,
+            "weakest_concept_score": weakest["score"],
+            "weakest_concept_query": weakest["query"],
+            "combined_context_score": (
+                concepts[-1]["score"]
+                if len(specs) > len(desired) else None
+            ),
         }
     return result
 
@@ -369,7 +451,8 @@ def semantic_scores(
 
 
 def semantic_threshold_sql(
-    desired: list[str], min_match: float, params: dict, *, prefix: str
+    desired: list[str], min_match: float, params: dict, *, prefix: str,
+    min_concept_match: float | None = None,
 ) -> tuple[str, list[str]]:
     """Build a bounded SQL membership predicate for chronological surfaces.
 
@@ -409,11 +492,17 @@ def semantic_threshold_sql(
             title_key = f"{prefix}_title_{index}"
             params[title_key] = spec["embedding_text"]
             if " " in spec["embedding_text"]:
-                # Literal phrase evidence. This deliberately does not attempt
-                # linguistic semantics; the LLM supplies semantic tags.
-                matched = (
-                    f"position(%({title_key})s in lower(e.title)) > 0"
+                # Match the same contiguous token sequence as
+                # _title_evidence. A bare substring made "art fair" match
+                # "Smart Fair" on SQL surfaces but not in Python.
+                pattern_key = f"{prefix}_title_pattern_{index}"
+                words = _words(spec["embedding_text"])
+                params[pattern_key] = (
+                    "(^|[^[:alnum:]])"
+                    + "[^[:alnum:]]+".join(re.escape(word) for word in words)
+                    + "($|[^[:alnum:]])"
                 )
+                matched = f"e.title ~* %({pattern_key})s"
             else:
                 # regexp_split is only mechanical Unicode word separation.
                 # Prefix/suffix matching makes compounds searchable while the
@@ -435,6 +524,9 @@ def semantic_threshold_sql(
     match_key = f"{prefix}_min_match"
     params[model_key] = embeddings.MODEL_VERSION
     params[match_key] = min_match
+    concept_match_key = f"{prefix}_min_concept_match"
+    if min_concept_match is not None:
+        params[concept_match_key] = min_concept_match
     support_limit = 1 if len(desired) == 1 else MULTI_CONCEPT_SUPPORTS
     score_arrays = [
         "array_agg(et.confidence * ({relation}) "
@@ -482,11 +574,24 @@ def semantic_threshold_sql(
             )
         else:
             final_score = coverage
+    weakest_score = (
+        concept_scores[0]
+        if len(desired) == 1
+        else "least(" + ", ".join(concept_scores[:len(desired)]) + ")"
+    )
+    membership = (
+        "round((" + final_score + ")::numeric, 4) "
+        + f">= %({match_key})s"
+    )
+    if min_concept_match is not None:
+        membership += (
+            " AND round((" + weakest_score + ")::numeric, 4) "
+            + f">= %({concept_match_key})s"
+        )
     return (
-        "(SELECT round((" + final_score + ")::numeric, 4) "
+        "(SELECT (" + membership + ") "
         "FROM (SELECT " + ", ".join(score_arrays + exact_columns) + " "
         "FROM event_tag et LEFT JOIN tag_embedding te ON te.name = et.name "
-        f"AND te.model = %({model_key})s WHERE et.event_id = e.id) ranked) "
-        + f">= %({match_key})s",
+        f"AND te.model = %({model_key})s WHERE et.event_id = e.id) ranked)",
         desired,
     )

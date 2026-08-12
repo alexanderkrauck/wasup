@@ -201,13 +201,47 @@ def parse_dt(value) -> datetime | None:
     return dt
 
 
-def is_upcoming(payload: dict) -> bool:
-    """Deterministic sanity gate: starts_at parses and isn't in the past."""
+def is_upcoming(payload: dict, now: datetime | None = None) -> bool:
+    """Deterministic sanity gate for one-off and recurring claims.
+
+    A recurring feed commonly retains its original ``DTSTART`` after that
+    anchor has passed.  Keep it when its RRULE still produces an occurrence
+    inside the resolver's expansion horizon; otherwise the claim would be
+    discarded before recurrence had a chance to run.
+    """
     starts = payload.get("starts_at")
     dt = parse_dt(starts["value"]) if starts else None
     if dt is None:
         return False
-    return dt >= datetime.now(timezone.utc) - timedelta(days=1)
+    # A structured negative is state, not an invitation to attend. Recurring
+    # master cancellations often repeat the series' old DTSTART but omit its
+    # RRULE, relying on calendar UID linkage. Keep them so the resolver can
+    # inherit the prior recurrence set from append-only claim history.
+    if (payload.get("status") or {}).get("value") in {
+        "cancelled", "moved", "postponed",
+    }:
+        return True
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=1)
+    if dt >= cutoff:
+        return True
+    raw_rule = (payload.get("rrule_raw") or {}).get("value")
+    if not raw_rule:
+        return False
+    from dateutil.rrule import rrulestr
+
+    from eventindex.resolve.recurrence import EXPANSION_WEEKS
+
+    try:
+        next_occurrence = rrulestr(str(raw_rule), dtstart=dt).after(
+            cutoff, inc=True
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        next_occurrence is not None
+        and next_occurrence <= now + timedelta(weeks=EXPANSION_WEEKS)
+    )
 
 
 _GENERIC_TITLE_WORDS = {

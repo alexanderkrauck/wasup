@@ -3,6 +3,7 @@ import uuid
 
 import numpy as np
 import pytest
+from psycopg.types.json import Jsonb
 
 from eventindex import embeddings, tags
 
@@ -157,6 +158,12 @@ def test_multiple_desired_tags_measure_joint_concept_coverage(conn, monkeypatch)
         "dance", "elegant", "dance + elegant"
     ]
     assert matches[both_id]["concepts"][-1]["joint"] is True
+    assert [m["role"] for m in matches[both_id]["concepts"]] == [
+        "requested_concept", "requested_concept", "combined_phrase_context",
+    ]
+    assert matches[both_id]["weakest_concept_query"] == "elegant"
+    assert matches[both_id]["weakest_concept_score"] == 0.7
+    assert matches[both_id]["combined_context_score"] == 0
 
 
 def test_multi_concept_score_is_monotonic_as_one_concept_improves(
@@ -246,6 +253,39 @@ def test_multi_tag_sql_threshold_uses_the_displayed_rounded_score(conn):
     assert {row["id"] for row in rows} == {event_id}
 
 
+def test_sql_membership_can_require_every_requested_concept(conn, monkeypatch):
+    event_id = _event(conn, "Uneven Concepts")
+    tags.upsert(conn, event_id, "singing", 0.8, "inferred")
+    tags.upsert(conn, event_id, "movement", 0.2, "inferred")
+    monkeypatch.setattr(
+        embeddings,
+        "embed_tags",
+        lambda values: np.zeros(
+            (len(values), embeddings.DIMENSIONS), dtype=np.float32
+        ),
+    )
+    params = {}
+    aggregate_only, _ = tags.semantic_threshold_sql(
+        ["singing", "movement"], 0.25, params, prefix="aggregate_only"
+    )
+    params["event_id"] = event_id
+    assert conn.execute(
+        f"SELECT 1 FROM event e WHERE e.id = %(event_id)s AND {aggregate_only}",
+        params,
+    ).fetchone()
+
+    strict_params = {}
+    strict, _ = tags.semantic_threshold_sql(
+        ["singing", "movement"], 0.25, strict_params, prefix="strict_each",
+        min_concept_match=0.3,
+    )
+    strict_params["event_id"] = event_id
+    assert conn.execute(
+        f"SELECT 1 FROM event e WHERE e.id = %(event_id)s AND {strict}",
+        strict_params,
+    ).fetchone() is None
+
+
 def test_semantic_threshold_runs_before_sql_limit(conn, monkeypatch):
     salsa_id = _event(conn, "Salsa Social")
     startup_id = _event(conn, "Startup Meetup")
@@ -313,6 +353,57 @@ def test_literal_title_concepts_cover_generic_compounds_before_enrichment(
     assert {row["id"] for row in rows} == {yoga_id}
 
 
+def test_title_evidence_is_not_diluted_and_sql_uses_same_token_boundaries(
+    conn, monkeypatch,
+):
+    singing_id = _event(conn, "Singing Circle")
+    smart_id = _event(conn, "Smart Fair")
+    art_id = _event(conn, "Community Art-Fair")
+    tags.upsert(conn, singing_id, "singing", 0.8, "inferred")
+    tags.upsert(conn, singing_id, "movement", 0.8, "inferred")
+    monkeypatch.setattr(
+        embeddings,
+        "embed_tags",
+        lambda values: np.zeros(
+            (len(values), embeddings.DIMENSIONS), dtype=np.float32
+        ),
+    )
+
+    match = tags.semantic_matches(
+        conn, [singing_id], ["singing", "movement"]
+    )[singing_id]
+    assert match["concepts"][0]["score"] == tags.TITLE_EVIDENCE_CONFIDENCE
+    assert match["score"] == pytest.approx(0.8)
+
+    parity_params = {}
+    parity_condition, _ = tags.semantic_threshold_sql(
+        ["singing", "movement"], 0.8, parity_params,
+        prefix="title_parity", min_concept_match=0.8,
+    )
+    parity_params["id"] = singing_id
+    assert conn.execute(
+        f"SELECT 1 FROM event e WHERE e.id = %(id)s AND {parity_condition}",
+        parity_params,
+    ).fetchone()
+
+    title_matches = tags.semantic_matches(
+        conn, [smart_id, art_id], ["art fair"]
+    )
+    assert title_matches[smart_id]["score"] == 0
+    assert title_matches[art_id]["score"] == tags.TITLE_EVIDENCE_CONFIDENCE
+
+    params = {}
+    condition, _ = tags.semantic_threshold_sql(
+        ["art fair"], 1.0, params, prefix="title_boundary"
+    )
+    params["ids"] = [smart_id, art_id]
+    rows = conn.execute(
+        f"SELECT e.id FROM event e WHERE e.id = ANY(%(ids)s) AND {condition}",
+        params,
+    ).fetchall()
+    assert {row["id"] for row in rows} == {art_id}
+
+
 def test_tag_sanity_rejects_commentary_and_merges_duplicates():
     cleaned = tags.clean_estimates([
         {"name": " Partner   Dancing ", "confidence": 0.6, "evidence": None},
@@ -324,6 +415,95 @@ def test_tag_sanity_rejects_commentary_and_merges_duplicates():
     assert cleaned == [
         {"name": "partner dancing", "confidence": 0.8, "evidence": "Salsa"}
     ]
+
+
+def test_inferred_tag_cleanup_removes_only_known_structured_fillers():
+    cleaned = tags.clean_estimates([
+        {"name": "adult", "confidence": 0.8, "evidence": "Erwachsene"},
+        {"name": "female led", "confidence": 0.8, "evidence": "Birgit"},
+        {"name": "evening event", "confidence": 0.35, "evidence": None},
+        {"name": "intimate audience", "confidence": 0.35, "evidence": None},
+        {"name": "linz metro", "confidence": 0.2, "evidence": None},
+        {"name": "movement to music", "confidence": 0.8, "evidence": "Bewegen"},
+        {"name": "women's run", "confidence": 0.8, "evidence": "Frauenlauf"},
+        {"name": "outdoor cinema", "confidence": 0.8, "evidence": "Freiluftkino"},
+    ])
+
+    assert [tag["name"] for tag in cleaned] == [
+        "movement to music", "outdoor cinema", "women's run",
+    ]
+
+
+def test_specific_tags_do_not_mechanically_synthesize_one_word_parents():
+    cleaned = tags.clean_estimates([
+        {"name": "mantra singing", "confidence": 0.8, "evidence": "Mantras"},
+        {"name": "running club", "confidence": 0.8, "evidence": "Run Crew"},
+    ])
+
+    assert [tag["name"] for tag in cleaned] == ["mantra singing", "running club"]
+
+
+def test_public_tags_expose_safe_evidence_bases_without_quotes(conn):
+    event_id = _event(conn, "Singing Circle")
+    key = uuid.uuid4().hex
+    cached_tags = [
+        {"name": "singing circle", "confidence": 0.8,
+         "evidence": "Singing Circle"},
+        {"name": "movement", "confidence": 0.8,
+         "evidence": "Bewegen zu den Klangwelten"},
+        {"name": "meditative", "confidence": 0.35, "evidence": None},
+    ]
+    conn.execute(
+        "INSERT INTO enrichment (content_key, attributes) VALUES (%s, %s)",
+        (key, Jsonb({"tags": cached_tags})),
+    )
+    conn.execute(
+        "UPDATE event SET inferred = %s WHERE id = %s",
+        (Jsonb({"_enrichment": {"content_key": key}}), event_id),
+    )
+    tags.replace_inferred(conn, event_id, cached_tags)
+    tags.upsert(conn, event_id, "community music", 0.6, "source")
+
+    rows = {row["name"]: row for row in tags.public_for_event(conn, event_id)}
+
+    assert rows["singing circle"]["evidence_bases"] == ["title"]
+    assert rows["movement"]["evidence_bases"] == ["explicit_text"]
+    assert rows["meditative"]["evidence_bases"] == ["world_knowledge"]
+    assert rows["community music"]["evidence_bases"] == ["source"]
+    assert all("evidence" not in row for row in rows.values())
+
+
+def test_merged_evidence_bases_survive_inferred_tag_replacement(conn):
+    event_id = _event(conn, "Community Music Workshop")
+    tags.upsert(conn, event_id, "community music", 0.6, "source")
+
+    def project_inferred(key: str, evidence: str) -> None:
+        estimate = {
+            "name": "community music", "confidence": 0.8,
+            "evidence": evidence,
+        }
+        conn.execute(
+            "INSERT INTO enrichment (content_key, attributes) VALUES (%s, %s)",
+            (key, Jsonb({"tags": [estimate]})),
+        )
+        conn.execute(
+            "UPDATE event SET inferred = %s WHERE id = %s",
+            (Jsonb({"_enrichment": {"content_key": key}}), event_id),
+        )
+        tags.replace_inferred(conn, event_id, [estimate])
+
+    project_inferred("merged-evidence-v1", "gemeinsam Musik machen")
+    first = tags.public_for_event(conn, event_id)[0]
+    assert first["origins"] == ["inferred", "source"]
+    assert first["evidence_bases"] == ["source", "explicit_text"]
+    assert "evidence" not in first
+
+    project_inferred("merged-evidence-v2", "zusammen musizieren")
+    second = tags.public_for_event(conn, event_id)[0]
+    assert second["origins"] == ["inferred", "source"]
+    assert second["evidence_bases"] == ["source", "explicit_text"]
+    assert second["confidence"] == 0.8
+    assert "evidence" not in second
 
 
 def test_public_tag_queries_are_bounded_and_validated():

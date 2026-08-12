@@ -15,6 +15,8 @@ The ATTRIBUTES registry is the single extension point: a future inferred
 attribute (e.g. for_children) = one field in enrich.Enrichment + one row here.
 """
 
+import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -54,17 +56,37 @@ DEFAULT_RADIUS_KM = 15
 
 
 def _radius_m(radius: str) -> float:
-    import re as _re
-
     normalized = radius.strip().lower()
     if normalized == "any":
         # Validation calls this helper even though build_sql deliberately
         # skips distance math for the documented geo-gate opt-out.
         return float("inf")
-    m = _re.fullmatch(r"([\d.]+)\s*(km|m)?", normalized)
+    m = re.fullmatch(r"((?:\d+(?:\.\d*)?|\.\d+))\s*(km|m)?", normalized)
     if not m:
         raise ValueError("radius must look like '5km' or '500m' (or 'any')")
-    return float(m.group(1)) * (1000 if (m.group(2) or "km") == "km" else 1)
+    value = float(m.group(1))
+    if not math.isfinite(value):
+        raise ValueError("radius must be finite")
+    return value * (1000 if (m.group(2) or "km") == "km" else 1)
+
+
+def _lat_lon(value: str) -> tuple[float, float]:
+    """Parse a finite WGS84 point shared by search and feed surfaces."""
+    try:
+        pieces = value.split(",")
+        if len(pieces) != 2:
+            raise ValueError
+        lat, lon = (float(piece) for piece in pieces)
+    except ValueError:
+        raise ValueError("near must be 'lat,lon'")
+    if (
+        not math.isfinite(lat) or not math.isfinite(lon)
+        or not -90 <= lat <= 90 or not -180 <= lon <= 180
+    ):
+        raise ValueError(
+            "near must contain finite latitude -90..90 and longitude -180..180"
+        )
+    return lat, lon
 
 # P(satisfied) is anchored at the coin flip: 0.5 + c/2 on a match,
 # 0.5 - c/2 on a contradiction. Unknown sits just under a weak match and
@@ -244,6 +266,12 @@ class SearchFilters(BaseModel):
         description="explicit hard threshold for certainty-weighted semantic "
         "tag matching; null keeps tags rank-only"
     )
+    min_tag_concept_match: float | None = Field(
+        default=None, ge=0, le=1,
+        description="optional hard floor for EACH requested tag concept. "
+        "Use with min_tag_match for subscriptions/must-match requests so a "
+        "strong concept cannot hide weak coverage of another"
+    )
     near: str | None = Field(
         description="'lat,lon' center overriding the default 15km-around-"
         "Linz gate; use for 'near X' queries with known coordinates"
@@ -278,14 +306,13 @@ class SearchFilters(BaseModel):
             if value is not None:
                 setattr(self, field, " ".join(value.split())[:120] or None)
         if self.near is not None:
-            try:
-                lat, lon = (float(x) for x in self.near.split(","))
-            except ValueError:
-                raise ValueError("near must be 'lat,lon'")
+            _lat_lon(self.near)
         if self.radius is not None:
             _radius_m(self.radius)  # raises ValueError on junk
         if self.min_tag_match is not None and not self.tags:
             raise ValueError("min_tag_match requires at least one tag")
+        if self.min_tag_concept_match is not None and not self.tags:
+            raise ValueError("min_tag_concept_match requires at least one tag")
         if (
             self.min_scale_confidence is not None
             and self.participant_count_min is None
@@ -315,6 +342,7 @@ FILTER_DEFAULTS: dict = {
     "participant_count_min": None, "participant_count_max": None,
     "min_scale_confidence": None,
     "required_attributes": [], "tags": [], "min_tag_match": None,
+    "min_tag_concept_match": None,
     "near": None, "radius": None,
 }
 
@@ -482,7 +510,9 @@ def parse_query(tx, q: str, now: datetime | None = None) -> SearchFilters:
         "Whole-event min_confidence defaults to 0.4; use 0 only when the "
         "query explicitly asks for tentative, unverified, or speculative "
         "event hints. "
-        "Set min_tag_match only for an explicit must/only requirement.\n"
+        "Set min_tag_match only for an explicit must/only requirement; set "
+        "min_tag_concept_match only when every requested concept needs its "
+        "own hard evidence floor.\n"
         "Audience attributes (age, gender_split_min, kid_friendly, ...) are "
         "soft preferences by default; add a name to required_attributes ONLY "
         "when the user is emphatic ('unbedingt', 'muss', 'nur wenn').\n\n"
@@ -522,10 +552,12 @@ def build_sql(
         params["weekdays"] = [WEEKDAY_NUMBERS[day] for day in f.weekdays]
 
     radius_any = (f.radius or "").strip().lower() == "any"
-    if f.near is not None or (f.radius is not None and not radius_any):
+    if not radius_any and (
+        f.near is not None or f.radius is not None
+    ):
         # explicit geo ask = hard filter: unknown location never matches
         lat, lon = (
-            tuple(float(x) for x in f.near.split(",")) if f.near
+            _lat_lon(f.near) if f.near
             else LINZ_CENTER
         )
         conditions.append(
@@ -760,6 +792,12 @@ def rank(
         scored = [
             pair for pair in scored
             if pair[1]["tag_match"] >= f.min_tag_match
+        ]
+    if f.tags and f.min_tag_concept_match is not None:
+        scored = [
+            pair for pair in scored
+            if pair[1].get("tag_weakest_concept_match", 0)
+            >= f.min_tag_concept_match
         ]
     return [
         row for _, row in sorted(

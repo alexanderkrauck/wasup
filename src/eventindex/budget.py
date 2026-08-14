@@ -59,9 +59,9 @@ RECOVERY_JOB_KINDS = frozenset({
     "enrich", "ground_venue", "hydrate_event", "timefix", "verify_event",
 })
 PAID_JOB_KINDS = frozenset({
-    "agent_extract", "crawl", "discover", "enrich", "ground_venue",
-    "hydrate_event", "onboard", "parity_audit", "probe", "qa_check",
-    "resolve", "timefix", "verify_event",
+    "agent_extract", "crawl", "discover", "enrich", "estimate_audience",
+    "ground_venue", "hydrate_event", "onboard", "parity_audit", "probe",
+    "qa_check", "resolve", "timefix", "verify_event",
 })
 _LANE_CAPS = {
     "recovery": Decimal(str(config.RECOVERY_DAILY_PAID_CAP_EUR)),

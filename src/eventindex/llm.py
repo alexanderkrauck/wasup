@@ -119,6 +119,7 @@ def _budgeted_create(
     job_id: UUID | None,
     budget_lane: str | None,
     model: str,
+    reservation_eur: float | None = None,
     **kwargs,
 ):
     """Provider call with one atomic reservation per physical attempt."""
@@ -128,9 +129,15 @@ def _budgeted_create(
     from openai import APIConnectionError, APIStatusError
 
     ensure_openrouter_available()
-    max_eur = config.LLM_RESERVATION_EUR_BY_MODEL.get(
+    reviewed_max_eur = config.LLM_RESERVATION_EUR_BY_MODEL.get(
         model, config.LLM_UNKNOWN_MODEL_RESERVATION_EUR
     )
+    max_eur = reviewed_max_eur if reservation_eur is None else reservation_eur
+    if max_eur <= 0 or max_eur > reviewed_max_eur:
+        raise ValueError(
+            "request reservation must be positive and no greater than the "
+            f"reviewed {model} maximum of EUR {reviewed_max_eur}"
+        )
     max_price = config.LLM_MAX_PRICE_USD_PER_M_BY_MODEL.get(model)
     if max_price is not None:
         extra_body = dict(kwargs.get("extra_body") or {})
@@ -296,6 +303,8 @@ def complete(
     job_id: UUID | None = None,
     images: list[str] | None = None,
     budget_lane: str | None = None,
+    max_tokens: int | None = None,
+    reservation_eur: float | None = None,
 ) -> S:
     """One structured LLM call: budget-checked, schema-validated, ledgered.
 
@@ -322,7 +331,8 @@ def complete(
             budget_lane=budget_lane,
             model=model,
             messages=messages,
-            max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
+            max_tokens=max_tokens or config.LLM_MAX_OUTPUT_TOKENS,
+            reservation_eur=reservation_eur,
             response_format={
                 "type": "json_schema",
                 "json_schema": {

@@ -10,7 +10,9 @@ from eventindex import config
 from eventindex.budget import (
     BudgetExceeded,
     DailyBudgetExceeded,
+    PAID_JOB_KINDS,
     ProviderUnavailable,
+    RECOVERY_JOB_KINDS,
     check_budget,
     record_spend,
     release_spend,
@@ -18,6 +20,11 @@ from eventindex.budget import (
     settle_spend,
     trip_provider_circuit,
 )
+
+
+def test_audience_essentials_are_paid_core_not_recovery():
+    assert "estimate_audience" in PAID_JOB_KINDS
+    assert "estimate_audience" not in RECOVERY_JOB_KINDS
 
 
 def _make_source(conn, monthly_budget_eur):

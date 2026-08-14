@@ -299,7 +299,7 @@ def resolve(job: dict, tx) -> list[dict]:
             "AND id <> %s",
             (f"superseded by atomic rebuild {job['id']}", keep),
         )
-    already_queued = {
+    already_enrich_queued = {
         row["event_id"]
         for row in tx.execute(
             "SELECT payload->>'event_id' AS event_id FROM jobs "
@@ -307,11 +307,29 @@ def resolve(job: dict, tx) -> list[dict]:
             "AND payload ? 'event_id'"
         )
     }
+    audience_pending = {
+        str(row["event_id"])
+        for row in tx.execute(
+            "SELECT DISTINCT event_id FROM occurrence "
+            "WHERE event_id = ANY(%s) AND status = 'pending_enrichment'",
+            (pending,),
+        )
+    } if pending else set()
+    already_audience_queued = {
+        row["event_id"]
+        for row in tx.execute(
+            "SELECT jsonb_array_elements_text("
+            "coalesce(payload->'event_ids', '[]'::jsonb)) AS event_id "
+            "FROM jobs WHERE kind = 'estimate_audience' "
+            "AND status IN ('pending', 'running')"
+        )
+    }
     next_starts = {
         str(row["event_id"]): row["next_start"].isoformat()
         for row in tx.execute(
             "SELECT event_id, min(starts_at) AS next_start FROM occurrence "
-            "WHERE event_id = ANY(%s) AND status = 'scheduled' "
+            "WHERE event_id = ANY(%s) "
+            "AND status IN ('scheduled', 'pending_enrichment') "
             "AND coalesce(ends_at, starts_at) >= now() GROUP BY event_id",
             (pending,),
         )
@@ -327,15 +345,220 @@ def resolve(job: dict, tx) -> list[dict]:
                 ),
             },
         }
-        for eid in pending if str(eid) not in already_queued
+        for eid in pending
+        if str(eid) not in audience_pending
+        and str(eid) not in already_enrich_queued
     ]
+    audience_ids = sorted(
+        audience_pending - already_audience_queued,
+        key=lambda event_id: (next_starts.get(event_id, "9999"), event_id),
+    )
+    for offset in range(0, len(audience_ids), config.AUDIENCE_ESSENTIALS_BATCH_SIZE):
+        batch = audience_ids[
+            offset:offset + config.AUDIENCE_ESSENTIALS_BATCH_SIZE
+        ]
+        jobs.append({
+            "kind": "estimate_audience",
+            "payload": {
+                "event_ids": batch,
+                **(
+                    {"next_start": min(
+                        next_starts[event_id]
+                        for event_id in batch if event_id in next_starts
+                    )}
+                    if any(event_id in next_starts for event_id in batch)
+                    else {}
+                ),
+            },
+        })
     jobs.append({"kind": "embed_tags", "payload": {}})
+    return jobs
+
+
+def estimate_audience(job: dict, tx) -> list[dict]:
+    """Gate release: estimate gender, energy and solo fit in one cheap batch."""
+
+    from eventindex.enrich import (
+        apply_audience_essentials,
+        apply_to_event,
+        audience_essentials_content_key,
+        audience_essentials_from_full,
+        content_key,
+        estimate_audience_essentials,
+        persist_audience_essentials,
+        venue_override,
+    )
+
+    event_ids = list(dict.fromkeys(job["payload"].get("event_ids") or []))
+    if not event_ids:
+        return []
+    if len(event_ids) > config.AUDIENCE_ESSENTIALS_BATCH_SIZE:
+        raise ValueError(
+            "estimate_audience payload exceeds "
+            f"{config.AUDIENCE_ESSENTIALS_BATCH_SIZE} events"
+        )
+    rows = tx.execute(
+        "SELECT e.id, e.title, e.description, e.category, e.price_min, "
+        "e.price_max, v.name AS venue_name, v.sex_service AS venue_sex_service "
+        "FROM event e LEFT JOIN venue v ON v.id = e.venue_id "
+        "WHERE e.id = ANY(%s::uuid[])",
+        (event_ids,),
+    ).fetchall()
+    if not rows:
+        return []
+
+    full_keys = {str(row["id"]): content_key(row) for row in rows}
+    full_cache = {
+        cached["content_key"]: cached
+        for cached in tx.execute(
+            "SELECT content_key, attributes, model FROM enrichment "
+            "WHERE content_key = ANY(%s)",
+            (list(full_keys.values()),),
+        )
+    }
+    needs_essentials = []
+    full_adapted = {}
+    for row in rows:
+        event_id = str(row["id"])
+        full_key = full_keys[event_id]
+        cached = full_cache.get(full_key)
+        adapted = (
+            audience_essentials_from_full(cached["attributes"])
+            if cached is not None else None
+        )
+        if adapted is not None:
+            full_adapted[event_id] = adapted
+        else:
+            needs_essentials.append(row)
+
+    estimates = estimate_audience_essentials(
+        tx, needs_essentials, job_id=job["id"]
+    )
+
+    # The LLM call happens without row locks. Re-read and lock the current
+    # canon before applying: a concurrent rebuild may have kept the stable id
+    # while changing the content that these estimates describe.
+    current_rows = tx.execute(
+        "SELECT e.id, e.title, e.description, e.category, e.price_min, "
+        "e.price_max, v.name AS venue_name, v.sex_service AS venue_sex_service "
+        "FROM event e LEFT JOIN venue v ON v.id = e.venue_id "
+        "WHERE e.id = ANY(%s::uuid[]) FOR UPDATE OF e",
+        ([row["id"] for row in rows],),
+    ).fetchall()
+    current_by_id = {str(row["id"]): row for row in current_rows}
+    released_ids = []
+    needs_full = []
+    stale_ids = []
+    for row in rows:
+        event_id = str(row["id"])
+        current = current_by_id.get(event_id)
+        if current is None:
+            continue
+        cached = full_cache.get(full_keys[event_id])
+        if event_id in full_adapted:
+            if content_key(current) != full_keys[event_id]:
+                stale_ids.append(current["id"])
+                continue
+            essentials_key, essentials = persist_audience_essentials(
+                tx,
+                current,
+                full_adapted[event_id],
+                model=cached["model"] or config.MODEL_MINI,
+            )
+            apply_audience_essentials(
+                tx,
+                current["id"],
+                essentials,
+                enrichment_key=essentials_key,
+            )
+            apply_to_event(
+                tx,
+                current["id"],
+                venue_override(current, dict(cached["attributes"])),
+                enrichment_key=full_keys[event_id],
+            )
+            released_ids.append(current["id"])
+            continue
+
+        key, attributes = estimates[event_id]
+        if audience_essentials_content_key(current) != key:
+            stale_ids.append(current["id"])
+            continue
+        apply_audience_essentials(
+            tx, current["id"], attributes, enrichment_key=key
+        )
+        released_ids.append(current["id"])
+        needs_full.append(current)
+
+    if released_ids:
+        tx.execute(
+            "UPDATE occurrence SET status = 'scheduled' "
+            "WHERE event_id = ANY(%s) AND status = 'pending_enrichment'",
+            (released_ids,),
+        )
+
+    already_enrich_queued = {
+        row["event_id"]
+        for row in tx.execute(
+            "SELECT payload->>'event_id' AS event_id FROM jobs "
+            "WHERE kind = 'enrich' AND status IN ('pending', 'running') "
+            "AND payload ? 'event_id'"
+        )
+    }
+    followup_ids = [row["id"] for row in needs_full] + stale_ids
+    next_starts = {
+        str(row["event_id"]): row["next_start"].isoformat()
+        for row in tx.execute(
+            "SELECT event_id, min(starts_at) AS next_start FROM occurrence "
+            "WHERE event_id = ANY(%s) "
+            "AND status IN ('scheduled', 'pending_enrichment') "
+            "AND coalesce(ends_at, starts_at) >= now() GROUP BY event_id",
+            (followup_ids,),
+        )
+    } if followup_ids else {}
+    jobs = [
+        {
+            "kind": "enrich",
+            "payload": {
+                "event_id": str(row["id"]),
+                **(
+                    {"next_start": next_starts[str(row["id"])]}
+                    if str(row["id"]) in next_starts else {}
+                ),
+            },
+        }
+        for row in needs_full
+        if str(row["id"]) not in already_enrich_queued
+    ]
+    if stale_ids:
+        jobs.append({
+            "kind": "estimate_audience",
+            "payload": {
+                "event_ids": [str(event_id) for event_id in stale_ids],
+                **(
+                    {"next_start": min(
+                        next_starts[str(event_id)]
+                        for event_id in stale_ids
+                        if str(event_id) in next_starts
+                    )}
+                    if any(str(event_id) in next_starts for event_id in stale_ids)
+                    else {}
+                ),
+            },
+        })
     return jobs
 
 
 def enrich(job: dict, tx) -> list[dict]:
     """§8/H5: infer audience attributes for one event (cached by content)."""
-    from eventindex.enrich import apply_to_event, content_key, enrich_event
+    from eventindex.enrich import (
+        apply_audience_essentials,
+        apply_to_event,
+        audience_essentials_from_full,
+        content_key,
+        enrich_event,
+        persist_audience_essentials,
+    )
 
     row = tx.execute(
         "SELECT e.id, e.title, e.description, e.category, e.price_min, "
@@ -345,8 +568,48 @@ def enrich(job: dict, tx) -> list[dict]:
     ).fetchone()
     if row is None:
         return []  # event resolved away since; the next rebuild re-enqueues
+    original_key = content_key(row)
     attributes = enrich_event(tx, row, job_id=job["id"])
-    apply_to_event(tx, row["id"], attributes, enrichment_key=content_key(row))
+    current = tx.execute(
+        "SELECT e.id, e.title, e.description, e.category, e.price_min, "
+        "e.price_max, v.name AS venue_name, v.sex_service AS venue_sex_service "
+        "FROM event e LEFT JOIN venue v ON v.id = e.venue_id "
+        "WHERE e.id = %s FOR UPDATE OF e",
+        (row["id"],),
+    ).fetchone()
+    if current is None:
+        return []
+    if content_key(current) != original_key:
+        next_start = tx.execute(
+            "SELECT min(starts_at) AS next_start FROM occurrence "
+            "WHERE event_id = %s "
+            "AND status IN ('scheduled', 'pending_enrichment') "
+            "AND coalesce(ends_at, starts_at) >= now()",
+            (current["id"],),
+        ).fetchone()["next_start"]
+        return [{
+            "kind": "estimate_audience",
+            "payload": {
+                "event_ids": [str(current["id"])],
+                **({"next_start": next_start.isoformat()} if next_start else {}),
+            },
+        }]
+
+    essentials = audience_essentials_from_full(attributes)
+    if essentials is None:
+        raise ValueError("full enrichment omitted mandatory audience estimates")
+    essentials_key, essentials = persist_audience_essentials(
+        tx, current, essentials, model=config.MODEL_MINI
+    )
+    apply_audience_essentials(
+        tx, current["id"], essentials, enrichment_key=essentials_key
+    )
+    apply_to_event(tx, current["id"], attributes, enrichment_key=original_key)
+    tx.execute(
+        "UPDATE occurrence SET status = 'scheduled' "
+        "WHERE event_id = %s AND status = 'pending_enrichment'",
+        (current["id"],),
+    )
     # Debounced derived-cache convergence: the current batch may finish while
     # more enrichment jobs create new tags, so a later enrichment re-arms it.
     pending = tx.execute(
@@ -1268,7 +1531,8 @@ def ground_venue(job: dict, tx) -> list[dict]:
 
 
 HANDLERS = {
-    "crawl": crawl, "resolve": resolve, "enrich": enrich,
+    "crawl": crawl, "resolve": resolve, "estimate_audience": estimate_audience,
+    "enrich": enrich,
     "embed_tags": embed_tags,
     "onboard": onboard, "agent_extract": agent_extract, "probe": probe,
     "discover": discover, "qa_check": qa_check,

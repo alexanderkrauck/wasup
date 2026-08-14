@@ -48,6 +48,16 @@ MODEL_VISION = MODEL_MID
 LLM_MAX_OUTPUT_TOKENS = 16000  # event-list pages produce long array outputs
 USD_TO_EUR = 0.90  # OpenRouter reports cost in USD credits
 
+# Publication-gating audience essentials are intentionally tiny and batched.
+# Worst-case reviewed request: 20 x (title + 600 description chars + metadata)
+# is under ~8k input tokens and 4k output tokens. At MODEL_MINI's reviewed
+# ceiling that is < EUR 0.003; EUR 0.01 leaves >3x headroom without making a
+# cheap mandatory call reserve the generic EUR 0.20 maximum.
+AUDIENCE_ESSENTIALS_BATCH_SIZE = 20
+AUDIENCE_ESSENTIALS_DESCRIPTION_CHARS = 600
+AUDIENCE_ESSENTIALS_MAX_OUTPUT_TOKENS = 4000
+AUDIENCE_ESSENTIALS_RESERVATION_EUR = 0.01
+
 # Paid-provider budgets (Alexander 2026-08-05: hard ceiling below $3/day).
 # EUR 2.40 is about USD 2.67 at the ledger FX and deliberately leaves room
 # below $3 for FX drift and OpenRouter's credit-purchase fee.  Google Places

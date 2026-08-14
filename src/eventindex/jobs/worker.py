@@ -77,6 +77,9 @@ def claim_next(conn) -> dict | None:
                     -- one due atomic rebuild must not sit behind thousands of
                     -- derived jobs that only become useful after publication.
                     WHEN 'resolve' THEN 0
+                    -- Missing gender/energy/solo is a publication gate; this
+                    -- cheap 20-event batch is the shortest path to release.
+                    WHEN 'estimate_audience' THEN 1
                     -- A monthly reset must let proven acquisition sources
                     -- refresh before staleness decay hides their otherwise
                     -- healthy events.  yield_ema is the existing generic
@@ -91,7 +94,7 @@ def claim_next(conn) -> dict | None:
                         SELECT 1 FROM jobs active
                         WHERE active.kind = 'crawl'
                           AND active.status = 'running'
-                    ) THEN 1 ELSE 8 END
+                    ) THEN 2 ELSE 9 END
                     -- Hydration has an explicit <24h publication SLA. A
                     -- schema-wide rebuild can enqueue thousands of enrich
                     -- jobs at once; fixed enrichment priority otherwise
@@ -105,17 +108,17 @@ def claim_next(conn) -> dict | None:
                             WHERE active.kind = 'hydrate_event'
                               AND active.status = 'running'
                         )
-                             THEN 2 ELSE 7 END
-                    WHEN 'enrich' THEN 3
-                    WHEN 'embed_tags' THEN 4
+                             THEN 3 ELSE 8 END
+                    WHEN 'enrich' THEN 4
+                    WHEN 'embed_tags' THEN 5
                     -- A due resolve publishes recovered claims in batches.
-                    WHEN 'verify_event' THEN 5
+                    WHEN 'verify_event' THEN 6
                     -- Grounding is admitted in small scheduler batches, so
                     -- giving it the first recovery slot cannot starve the
                     -- much larger hydration backlog; workers drain the batch
                     -- and spend the rest of the tick on event facts.
-                    WHEN 'ground_venue' THEN 6
-                    ELSE 8
+                    WHEN 'ground_venue' THEN 7
+                    ELSE 9
                 END,
                 CASE WHEN kind = 'crawl' THEN (
                     SELECT -s.yield_ema FROM source s
@@ -130,6 +133,12 @@ def claim_next(conn) -> dict | None:
                     WHERE e.id = (jobs.payload->>'event_id')::uuid
                 ) END DESC NULLS LAST,
                 CASE WHEN kind = 'enrich' THEN
+                    coalesce(
+                        (payload->>'next_start')::timestamptz,
+                        'infinity'::timestamptz
+                    )
+                END,
+                CASE WHEN kind = 'estimate_audience' THEN
                     coalesce(
                         (payload->>'next_start')::timestamptz,
                         'infinity'::timestamptz

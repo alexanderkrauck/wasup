@@ -37,6 +37,20 @@ def test_newly_changed_event_enrichment_outranks_old_backlog(conn):
     assert claim_next(conn)["payload"]["event_id"] == str(newer)
 
 
+def test_audience_gate_runs_immediately_after_resolve(conn):
+    conn.execute(
+        "INSERT INTO jobs (kind, payload) VALUES "
+        "('crawl', '{}'), "
+        "('enrich', '{\"next_start\":\"2026-01-01T00:00:00Z\"}'), "
+        "('estimate_audience', "
+        " '{\"event_ids\":[],\"next_start\":\"2026-01-01T00:00:00Z\"}'), "
+        "('resolve', '{}')"
+    )
+
+    assert claim_next(conn)["kind"] == "resolve"
+    assert claim_next(conn)["kind"] == "estimate_audience"
+
+
 def test_overdue_hydration_sla_outranks_schema_wide_enrichment(conn):
     productive_source = conn.execute(
         "INSERT INTO source (name, url, kind, tier, trust, yield_ema) VALUES "
@@ -300,6 +314,215 @@ def test_ghost_target_handlers_noop_and_survive_their_imports(conn):
     for kind in ("enrich", "hydrate_event"):
         job = {"id": uuid.uuid4(), "kind": kind, "payload": {"event_id": ghost}}
         assert handlers.HANDLERS[kind](job, conn) == []
+    audience_job = {
+        "id": uuid.uuid4(),
+        "kind": "estimate_audience",
+        "payload": {"event_ids": [ghost]},
+    }
+    assert handlers.estimate_audience(audience_job, conn) == []
+
+
+def test_audience_handler_releases_event_before_full_enrichment(
+    conn, monkeypatch,
+):
+    import uuid
+
+    from eventindex import enrich as audience
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, description, category) "
+        "VALUES (%s, 'event', 'Salsaabend', 'Tanze mit uns', '{nightlife}')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '1 day', 'pending_enrichment')",
+        (event_id,),
+    )
+    attrs = {
+        "gender_split": {"value": 0.6, "confidence": 0.3, "evidence": None},
+        "energy": {"value": "high", "confidence": 0.3, "evidence": None},
+        "solo_friendly": {
+            "value": True, "confidence": 0.2, "evidence": None,
+        },
+    }
+    key = audience.audience_essentials_content_key({
+        "title": "Salsaabend",
+        "description": "Tanze mit uns",
+        "category": ["nightlife"],
+        "venue_name": None,
+    })
+    monkeypatch.setattr(
+        audience,
+        "estimate_audience_essentials",
+        lambda tx, rows, job_id=None: {str(event_id): (key, attrs)},
+    )
+
+    jobs = handlers.estimate_audience(
+        {
+            "id": uuid.uuid4(),
+            "kind": "estimate_audience",
+            "payload": {"event_ids": [str(event_id)]},
+        },
+        conn,
+    )
+
+    row = conn.execute(
+        "SELECT expected_gender_split, inferred FROM event WHERE id = %s",
+        (event_id,),
+    ).fetchone()
+    assert row["expected_gender_split"] == 0.6
+    assert row["inferred"]["energy"] == "high"
+    assert row["inferred"]["solo_friendly"]["value"] is True
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (event_id,)
+    ).fetchone()["status"] == "scheduled"
+    assert jobs == [{
+        "kind": "enrich",
+        "payload": {
+            "event_id": str(event_id),
+            "next_start": conn.execute(
+                "SELECT min(starts_at) AS starts FROM occurrence "
+                "WHERE event_id = %s",
+                (event_id,),
+            ).fetchone()["starts"].isoformat(),
+        },
+    }]
+
+
+def test_audience_handler_rechecks_content_after_model_call(conn, monkeypatch):
+    import uuid
+
+    from eventindex import enrich as audience
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, description, category) "
+        "VALUES (%s, 'event', 'Alter Titel', 'Alter Text', '{culture}')",
+        (event_id,),
+    )
+    starts = conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '1 day', 'pending_enrichment') "
+        "RETURNING starts_at",
+        (event_id,),
+    ).fetchone()["starts_at"]
+    old = {
+        "id": event_id,
+        "title": "Alter Titel",
+        "description": "Alter Text",
+        "category": ["culture"],
+        "venue_name": None,
+    }
+    attrs = {
+        "gender_split": {"value": 0.5, "confidence": 0.2, "evidence": None},
+        "energy": {"value": "low", "confidence": 0.2, "evidence": None},
+        "solo_friendly": {"value": True, "confidence": 0.2, "evidence": None},
+    }
+
+    def estimate(tx, rows, job_id=None):
+        tx.execute(
+            "UPDATE event SET title = 'Neuer Titel' WHERE id = %s",
+            (event_id,),
+        )
+        return {
+            str(event_id): (
+                audience.audience_essentials_content_key(old), attrs,
+            ),
+        }
+
+    monkeypatch.setattr(audience, "estimate_audience_essentials", estimate)
+    jobs = handlers.estimate_audience(
+        {
+            "id": uuid.uuid4(),
+            "kind": "estimate_audience",
+            "payload": {"event_ids": [str(event_id)]},
+        },
+        conn,
+    )
+
+    row = conn.execute(
+        "SELECT expected_gender_split FROM event WHERE id = %s",
+        (event_id,),
+    ).fetchone()
+    assert row["expected_gender_split"] is None
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),
+    ).fetchone()["status"] == "pending_enrichment"
+    assert jobs == [{
+        "kind": "estimate_audience",
+        "payload": {
+            "event_ids": [str(event_id)],
+            "next_start": starts.isoformat(),
+        },
+    }]
+
+
+def test_audience_handler_seeds_confidence_from_full_cache(conn):
+    import uuid
+
+    from psycopg.types.json import Jsonb
+
+    from eventindex import enrich as audience
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, description, category) "
+        "VALUES (%s, 'event', 'Lesung', 'Autor liest', '{culture}')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '1 day', 'pending_enrichment')",
+        (event_id,),
+    )
+    canonical = {
+        "id": event_id,
+        "title": "Lesung",
+        "description": "Autor liest",
+        "category": ["culture"],
+        "venue_name": None,
+        "price_min": None,
+        "price_max": None,
+    }
+    full = {
+        "gender_split": {
+            "value": 0.55, "confidence": 0.3, "evidence": None,
+        },
+        "energy": "low",
+        "solo_friendly": {
+            "value": True, "confidence": 0.3, "evidence": None,
+        },
+    }
+    conn.execute(
+        "INSERT INTO enrichment (content_key, attributes, model) "
+        "VALUES (%s, %s, 'legacy-full')",
+        (audience.content_key(canonical), Jsonb(full)),
+    )
+
+    jobs = handlers.estimate_audience(
+        {
+            "id": uuid.uuid4(),
+            "kind": "estimate_audience",
+            "payload": {"event_ids": [str(event_id)]},
+        },
+        conn,
+    )
+
+    row = conn.execute(
+        "SELECT expected_gender_split, inferred FROM event WHERE id = %s",
+        (event_id,),
+    ).fetchone()
+    assert row["expected_gender_split"] == 0.55
+    assert row["inferred"]["energy"] == "low"
+    assert row["inferred"]["_audience_essentials"]["energy"] == {
+        "value": "low", "confidence": 0.2, "evidence": None,
+    }
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),
+    ).fetchone()["status"] == "scheduled"
+    assert jobs == []
 
 
 def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeypatch):
@@ -321,6 +544,50 @@ def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeyp
     jobs = handlers.resolve({"id": job_id, "payload": {}}, conn)
     assert [job["kind"] for job in jobs].count("enrich") == 300
     assert jobs[-1] == {"kind": "embed_tags", "payload": {}}
+
+
+def test_resolve_batches_publication_gated_events_before_full_enrichment(
+    conn, monkeypatch,
+):
+    import uuid
+
+    pending = []
+    for index in range(41):
+        event_id = uuid.uuid4()
+        conn.execute(
+            "INSERT INTO event (id, kind, title) VALUES (%s, 'event', %s)",
+            (event_id, f"Pending {index}"),
+        )
+        pending.append(event_id)
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at, status) "
+            "VALUES (%s, now() + interval '1 day', 'pending_enrichment')",
+            (event_id,),
+        )
+    monkeypatch.setattr(
+        handlers,
+        "rebuild",
+        lambda tx: {
+            "claims": 1,
+            "events": len(pending),
+            "occurrences": len(pending),
+            "venues_created": 0,
+            "enrich_pending": pending,
+        },
+    )
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind) VALUES ('resolve') RETURNING id"
+    ).fetchone()["id"]
+
+    jobs = handlers.resolve({"id": job_id, "payload": {}}, conn)
+    audience_jobs = [job for job in jobs if job["kind"] == "estimate_audience"]
+
+    assert [len(job["payload"]["event_ids"]) for job in audience_jobs] == [20, 20, 1]
+    assert {
+        event_id
+        for job in audience_jobs for event_id in job["payload"]["event_ids"]
+    } == {str(event_id) for event_id in pending}
+    assert not [job for job in jobs if job["kind"] == "enrich"]
 
 
 def test_lock_losing_resolve_reuses_existing_pending_followup(conn, monkeypatch):

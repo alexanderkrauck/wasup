@@ -10,6 +10,7 @@ free; only genuinely new/changed events cost an LLM call.
 """
 
 import hashlib
+import json
 from typing import Literal
 
 from psycopg.types.json import Jsonb
@@ -111,6 +112,40 @@ class _EventScaleEst(BaseModel):
         return self
 
 
+class _EnergyEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: Literal["low", "medium", "high"]
+    confidence: float = Field(gt=0, le=1)
+    evidence: str | None
+
+
+class AudienceEssentials(BaseModel):
+    """The exhaustive audience facets required before publication."""
+
+    model_config = ConfigDict(extra="forbid")
+    gender_split: _Est
+    energy: _EnergyEst
+    solo_friendly: _BoolEst
+
+    @model_validator(mode="after")
+    def valid_gender_split(self):
+        if not 0 <= self.gender_split.value <= 1:
+            raise ValueError("gender_split must be between 0 and 1")
+        return self
+
+
+class _AudienceBatchItem(AudienceEssentials):
+    event_id: str
+
+
+class AudienceEssentialsBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    events: list[_AudienceBatchItem] = Field(
+        min_length=1,
+        max_length=config.AUDIENCE_ESSENTIALS_BATCH_SIZE,
+    )
+
+
 class Enrichment(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # descriptions live in the prompt: strict schema mode forbids
@@ -158,6 +193,7 @@ class Enrichment(BaseModel):
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
 SCHEMA_VERSION = 11
+AUDIENCE_ESSENTIALS_SCHEMA_VERSION = 1
 MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
@@ -176,6 +212,21 @@ def content_key(event: dict) -> str:
     return hashlib.md5(parts.encode()).hexdigest()
 
 
+def audience_essentials_content_key(event: dict) -> str:
+    """A separate, small-context cache key for publication essentials."""
+
+    parts = "|".join([
+        f"audience-essentials-v{AUDIENCE_ESSENTIALS_SCHEMA_VERSION}",
+        event.get("title") or "",
+        (event.get("description") or "")[
+            :config.AUDIENCE_ESSENTIALS_DESCRIPTION_CHARS
+        ],
+        ",".join(event.get("category") or []),
+        str(event.get("venue_name") or ""),
+    ])
+    return hashlib.md5(parts.encode()).hexdigest()
+
+
 def _prior_for(tx, categories: list[str]) -> dict:
     if not categories:
         return {}
@@ -183,6 +234,230 @@ def _prior_for(tx, categories: list[str]) -> dict:
         "SELECT priors FROM category_priors WHERE category = %s", (categories[0],)
     ).fetchone()
     return row["priors"] if row else {}
+
+
+def _audience_source_text(event: dict) -> str:
+    return " ".join(filter(None, [
+        event.get("title") or "",
+        (event.get("description") or "")[
+            :config.AUDIENCE_ESSENTIALS_DESCRIPTION_CHARS
+        ],
+        event.get("venue_name") or "",
+    ]))
+
+
+def _clamp_audience_essentials(attributes: dict, event: dict) -> dict:
+    """Cap certainty and discard invented evidence without losing a value."""
+
+    source_folded = _audience_source_text(event).casefold()
+    for name in ("gender_split", "energy", "solo_friendly"):
+        estimate = attributes[name]
+        estimate["confidence"] = min(estimate["confidence"], CONFIDENCE_CAP)
+        evidence = str(estimate.get("evidence") or "").strip()
+        if evidence and evidence.casefold() not in source_folded:
+            estimate["evidence"] = None
+        if estimate.get("evidence") is None:
+            estimate["confidence"] = min(
+                estimate["confidence"], PRIOR_CONFIDENCE_CAP
+            )
+    return attributes
+
+
+def persist_audience_essentials(
+    tx, event: dict, attributes: dict, *, model: str
+) -> tuple[str, dict]:
+    """Commit one validated essentials cache winner for this exact content."""
+
+    key = audience_essentials_content_key(event)
+    values = _clamp_audience_essentials(
+        AudienceEssentials.model_validate(attributes).model_dump(), event
+    )
+    persisted = tx.execute(
+        "INSERT INTO enrichment (content_key, attributes, model) "
+        "VALUES (%s, %s, %s) ON CONFLICT (content_key) DO UPDATE "
+        "SET content_key = enrichment.content_key RETURNING attributes",
+        (key, Jsonb(values), model),
+    ).fetchone()["attributes"]
+    return key, _clamp_audience_essentials(
+        AudienceEssentials.model_validate(persisted).model_dump(), event
+    )
+
+
+def audience_essentials_from_full(attributes: dict) -> dict | None:
+    """Read the required facets from the existing full-enrichment contract.
+
+    Full schema v11 stored energy as an enum without a confidence. It is still
+    an AI estimate and is safe for exhaustive filtering; expose a deliberately
+    low confidence when adapting that legacy cache rather than paying again.
+    """
+
+    gender = attributes.get("gender_split")
+    energy = attributes.get("energy")
+    solo_friendly = attributes.get("solo_friendly")
+    if isinstance(energy, str):
+        energy = {
+            "value": energy,
+            "confidence": GUESS_CONFIDENCE,
+            "evidence": None,
+        }
+    try:
+        return AudienceEssentials.model_validate({
+            "gender_split": gender,
+            "energy": energy,
+            "solo_friendly": solo_friendly,
+        }).model_dump()
+    except (ValueError, TypeError):
+        return None
+
+
+def estimate_audience_essentials(
+    tx, events: list[dict], *, job_id=None
+) -> dict[str, tuple[str, dict]]:
+    """Return cached/new essentials for at most one cheap LLM batch.
+
+    The mapping key is the canonical event id as text; each value carries its
+    versioned cache key and strict attributes. Concurrent workers both return
+    the committed cache winner, matching the full-enrichment cache contract.
+    """
+
+    if not events:
+        return {}
+    if len(events) > config.AUDIENCE_ESSENTIALS_BATCH_SIZE:
+        raise ValueError(
+            "audience essentials batch exceeds "
+            f"{config.AUDIENCE_ESSENTIALS_BATCH_SIZE} events"
+        )
+    event_by_id = {str(event["id"]): event for event in events}
+    if len(event_by_id) != len(events):
+        raise ValueError("audience essentials batch contains duplicate event ids")
+    keys = {
+        event_id: audience_essentials_content_key(event)
+        for event_id, event in event_by_id.items()
+    }
+    cached = {
+        row["content_key"]: row["attributes"]
+        for row in tx.execute(
+            "SELECT content_key, attributes FROM enrichment "
+            "WHERE content_key = ANY(%s)",
+            (list(keys.values()),),
+        )
+    }
+    resolved: dict[str, tuple[str, dict]] = {}
+    missing: list[dict] = []
+    for event_id, event in event_by_id.items():
+        key = keys[event_id]
+        try:
+            attributes = _clamp_audience_essentials(
+                AudienceEssentials.model_validate(cached[key]).model_dump(),
+                event,
+            )
+        except (KeyError, ValueError, TypeError):
+            missing.append(event)
+        else:
+            resolved[event_id] = (key, attributes)
+
+    if not missing:
+        return resolved
+
+    prompt_events = [
+        {
+            "event_id": str(event["id"]),
+            "title": (event.get("title") or "")[:300],
+            "description": (event.get("description") or "")[
+                :config.AUDIENCE_ESSENTIALS_DESCRIPTION_CHARS
+            ],
+            "category": [
+                str(name)[:40]
+                for name in (event.get("category") or [])[:3]
+            ],
+            "venue": str(event.get("venue_name") or "")[:160] or None,
+        }
+        for event in missing
+    ]
+    result = llm.complete(
+        tx,
+        "Estimate exactly three exhaustive audience facets for every event in "
+        "the JSON array below. Return each event_id exactly once. ALWAYS make "
+        "a best estimate; no value may be null or unknown. gender_split is a "
+        "number from 0 (all men) to 1 (all women). energy is exactly low, "
+        "medium, or high and describes the attendee experience, not listing "
+        "quality. solo_friendly is true when attending alone is normal and "
+        "comfortable (for example a concert or run club), false when the "
+        "format normally requires an existing partner/group. Confidence "
+        "encodes uncertainty: about 0.2 for pure world-"
+        "knowledge, about 0.35 for a normal category/format prior, and up to "
+        "0.8 only for explicit text. Evidence must be an exact contiguous "
+        "quote from that event's title, description, or venue; otherwise it "
+        "must be null. Do not explain outside the schema.\n\nEVENTS:\n"
+        + json.dumps(prompt_events, ensure_ascii=False, separators=(",", ":")),
+        AudienceEssentialsBatch,
+        job_id=job_id,
+        budget_lane="core",
+        max_tokens=config.AUDIENCE_ESSENTIALS_MAX_OUTPUT_TOKENS,
+        reservation_eur=config.AUDIENCE_ESSENTIALS_RESERVATION_EUR,
+    )
+    returned = [item.event_id for item in result.events]
+    expected = {str(event["id"]) for event in missing}
+    if len(returned) != len(set(returned)) or set(returned) != expected:
+        raise ValueError(
+            "audience essentials response must contain every requested "
+            "event_id exactly once"
+        )
+    result_by_id = {item.event_id: item for item in result.events}
+    for event in missing:
+        event_id = str(event["id"])
+        attributes = _clamp_audience_essentials(
+            result_by_id[event_id].model_dump(exclude={"event_id"}), event
+        )
+        resolved[event_id] = persist_audience_essentials(
+            tx, event, attributes, model=config.MODEL_MINI
+        )
+    return resolved
+
+
+def apply_audience_essentials(
+    tx, event_id, attributes: dict, *, enrichment_key: str
+) -> None:
+    """Project mandatory audience values while keeping legacy energy shape."""
+
+    values = AudienceEssentials.model_validate(attributes).model_dump()
+    for estimate in values.values():
+        estimate["confidence"] = min(estimate["confidence"], CONFIDENCE_CAP)
+    tx.execute(
+        """
+        UPDATE event SET
+            expected_gender_split = %(gender)s,
+            expected_gender_split_confidence = %(gender_conf)s,
+            updated_at = now(),
+            inferred = coalesce(inferred, '{}'::jsonb)
+                || jsonb_build_object('energy', %(energy)s::text)
+                || jsonb_build_object(
+                    'solo_friendly', %(solo_estimate)s::jsonb
+                )
+                || jsonb_build_object(
+                    '_audience_essentials',
+                    jsonb_build_object(
+                        'schema_version', %(schema_version)s::int,
+                        'content_key', %(content_key)s::text,
+                        'gender_split', %(gender_estimate)s::jsonb,
+                        'energy', %(energy_estimate)s::jsonb,
+                        'solo_friendly', %(solo_estimate)s::jsonb
+                    )
+                )
+        WHERE id = %(id)s
+        """,
+        {
+            "id": event_id,
+            "gender": values["gender_split"]["value"],
+            "gender_conf": values["gender_split"]["confidence"],
+            "energy": values["energy"]["value"],
+            "schema_version": AUDIENCE_ESSENTIALS_SCHEMA_VERSION,
+            "content_key": enrichment_key,
+            "gender_estimate": Jsonb(values["gender_split"]),
+            "energy_estimate": Jsonb(values["energy"]),
+            "solo_estimate": Jsonb(values["solo_friendly"]),
+        },
+    )
 
 
 def venue_override(event: dict, attributes: dict) -> dict:
@@ -442,9 +717,13 @@ def apply_to_event(
         attributes.get("age_max", {}).get("confidence", 0),
     )
     current = tx.execute(
-        "SELECT venue_id FROM event WHERE id = %s", (event_id,)
+        "SELECT venue_id, inferred FROM event WHERE id = %s", (event_id,)
     ).fetchone()
     venue_id = current["venue_id"] if current else None
+    audience_metadata = (
+        (current["inferred"] or {}).get("_audience_essentials")
+        if current else None
+    )
     venue = attributes.get("venue", {})
     if venue_id is None and venue.get("value") and venue.get("evidence"):
         from eventindex.resolve.venues import VenueResolver
@@ -453,6 +732,18 @@ def apply_to_event(
     price = attributes.get("price", {})
     scale = attributes.get("event_scale", {})
     language = attributes.get("language", {})
+    inferred_values = {
+        k: attributes[k] for k in
+        ("language", "kid_friendly", "newcomer_friendly", "outdoor",
+         "solo_friendly", "interaction_structure", "energy",
+         "sex_service_context", "venue", "price", "event_scale",
+         "start_time")
+        if k in attributes
+    }
+    if isinstance(inferred_values.get("energy"), dict):
+        inferred_values["energy"] = inferred_values["energy"].get("value")
+    if audience_metadata:
+        inferred_values["_audience_essentials"] = audience_metadata
     tx.execute(
         """
         UPDATE event SET
@@ -468,6 +759,7 @@ def apply_to_event(
             venue_id = coalesce(venue_id, %(venue_id)s),
             price_min = coalesce(price_min, %(price_min)s),
             price_max = coalesce(price_max, %(price_max)s),
+            updated_at = now(),
             inferred = %(inferred)s
         WHERE id = %(id)s
         """,
@@ -485,14 +777,7 @@ def apply_to_event(
             "price_min": price.get("min") if price.get("basis") == "stated" else None,
             "price_max": price.get("max") if price.get("basis") == "stated" else None,
             "inferred": Jsonb(
-                {
-                    k: attributes[k] for k in
-                    ("language", "kid_friendly", "newcomer_friendly", "outdoor",
-                     "solo_friendly", "interaction_structure", "energy",
-                     "sex_service_context", "venue", "price", "event_scale",
-                     "start_time")
-                    if k in attributes
-                } | {
+                inferred_values | {
                     "_enrichment": {
                         "schema_version": SCHEMA_VERSION,
                         "content_key": enrichment_key,

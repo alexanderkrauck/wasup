@@ -190,6 +190,33 @@ def test_llm_client_has_one_bounded_retry_layer(monkeypatch):
     assert seen["max_retries"] == 0
 
 
+def test_structured_call_can_disable_reasoning_for_tiny_jobs(conn, monkeypatch):
+    from pydantic import BaseModel
+
+    from eventindex import llm
+
+    class Answer(BaseModel):
+        ok: bool
+
+    seen = {}
+
+    def complete_once(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"ok":true}'),
+            )],
+        )
+
+    monkeypatch.setattr(llm, "_budgeted_create", complete_once)
+    assert llm.complete(
+        conn, "answer", Answer, reasoning_effort="none",
+    ).ok is True
+    assert seen["extra_body"]["reasoning"] == {"effort": "none"}
+    with pytest.raises(ValueError, match="unsupported reasoning effort"):
+        llm.complete(conn, "answer", Answer, reasoning_effort="turbo")
+
+
 def test_llm_request_rejects_provider_price_above_reviewed_max(conn, monkeypatch):
     from eventindex import llm
 

@@ -412,6 +412,7 @@ def estimate_audience_essentials(
         budget_lane="core",
         max_tokens=config.AUDIENCE_ESSENTIALS_MAX_OUTPUT_TOKENS,
         reservation_eur=config.AUDIENCE_ESSENTIALS_RESERVATION_EUR,
+        reasoning_effort="none",
     )
     returned = [item.event_id for item in result.events]
     expected = {str(event["id"]) for event in missing}

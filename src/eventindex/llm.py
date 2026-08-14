@@ -305,6 +305,7 @@ def complete(
     budget_lane: str | None = None,
     max_tokens: int | None = None,
     reservation_eur: float | None = None,
+    reasoning_effort: str | None = None,
 ) -> S:
     """One structured LLM call: budget-checked, schema-validated, ledgered.
 
@@ -325,6 +326,13 @@ def complete(
 
     last_error: ValidationError | None = None
     for _ in range(2):
+        extra_body: dict = {"usage": {"include": True}}
+        if reasoning_effort is not None:
+            if reasoning_effort not in {
+                "none", "minimal", "low", "medium", "high", "xhigh", "max",
+            }:
+                raise ValueError(f"unsupported reasoning effort {reasoning_effort!r}")
+            extra_body["reasoning"] = {"effort": reasoning_effort}
         response = _budgeted_create(
             source_id=source_id,
             job_id=job_id,
@@ -341,7 +349,7 @@ def complete(
                     "schema": schema.model_json_schema(),
                 },
             },
-            extra_body={"usage": {"include": True}},
+            extra_body=extra_body,
         )
         content = response.choices[0].message.content or ""
         try:

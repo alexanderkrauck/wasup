@@ -416,6 +416,11 @@ def _occurrence_filter_parts(
     from_, to, near, radius, bbox, category, min_confidence,
     name=None, organizer=None, venue=None, source=None,
     exclude_sex_service_context: bool = False,
+    is_free: bool | None = None,
+    solo_friendly: bool | None = None,
+    gender_split_min: float | None = None,
+    gender_split_max: float | None = None,
+    energy: Literal["low", "medium", "high"] | None = None,
 ) -> tuple[list[tuple[str, str]], dict]:
     """Labelled shared filters for listings, feeds, and feed audits."""
     from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER, _lat_lon
@@ -518,6 +523,37 @@ def _occurrence_filter_parts(
             "OR src_s.url ILIKE %(source_name)s))"
         )))
         params["source_name"] = f"%{source}%"
+    if is_free:
+        # A hard "free" filter may use only a stated zero price. Estimated
+        # or unknown prices cannot satisfy it.
+        parts.append(("stated_price", "e.price_min = 0"))
+    if solo_friendly is not None:
+        parts.append(("solo_friendly", (
+            "(e.inferred->'solo_friendly'->>'value')::bool = "
+            "%(solo_friendly)s"
+        )))
+        params["solo_friendly"] = solo_friendly
+    if (
+        gender_split_min is not None
+        and gender_split_max is not None
+        and gender_split_min > gender_split_max
+    ):
+        raise HTTPException(
+            422, "gender_split_min is greater than gender_split_max"
+        )
+    if gender_split_min is not None:
+        parts.append((
+            "gender_split", "e.expected_gender_split >= %(gender_split_min)s",
+        ))
+        params["gender_split_min"] = gender_split_min
+    if gender_split_max is not None:
+        parts.append((
+            "gender_split", "e.expected_gender_split <= %(gender_split_max)s",
+        ))
+        params["gender_split_max"] = gender_split_max
+    if energy is not None:
+        parts.append(("energy", "e.inferred->>'energy' = %(energy)s"))
+        params["energy"] = energy
     if exclude_sex_service_context:
         # Keep unknown classifications: the MCP safety policy suppresses
         # only events positively identified as commercial sex services.
@@ -533,11 +569,17 @@ def _occurrence_filters(
     from_, to, near, radius, bbox, category, min_confidence,
     name=None, organizer=None, venue=None, source=None,
     exclude_sex_service_context: bool = False,
+    is_free: bool | None = None,
+    solo_friendly: bool | None = None,
+    gender_split_min: float | None = None,
+    gender_split_max: float | None = None,
+    energy: Literal["low", "medium", "high"] | None = None,
 ) -> tuple[list[str], dict]:
-    """The shared filter set of /v1/occurrences and /v1/feed.ics."""
+    """The exact filter set shared by occurrence listings and summaries."""
     parts, params = _occurrence_filter_parts(
         from_, to, near, radius, bbox, category, min_confidence,
         name, organizer, venue, source, exclude_sex_service_context,
+        is_free, solo_friendly, gender_split_min, gender_split_max, energy,
     )
     return [condition for _, condition in parts], params
 
@@ -545,6 +587,14 @@ def _occurrence_filters(
 @app.get("/v1/occurrences/summary")
 def occurrence_summary(
     category: str | None = Query(None, description="comma-separated"),
+    is_free: bool | None = Query(
+        None, description="true requires a stated zero price"),
+    solo_friendly: bool | None = Query(
+        None, description="hard filter on the labeled solo-friendly estimate"),
+    gender_split_min: float | None = Query(None, ge=0, le=1),
+    gender_split_max: float | None = Query(None, ge=0, le=1),
+    energy: Literal["low", "medium", "high"] | None = Query(
+        None, description="hard filter on the labeled energy estimate"),
 ):
     """Occurrence counts for the GUI's fixed Vienna calendar ranges."""
     local_now = datetime.now(VIENNA)
@@ -568,6 +618,11 @@ def occurrence_summary(
         min(window["from"] for window in ranges.values()),
         max(window["to"] for window in ranges.values()),
         None, "default", None, category, DEFAULT_MIN_CONFIDENCE,
+        is_free=is_free,
+        solo_friendly=solo_friendly,
+        gender_split_min=gender_split_min,
+        gender_split_max=gender_split_max,
+        energy=energy,
     )
     for name, window in ranges.items():
         params[f"{name}_from"] = window["from"]
@@ -626,6 +681,14 @@ def occurrences(
         "tags makes this chronological listing a certainty-weighted filter"),
     min_tag_match: float = Query(0.5, ge=0, le=1),
     min_tag_concept_match: float | None = Query(None, ge=0, le=1),
+    is_free: bool | None = Query(
+        None, description="true requires a stated zero price"),
+    solo_friendly: bool | None = Query(
+        None, description="hard filter on the labeled solo-friendly estimate"),
+    gender_split_min: float | None = Query(None, ge=0, le=1),
+    gender_split_max: float | None = Query(None, ge=0, le=1),
+    energy: Literal["low", "medium", "high"] | None = Query(
+        None, description="hard filter on the labeled energy estimate"),
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
@@ -635,6 +698,11 @@ def occurrences(
     conditions, params = _occurrence_filters(
         from_, to, near, radius, bbox, category, min_confidence,
         name, organizer, venue, source,
+        is_free=is_free,
+        solo_friendly=solo_friendly,
+        gender_split_min=gender_split_min,
+        gender_split_max=gender_split_max,
+        energy=energy,
     )
     desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
     if min_tag_concept_match is not None and not desired_tags:
@@ -666,6 +734,13 @@ def occurrences(
                e.kind, e.organizer, e.status AS event_status,
                e.booking_url, e.registration_required,
                e.inferred, e.field_provenance,
+               (e.inferred->'solo_friendly'->>'value')::bool
+                   AS solo_friendly_estimate,
+               (e.inferred->'solo_friendly'->>'confidence')::float
+                   AS solo_friendly_confidence,
+               e.expected_gender_split AS gender_split_estimate,
+               e.expected_gender_split_confidence AS gender_split_confidence,
+               e.inferred->>'energy' AS energy_estimate,
                e.expected_attendance, e.expected_attendance_confidence,
                ({_PRICE_SOURCE_SQL}) AS price_source_url,
                v.name AS venue_name, v.address AS venue_address,
@@ -680,6 +755,37 @@ def occurrences(
     """
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()
+        tags_by_event = {row["event_id"]: [] for row in rows}
+        if tags_by_event:
+            tag_rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT et.event_id, et.name, et.confidence, et.origins,
+                           row_number() OVER (
+                               PARTITION BY et.event_id
+                               ORDER BY et.confidence DESC, et.name
+                           ) AS position
+                    FROM event_tag et
+                    JOIN event e ON e.id = et.event_id
+                    WHERE et.event_id = ANY(%s)
+                      AND NOT (
+                          et.name = ANY(coalesce(e.category, '{}'::text[]))
+                      )
+                )
+                SELECT event_id, name, confidence, origins
+                FROM ranked WHERE position <= 16
+                ORDER BY event_id, confidence DESC, name
+                """,
+                (list(tags_by_event),),
+            ).fetchall()
+            for tag in tag_rows:
+                tags_by_event[tag["event_id"]].append({
+                    "name": tag["name"],
+                    "confidence": tag["confidence"],
+                    "origins": tag["origins"],
+                })
+        for row in rows:
+            row["tags"] = tags_by_event[row["event_id"]]
         if desired_tags:
             matches = tag_store.semantic_matches(
                 conn, [row["event_id"] for row in rows], desired_tags
@@ -701,6 +807,22 @@ def occurrences(
                     if match and match["combined_context_score"] is not None
                     else None
                 )
+        for row in rows:
+            row["estimates"] = {
+                "solo_friendly": {
+                    "value": row.pop("solo_friendly_estimate"),
+                    "confidence": row.pop("solo_friendly_confidence"),
+                },
+                "gender_split": {
+                    "value": row.pop("gender_split_estimate"),
+                    "confidence": row.pop("gender_split_confidence"),
+                },
+                "energy": {
+                    "value": row.pop("energy_estimate"),
+                    # Legacy energy values have no per-event confidence.
+                    "confidence": None,
+                },
+            }
         rows = [_attach_public_price_and_scale(row) for row in rows]
         freshness = _data_freshness(conn)
 

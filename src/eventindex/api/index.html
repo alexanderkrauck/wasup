@@ -23,21 +23,37 @@
   /* ---- flag band + nav ---- */
   .flagband { height: 8px; background:
     linear-gradient(180deg, var(--rot) 0 33%, #fff 33% 67%, var(--rot) 67% 100%); }
-  nav { position: sticky; top: 0; z-index: 50; display: flex; align-items: center;
-        gap: 1.4rem; padding: .6rem clamp(1rem, 4vw, 3rem);
-        background: rgba(255, 253, 251, .82); backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--linie); }
-  nav .brand { display: flex; align-items: center; gap: .55rem;
+  .site-header { position: sticky; top: 0; z-index: 50;
+        background: rgba(255, 253, 251, .88); backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px); border-bottom: 1px solid var(--linie); }
+  .site-header nav { width: min(100% - 2rem, 72rem); min-height: 64px;
+        margin: 0 auto; display: grid; grid-template-columns: 1fr auto 1fr;
+        align-items: center; gap: 1rem; }
+  nav .brand { width: max-content; display: flex; align-items: center; gap: .55rem;
         font-weight: 800; font-size: 1.15rem; text-decoration: none; }
   nav .brand img { width: 34px; height: 34px; border-radius: 26%; }
-  nav .links { display: flex; gap: 1.1rem; margin-left: auto; font-size: .95rem; }
-  nav .links a { text-decoration: none; color: var(--grau); }
-  nav .links a:hover { color: var(--tinte); }
-  nav .go { background: var(--rot); color: #fff; text-decoration: none;
-        padding: .45rem 1rem; border-radius: 999px; font-weight: 700;
-        font-size: .95rem; transition: transform .15s, background .15s; }
-  nav .go:hover { background: var(--rot-dunkel); transform: translateY(-1px); }
-  @media (max-width: 720px) { nav .links { display: none; } }
+  nav .links { display: flex; align-items: center; gap: 1rem; }
+  nav .nav-link { position: relative; display: inline-flex; align-items: center;
+        justify-content: center; min-height: 44px; padding: .55rem .35rem;
+        color: var(--tinte); font-weight: 750; text-decoration: none;
+        white-space: nowrap; transition: color .15s; }
+  nav .nav-link::after { content: ""; position: absolute; right: .35rem;
+        bottom: .25rem; left: .35rem; height: 2px; border-radius: 999px;
+        background: var(--rot); transform: scaleX(0); transition: transform .15s; }
+  nav .nav-link:hover, nav .nav-link[aria-current="page"] { color: var(--rot-dunkel); }
+  nav .nav-link:hover::after, nav .nav-link[aria-current="page"]::after {
+        transform: scaleX(1); }
+  @media (max-width: 720px) {
+    .site-header nav { width: min(100% - 1.2rem, 72rem); min-height: 58px;
+          grid-template-columns: 1fr auto; gap: .65rem; }
+    nav .links { gap: .55rem; }
+    nav .nav-link { padding: .45rem .25rem; font-size: .78rem; }
+    nav .nav-link::after { right: .25rem; left: .25rem; }
+  }
+  @media (max-width: 390px) {
+    nav .links { gap: .35rem; }
+    nav .nav-link { font-size: .73rem; }
+  }
 
   /* ---- hero ---- */
   .hero { position: relative; max-width: 72rem; margin: 0 auto;
@@ -224,16 +240,15 @@
 
 <div class="flagband"></div>
 
-<nav>
-  <a class="brand" href="/"><img src="/logo.png" alt=""> Wasup</a>
-  <div class="links">
-    <a href="/calendar">Events</a>
-    <a href="#chatgpt">ChatGPT</a>
-    <a href="#claude">Claude</a>
-    <a href="#dev">API</a>
-  </div>
-  <a class="go" href="#use">Loslegen</a>
-</nav>
+<header class="site-header">
+  <nav aria-label="Hauptnavigation">
+    <a class="brand" href="/"><img src="/logo.png" alt=""> Wasup</a>
+    <div class="links">
+      <a class="nav-link" href="/calendar">Events</a>
+      <a class="nav-link" href="#use" aria-current="page">Mit KI fragen</a>
+    </div>
+  </nav>
+</header>
 
 <div class="hero">
   <div class="glow" aria-hidden="true"></div>
@@ -369,6 +384,7 @@
 
 <footer>
   Wasup · Alexander Krauck · Linz, Österreich ·
+  <a href="/calendar">Events</a> ·
   <a href="mailto:alexander@business.goedly.com">Kontakt</a> ·
   <a href="/privacy">Datenschutz</a> ·
   <a href="/terms">Nutzungsbedingungen</a> ·

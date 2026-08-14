@@ -86,38 +86,34 @@
     text-decoration: none;
   }
   .brand img { width: 36px; height: 36px; border-radius: 26%; }
-  .nav-center { display: flex; align-items: center; gap: .8rem; }
-  .nav-current {
-    padding: .55rem .35rem .45rem;
-    border-bottom: 2px solid var(--red);
-    color: var(--red-dark);
-    font-weight: 750;
-    text-decoration: none;
-  }
-  .ai-button, .subscribe-button {
+  .nav-center { display: flex; align-items: center; gap: 1rem; }
+  .nav-link {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: .45rem;
-    border: 1px solid transparent;
-    border-radius: 11px;
-    padding: .55rem .85rem;
+    min-height: 44px;
+    padding: .55rem .35rem;
+    color: var(--ink);
     font-weight: 750;
     text-decoration: none;
     white-space: nowrap;
-    transition: transform .15s, box-shadow .15s, background .15s;
+    transition: color .15s;
   }
-  .ai-button { color: #fff; background: var(--ink); }
-  .subscribe-button {
-    justify-self: end;
-    color: var(--red-dark);
-    border-color: var(--red);
-    background: rgba(255, 255, 255, .72);
+  .nav-link::after {
+    content: "";
+    position: absolute;
+    right: .35rem;
+    bottom: .25rem;
+    left: .35rem;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--red);
+    transform: scaleX(0);
+    transition: transform .15s;
   }
-  .ai-button:hover, .subscribe-button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 20px -12px rgba(22, 24, 29, .55);
-  }
+  .nav-link:hover, .nav-link[aria-current="page"] { color: var(--red-dark); }
+  .nav-link:hover::after, .nav-link[aria-current="page"]::after { transform: scaleX(1); }
 
   main { width: min(100% - 2rem, 72rem); margin: 0 auto; }
   .intro {
@@ -213,6 +209,11 @@
     gap: .55rem;
     flex-wrap: wrap;
   }
+  .toolbar-row + .toolbar-row {
+    margin-top: .7rem;
+    padding-top: .7rem;
+    border-top: 1px solid var(--line);
+  }
   .toolbar-label { margin-right: .2rem; font-weight: 750; }
   .window-pills { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
   .window-button, .control-shell, .reset-button, .load-more, .retry-button {
@@ -251,6 +252,36 @@
     cursor: pointer;
   }
   .control-shell select { padding-right: .35rem; }
+  .toggle-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: .48rem;
+    min-height: 44px;
+    padding: 0 .75rem;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #fff;
+    cursor: pointer;
+    font-size: .9rem;
+  }
+  .toggle-filter:has(input:checked) {
+    color: var(--red-dark);
+    border-color: var(--red);
+    background: var(--red-soft);
+  }
+  .toggle-filter input {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    accent-color: var(--red-dark);
+  }
+  .estimate-mark { color: var(--amber); font-weight: 800; }
+  .control-shell .estimate-mark { color: var(--amber); }
+  .estimate-note {
+    margin: .55rem 0 0;
+    color: var(--muted);
+    font-size: .76rem;
+  }
   .ai-helper {
     margin: .85rem .15rem 0;
     color: var(--gray);
@@ -332,6 +363,36 @@
   .chip.estimated, .chip.projected { color: var(--amber); background: var(--amber-soft); }
   .chip.limited, .chip.waitlist { color: #8b5900; background: #fff3d6; }
   .chip.full { color: #9b1c2b; background: #ffe8eb; }
+  .chip.estimate-attribute { color: var(--amber); background: var(--amber-soft); }
+  .keyword-row {
+    display: flex;
+    align-items: baseline;
+    gap: .45rem;
+    flex-wrap: wrap;
+    margin-top: .48rem;
+  }
+  .keyword-label {
+    color: var(--muted);
+    font-size: .72rem;
+    font-weight: 750;
+  }
+  .keyword {
+    color: #5b5f68;
+    font-size: .75rem;
+  }
+  .keyword + .keyword::before { content: "·"; margin-right: .45rem; color: #b2b4ba; }
+  .keyword-toggle {
+    min-height: auto;
+    padding: 0;
+    border: 0;
+    color: var(--red-dark);
+    background: transparent;
+    cursor: pointer;
+    font-size: .74rem;
+    font-weight: 720;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
   .event-actions { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; flex-wrap: wrap; }
   .event-link {
     display: inline-flex;
@@ -427,13 +488,12 @@
     .event-actions { grid-column: 2; justify-content: flex-start; margin-top: -.15rem; }
   }
   @media (max-width: 680px) {
-    .nav { width: min(100% - 1.2rem, 72rem); min-height: 58px; grid-template-columns: 1fr auto auto; gap: .45rem; }
+    .nav { width: min(100% - 1.2rem, 72rem); min-height: 58px; grid-template-columns: 1fr auto; gap: .65rem; }
     .brand { font-size: 1.05rem; }
     .brand img { width: 32px; height: 32px; }
-    .nav-current { display: none; }
-    .ai-button, .subscribe-button { padding: .5rem .62rem; font-size: .78rem; }
-    .ai-button .spark { display: none; }
-    .subscribe-button .wide-label { display: none; }
+    .nav-center { gap: .55rem; }
+    .nav-link { padding: .45rem .25rem; font-size: .78rem; }
+    .nav-link::after { right: .25rem; left: .25rem; }
     main { width: min(100% - 1.2rem, 72rem); }
     .intro { gap: 1.25rem; padding: 2.3rem 0 1.4rem; }
     h1 { font-size: clamp(2.15rem, 11vw, 3rem); }
@@ -446,9 +506,12 @@
     .toolbar { padding: .7rem; }
     .toolbar-label, .window-pills, .toolbar-divider { display: none; }
     .toolbar-row { display: grid; grid-template-columns: 1fr 1fr; }
+    .toolbar-row + .toolbar-row { margin-top: .6rem; padding-top: .6rem; }
     .control-shell { width: 100%; min-width: 0; padding: 0 .55rem; }
     .control-shell select, .control-shell input { min-width: 0; width: 100%; font-size: .85rem; }
     .control-shell span { display: none; }
+    .toggle-filter { width: 100%; min-width: 0; padding: 0 .55rem; font-size: .82rem; }
+    .estimate-note { line-height: 1.35; }
     .results { padding-top: 1.8rem; }
     .results-head { align-items: center; }
     .results-head h2 { font-size: 1.35rem; }
@@ -461,8 +524,8 @@
     footer nav { margin-top: .9rem; }
   }
   @media (max-width: 390px) {
-    .ai-button { font-size: 0; }
-    .ai-button::after { content: "KI"; font-size: .78rem; }
+    .nav-center { gap: .35rem; }
+    .nav-link { font-size: .73rem; }
     .stat-label { line-height: 1.15; }
     .event-card { grid-template-columns: 4.9rem minmax(0, 1fr); }
     .event-actions { padding-left: 5.65rem; }
@@ -480,10 +543,9 @@
   <nav class="nav" aria-label="Hauptnavigation">
     <a class="brand" href="/"><img src="/logo.png" alt=""><span>Wasup</span></a>
     <div class="nav-center">
-      <a class="nav-current" href="/calendar" aria-current="page">Events</a>
-      <a class="ai-button" href="/#use"><span class="spark" aria-hidden="true">✦</span> Mit KI fragen</a>
+      <a class="nav-link" href="/calendar" aria-current="page">Events</a>
+      <a class="nav-link" href="/#use">Mit KI fragen</a>
     </div>
-    <a class="subscribe-button" id="subscribe" href="/v1/feed.ics?exclude_sex_service_context=true&amp;include_time_unknown=false" title="Kalender-Abo für kommende Termine"><span aria-hidden="true">＋</span><span class="wide-label">Kalender abonnieren</span><span class="sr-only">Kalender abonnieren</span></a>
   </nav>
 </header>
 
@@ -531,6 +593,36 @@
         <input id="from" type="date" aria-label="Termine ab Datum">
       </label>
     </div>
+    <div class="toolbar-row">
+      <span class="toolbar-label">Filter</span>
+      <label class="toggle-filter" title="Nur ausdrücklich mit Preis 0 € angegebene Termine">
+        <input id="free-only" type="checkbox">
+        <span>Gratis bestätigt</span>
+      </label>
+      <label class="toggle-filter" title="Geschätzte Eignung, wenn man allein hingeht">
+        <input id="solo-only" type="checkbox">
+        <span>Solo-tauglich <span class="estimate-mark" aria-label="geschätzt">≈</span></span>
+      </label>
+      <label class="control-shell" title="Geschätztes Energielevel">
+        <span>Energie <span class="estimate-mark" aria-label="geschätzt">≈</span></span>
+        <select id="energy" aria-label="Geschätztes Energielevel">
+          <option value="">Alle Energielevel</option>
+          <option value="low">Ruhig</option>
+          <option value="medium">Mittel</option>
+          <option value="high">Hoch</option>
+        </select>
+      </label>
+      <label class="control-shell" title="Geschätzter Anteil von Frauen im Publikum">
+        <span>Frauenanteil <span class="estimate-mark" aria-label="geschätzt">≈</span></span>
+        <select id="gender-range" aria-label="Geschätzter Frauenanteil im Publikum">
+          <option value="">Alle Verteilungen</option>
+          <option value="0:0.4">Bis 40 % Frauen</option>
+          <option value="0.4:0.6">40–60 % Frauen</option>
+          <option value="0.6:1">Ab 60 % Frauen</option>
+        </select>
+      </label>
+    </div>
+    <p class="estimate-note"><span class="estimate-mark" aria-hidden="true">≈</span> Schätzung aus verfügbaren Eventinformationen. Bei aktiven Schätzfiltern fallen Termine ohne entsprechenden Wert weg.</p>
   </section>
   <p class="ai-helper">Komplexer Wunsch? <a href="/#use">Frag Wasup über deine KI.</a></p>
 
@@ -549,9 +641,10 @@
   </section>
 
   <footer>
-    <p>„Uhrzeit unbekannt“ und „projiziert“ sind Absicht: Wasup behauptet nichts, was der Index nicht belegen kann. Das Kalender-Abo lässt Termine ohne bestätigte Uhrzeit aus.</p>
+    <p>„Uhrzeit unbekannt“, „projiziert“ und <span class="estimate-mark">≈</span> sind Absicht: Wasup behauptet nichts, was der Index nicht belegen kann. Der allgemeine Kalender-Feed übernimmt keine Publikums-Schätzfilter.</p>
     <nav aria-label="Fußnavigation">
       <a href="/">Start</a>
+      <a href="/v1/feed.ics?exclude_sex_service_context=true&amp;include_time_unknown=false" title="Allgemeinen Kalender-Feed öffnen">Kalender-Feed</a>
       <a href="/privacy">Datenschutz</a>
       <a href="/llms.txt">API für KI</a>
     </nav>
@@ -577,6 +670,7 @@ const AVAILABILITY_LABELS = {
   waitlist: ["Warteliste", "waitlist"],
   full: ["Ausgebucht", "full"],
 };
+const ENERGY_LABELS = { low: "ruhig", medium: "mittel", high: "hoch" };
 const WINDOW_LABELS = {
   today: "heute",
   this_week: "diese Woche",
@@ -690,7 +784,9 @@ function setWindowButtons() {
 }
 
 function setControlsDisabled(disabled) {
-  document.querySelectorAll("[data-window], #category, #from, #reset").forEach(control => {
+  document.querySelectorAll(
+    "[data-window], #category, #from, #free-only, #solo-only, #energy, #gender-range, #reset",
+  ).forEach(control => {
     control.disabled = disabled;
   });
 }
@@ -701,24 +797,39 @@ function invalidatePagination() {
   $("load-more").hidden = true;
 }
 
+function browseFilterParams() {
+  const params = new URLSearchParams();
+  if ($("category").value) params.set("category", $("category").value);
+  if ($("free-only").checked) params.set("is_free", "true");
+  if ($("solo-only").checked) params.set("solo_friendly", "true");
+  if ($("energy").value) params.set("energy", $("energy").value);
+  if ($("gender-range").value) {
+    const [minimum, maximum] = $("gender-range").value.split(":");
+    params.set("gender_split_min", minimum);
+    params.set("gender_split_max", maximum);
+  }
+  return params;
+}
+
+function activeFilterCount() {
+  return [
+    Boolean($("category").value),
+    $("free-only").checked,
+    $("solo-only").checked,
+    Boolean($("energy").value),
+    Boolean($("gender-range").value),
+  ].filter(Boolean).length;
+}
+
 function updateUrl() {
   const url = new URL(window.location.href);
   url.search = "";
   if (state.activeWindow !== "today") url.searchParams.set("window", state.activeWindow);
-  if ($("category").value) url.searchParams.set("category", $("category").value);
+  for (const [key, value] of browseFilterParams()) url.searchParams.set(key, value);
   if (state.activeWindow === "custom" && $("from").value) {
     url.searchParams.set("from", $("from").value);
   }
   window.history.replaceState(null, "", url);
-}
-
-function updateSubscribeLink() {
-  const params = new URLSearchParams({
-    exclude_sex_service_context: "true",
-    include_time_unknown: "false",
-  });
-  if ($("category").value) params.set("category", $("category").value);
-  $("subscribe").href = "/v1/feed.ics?" + params;
 }
 
 function activeCount() {
@@ -729,6 +840,7 @@ function activeCount() {
 function updateResultsTitle() {
   const count = activeCount();
   const category = $("category").value;
+  const filterCount = activeFilterCount();
   let title;
   if (state.activeWindow === "custom") {
     const value = $("from").value;
@@ -741,8 +853,10 @@ function updateResultsTitle() {
       + noun + " " + WINDOW_LABELS[state.activeWindow];
   }
   if (category) title += " · " + categoryLabel(category);
+  const otherFilters = filterCount - (category ? 1 : 0);
+  if (otherFilters) title += " · " + otherFilters + " Filter";
   $("results-title").textContent = title;
-  $("reset").hidden = !category && state.activeWindow === "today";
+  $("reset").hidden = filterCount === 0 && state.activeWindow === "today";
 }
 
 function showFreshness(value) {
@@ -770,8 +884,7 @@ async function loadSummary() {
     $(id).textContent = "–";
   });
   state.ranges = null;
-  const params = new URLSearchParams();
-  if ($("category").value) params.set("category", $("category").value);
+  const params = browseFilterParams();
   const query = params.size ? "?" + params : "";
   const response = await fetch("/v1/occurrences/summary" + query, {
     signal: state.summaryController.signal,
@@ -789,7 +902,8 @@ async function loadSummary() {
 }
 
 function occurrenceParams(cursor) {
-  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  const params = browseFilterParams();
+  params.set("limit", String(PAGE_SIZE));
   const range = state.ranges && state.ranges[state.activeWindow];
   if (state.activeWindow !== "custom" && range) {
     params.set("from", range.from);
@@ -797,7 +911,6 @@ function occurrenceParams(cursor) {
   } else if ($("from").value) {
     params.set("from", viennaStartIso($("from").value));
   }
-  if ($("category").value) params.set("category", $("category").value);
   if (cursor) params.set("cursor", cursor);
   return params;
 }
@@ -824,6 +937,51 @@ function addChip(container, text, className, title) {
   const chip = node("span", "chip" + (className ? " " + className : ""), text);
   if (title) chip.title = title;
   container.appendChild(chip);
+}
+
+function estimateTitle(label, estimate) {
+  const confidence = estimate && estimate.confidence;
+  return label + " · Schätzung"
+    + (Number.isFinite(confidence)
+      ? " · Sicherheit " + Math.round(confidence * 100) + " %"
+      : "");
+}
+
+function appendKeywords(container, occurrence) {
+  const tags = Array.isArray(occurrence.tags)
+    ? occurrence.tags.filter(tag => tag && tag.name)
+    : [];
+  if (!tags.length) return;
+
+  const likelyCount = tags.filter(tag => Number(tag.confidence) >= 0.5).length;
+  const initialCount = Math.min(4, Math.max(1, likelyCount));
+  const row = node("div", "keyword-row");
+  row.appendChild(node("span", "keyword-label", "Stichwörter"));
+  const tagNodes = tags.map((tag, index) => {
+    const confidence = Number(tag.confidence);
+    const label = (confidence < 0.5 ? "≈ " : "") + tag.name;
+    const item = node("span", "keyword", label);
+    if (Number.isFinite(confidence)) {
+      item.title = "Tag-Sicherheit " + Math.round(confidence * 100) + " %";
+    }
+    if (index >= initialCount) item.hidden = true;
+    row.appendChild(item);
+    return item;
+  });
+  const hiddenCount = tags.length - initialCount;
+  if (hiddenCount > 0) {
+    const toggle = node("button", "keyword-toggle", "+" + hiddenCount + " weitere");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const expand = toggle.getAttribute("aria-expanded") === "false";
+      tagNodes.slice(initialCount).forEach(item => { item.hidden = !expand; });
+      toggle.setAttribute("aria-expanded", String(expand));
+      toggle.textContent = expand ? "Weniger" : "+" + hiddenCount + " weitere";
+    });
+    row.appendChild(toggle);
+  }
+  container.appendChild(row);
 }
 
 function confirmationLabel(value) {
@@ -922,6 +1080,30 @@ function eventCard(occurrence) {
   });
   const price = priceLabel(occurrence.price);
   if (price) addChip(chips, price[0], price[1], price[1] === "estimated" ? "Preis geschätzt" : null);
+  const estimates = occurrence.estimates || {};
+  const solo = estimates.solo_friendly;
+  if (solo && solo.value !== null && solo.value !== undefined) {
+    addChip(
+      chips,
+      solo.value ? "≈ solo-tauglich" : "≈ eher gemeinsam",
+      "estimate-attribute",
+      estimateTitle("Solo-Eignung", solo),
+    );
+  }
+  const energy = estimates.energy;
+  if (energy && ENERGY_LABELS[energy.value]) {
+    addChip(
+      chips, "≈ Energie " + ENERGY_LABELS[energy.value],
+      "estimate-attribute", estimateTitle("Energielevel", energy),
+    );
+  }
+  const gender = estimates.gender_split;
+  if (gender && Number.isFinite(gender.value)) {
+    addChip(
+      chips, "≈ " + Math.round(gender.value * 100) + " % Frauen",
+      "estimate-attribute", estimateTitle("Publikumsverteilung", gender),
+    );
+  }
   if (occurrence.registration_required === true) addChip(chips, "Anmeldung nötig", "");
   const availability = AVAILABILITY_LABELS[occurrence.availability];
   if (availability) addChip(chips, availability[0], availability[1]);
@@ -932,6 +1114,7 @@ function eventCard(occurrence) {
     addChip(chips, sources.length === 1 ? "1 Quelle" : sources.length + " Quellen", "", sources.join(", "));
   }
   if (chips.childElementCount) body.appendChild(chips);
+  appendKeywords(body, occurrence);
   card.appendChild(body);
 
   const actions = node("div", "event-actions");
@@ -1020,7 +1203,7 @@ async function loadOccurrences({ append = false } = {}) {
       showListState(
         "empty",
         "Keine Termine im Index für diese Auswahl",
-        "Wähle einen anderen Zeitraum oder eine andere Kategorie.",
+        "Wähle einen anderen Zeitraum oder lockere einen Filter.",
       );
     }
     if (body.data_freshness) showFreshness(body.data_freshness);
@@ -1055,10 +1238,9 @@ async function selectWindow(windowName, { load = true } = {}) {
   if (load) await loadOccurrences();
 }
 
-async function refreshCategory() {
+async function refreshFilters() {
   setControlsDisabled(true);
   invalidatePagination();
-  updateSubscribeLink();
   $("status").textContent = "Zahlen werden aktualisiert …";
   try {
     try {
@@ -1075,7 +1257,6 @@ async function refreshCategory() {
       }
       $("status").textContent = "Die Übersichtszahlen konnten nicht geladen werden.";
     }
-    updateSubscribeLink();
     updateResultsTitle();
     updateUrl();
     await loadOccurrences();
@@ -1089,14 +1270,16 @@ async function resetSelection() {
   invalidatePagination();
   try {
     $("category").value = "";
-    updateSubscribeLink();
+    $("free-only").checked = false;
+    $("solo-only").checked = false;
+    $("energy").value = "";
+    $("gender-range").value = "";
     try {
       await loadSummary();
     } catch (error) {
       if (error.name === "AbortError") return;
       state.ranges = fallbackRanges();
     }
-    updateSubscribeLink();
     await selectWindow("today");
   } finally {
     setControlsDisabled(false);
@@ -1112,7 +1295,9 @@ for (const category of CATEGORIES) {
 document.querySelectorAll("[data-window]").forEach(button => {
   button.addEventListener("click", () => selectWindow(button.dataset.window));
 });
-$("category").addEventListener("change", refreshCategory);
+document.querySelectorAll(
+  "#category, #free-only, #solo-only, #energy, #gender-range",
+).forEach(control => control.addEventListener("change", refreshFilters));
 $("from").addEventListener("change", async () => {
   if (!$("from").value) {
     await selectWindow("today");
@@ -1131,6 +1316,16 @@ async function init() {
   const query = new URLSearchParams(window.location.search);
   const category = query.get("category");
   if (category && CATEGORIES.includes(category)) $("category").value = category;
+  $("free-only").checked = query.get("is_free") === "true";
+  $("solo-only").checked = query.get("solo_friendly") === "true";
+  const energy = query.get("energy");
+  if (energy && Object.hasOwn(ENERGY_LABELS, energy)) $("energy").value = energy;
+  const genderRange = [
+    query.get("gender_split_min"), query.get("gender_split_max"),
+  ].join(":");
+  if ([...$("gender-range").options].some(option => option.value === genderRange)) {
+    $("gender-range").value = genderRange;
+  }
   const requestedWindow = query.get("window");
   const rawFrom = query.get("from");
   const requestedFrom = rawFrom && /^\d{4}-\d{2}-\d{2}$/.test(rawFrom) ? rawFrom : null;
@@ -1148,12 +1343,10 @@ async function init() {
       state.activeWindow = "custom";
       setWindowButtons();
       updateResultsTitle();
-      updateSubscribeLink();
       await loadOccurrences();
     } else {
       const windowName = Object.hasOwn(state.ranges, requestedWindow)
         ? requestedWindow : "today";
-      updateSubscribeLink();
       await selectWindow(windowName);
     }
     if (!summaryAvailable) {

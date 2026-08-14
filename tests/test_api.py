@@ -204,13 +204,149 @@ def test_occurrence_summary_uses_vienna_calendar_ranges_and_listing_policy(
         assert datetime.fromisoformat(body["ranges"][name]["to"]) == to
 
 
-def test_occurrence_summary_documents_only_the_real_category_filter(client):
+def test_occurrence_summary_documents_only_real_browse_filters(client):
     operation = client.get("/openapi.json").json()["paths"][
         "/v1/occurrences/summary"
     ]["get"]
     assert [parameter["name"] for parameter in operation["parameters"]] == [
-        "category"
+        "category", "is_free", "solo_friendly", "gender_split_min",
+        "gender_split_max", "energy",
     ]
+
+
+def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
+    conn, client, monkeypatch,
+):
+    from eventindex.api import app as app_mod
+
+    vienna = ZoneInfo("Europe/Vienna")
+    fixed_now = datetime(2026, 8, 14, 10, 0, tzinfo=vienna)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                fixed_now.replace(tzinfo=None)
+                if tz is None else fixed_now.astimezone(tz)
+            )
+
+    monkeypatch.setattr(app_mod, "datetime", FrozenDateTime)
+
+    def add(
+        title, *, price, solo, gender, energy,
+    ):
+        event_id = _add_event(
+            conn, title,
+            starts=datetime(2026, 8, 14, 12, tzinfo=vienna),
+            lat=48.3069, lon=14.2858, category=["tech"],
+        )
+        inferred = {}
+        if solo is not None:
+            inferred["solo_friendly"] = {
+                "value": solo, "confidence": 0.72,
+            }
+        if energy is not None:
+            inferred["energy"] = energy
+        conn.execute(
+            "UPDATE event SET price_min = %s, price_max = %s, inferred = %s, "
+            "expected_gender_split = %s, "
+            "expected_gender_split_confidence = %s WHERE id = %s",
+            (
+                price, price, Jsonb(inferred), gender,
+                0.68 if gender is not None else None, event_id,
+            ),
+        )
+        return event_id
+
+    matching = add(
+        "Matching", price=0, solo=True, gender=0.65, energy="high",
+    )
+    add("Paid", price=15, solo=True, gender=0.65, energy="high")
+    add("Not solo", price=0, solo=False, gender=0.65, energy="high")
+    add("Unknown estimates", price=0, solo=None, gender=None, energy=None)
+    add("Low energy", price=0, solo=True, gender=0.65, energy="low")
+    add("Male leaning", price=0, solo=True, gender=0.2, energy="high")
+    for name, confidence, origins in (
+        ("tech", 0.99, ["category"]),
+        ("live music", 0.92, ["source"]),
+        ("dancing", 0.81, ["inferred"]),
+        ("social", 0.65, ["inferred"]),
+        ("night event", 0.49, ["inferred"]),
+    ):
+        conn.execute(
+            "INSERT INTO event_tag "
+            "(event_id, name, confidence, origins, origin_confidences) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (
+                matching, name, confidence, origins,
+                Jsonb({origin: confidence for origin in origins}),
+            ),
+        )
+    conn.commit()
+
+    filter_sets = [
+        {"is_free": "true"},
+        {"solo_friendly": "true"},
+        {"gender_split_min": 0.6, "gender_split_max": 0.8},
+        {"energy": "high"},
+        {
+            "is_free": "true", "solo_friendly": "true",
+            "gender_split_min": 0.6, "gender_split_max": 0.8,
+            "energy": "high",
+        },
+    ]
+    for filters in filter_sets:
+        summary = client.get(
+            "/v1/occurrences/summary",
+            params={"category": "tech", **filters},
+        ).json()["ranges"]["today"]
+        cursor = None
+        rows = []
+        while True:
+            params = {
+                "category": "tech", "from": summary["from"],
+                "to": summary["to"], "limit": 2, **filters,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            body = client.get("/v1/occurrences", params=params).json()
+            rows.extend(body["occurrences"])
+            cursor = body["next_cursor"]
+            if cursor is None:
+                break
+        assert summary["count"] == len(rows)
+        assert len({row["id"] for row in rows}) == len(rows)
+
+    combo = client.get("/v1/occurrences", params={
+        "category": "tech", "from": "2026-08-14T00:00:00+02:00",
+        "to": "2026-08-14T23:59:59+02:00", "is_free": "true",
+        "solo_friendly": "true", "gender_split_min": 0.6,
+        "gender_split_max": 0.8, "energy": "high",
+    }).json()["occurrences"]
+    assert [row["title"] for row in combo] == ["Matching"]
+    assert combo[0]["estimates"] == {
+        "solo_friendly": {"value": True, "confidence": 0.72},
+        "gender_split": {"value": 0.65, "confidence": 0.68},
+        "energy": {"value": "high", "confidence": None},
+    }
+    assert [tag["name"] for tag in combo[0]["tags"]] == [
+        "live music", "dancing", "social", "night event",
+    ]
+    assert combo[0]["tags"][0]["origins"] == ["source"]
+
+    # false keeps the established no-restriction meaning for is_free.
+    unfiltered = client.get("/v1/occurrences", params={
+        "category": "tech", "from": "2026-08-14T00:00:00+02:00",
+        "to": "2026-08-14T23:59:59+02:00", "is_free": "false",
+    }).json()["occurrences"]
+    assert len(unfiltered) == 6
+
+    for path in ("/v1/occurrences", "/v1/occurrences/summary"):
+        assert client.get(path, params={
+            "gender_split_min": 0.8, "gender_split_max": 0.2,
+        }).status_code == 422
+        assert client.get(path, params={"gender_split_min": 1.1}).status_code == 422
+        assert client.get(path, params={"energy": "extreme"}).status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -289,6 +425,12 @@ def test_calendar_gui_is_browse_first_and_uses_only_real_query_surfaces(client):
     assert 'data-window="this_week"' in html
     assert 'data-window="next_30_days"' in html
     assert 'id="category"' in html and 'id="from"' in html
+    assert all(f'id="{control}"' in html for control in (
+        "free-only", "solo-only", "energy", "gender-range",
+    ))
+    assert "Gratis bestätigt" in html
+    assert "Solo-tauglich" in html and "Frauenanteil" in html
+    assert "Schätzung" in html and "Stichwörter" in html
     assert 'aria-live="polite"' in html
     assert "prefers-reduced-motion" in html
     assert "innerHTML" not in html
@@ -302,6 +444,11 @@ def test_calendar_gui_is_browse_first_and_uses_only_real_query_surfaces(client):
     assert "Mehr Filter" not in html
     assert "/v1/search" not in html and "/v1/query" not in html
     assert "Mit KI fragen" in html
+    assert html.count('class="nav-link"') == 2
+    assert "ai-button" not in html and "subscribe-button" not in html
+    assert html.index("<footer>") < html.index('/v1/feed.ics?')
+    assert "function browseFilterParams() {\n  const params = new URLSearchParams();" in html
+    assert "const params = browseFilterParams();\n  const query = params.size" in html
 
 
 def test_calendar_gui_remains_keyless_when_api_keys_exist(conn, client):
@@ -314,6 +461,8 @@ def test_landing_page_exposes_the_event_browser(client):
     response = client.get("/")
     assert response.status_code == 200
     assert response.text.count('href="/calendar"') >= 2
+    assert response.text.count('class="nav-link"') == 2
+    assert 'href="#use" aria-current="page"' in response.text
 
 
 def test_keyset_pagination_walks_everything_once(client):

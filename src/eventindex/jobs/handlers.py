@@ -387,6 +387,7 @@ def estimate_audience(job: dict, tx) -> list[dict]:
         estimate_audience_essentials,
         persist_audience_essentials,
         venue_override,
+        with_audience_essentials,
     )
 
     event_ids = list(dict.fromkeys(job["payload"].get("event_ids") or []))
@@ -474,7 +475,12 @@ def estimate_audience(job: dict, tx) -> list[dict]:
             apply_to_event(
                 tx,
                 current["id"],
-                venue_override(current, dict(cached["attributes"])),
+                venue_override(
+                    current,
+                    with_audience_essentials(
+                        cached["attributes"], essentials
+                    ),
+                ),
                 enrichment_key=full_keys[event_id],
             )
             released_ids.append(current["id"])
@@ -558,6 +564,7 @@ def enrich(job: dict, tx) -> list[dict]:
         content_key,
         enrich_event,
         persist_audience_essentials,
+        with_audience_essentials,
     )
 
     row = tx.execute(
@@ -604,7 +611,12 @@ def enrich(job: dict, tx) -> list[dict]:
     apply_audience_essentials(
         tx, current["id"], essentials, enrichment_key=essentials_key
     )
-    apply_to_event(tx, current["id"], attributes, enrichment_key=original_key)
+    apply_to_event(
+        tx,
+        current["id"],
+        with_audience_essentials(attributes, essentials),
+        enrichment_key=original_key,
+    )
     tx.execute(
         "UPDATE occurrence SET status = 'scheduled' "
         "WHERE event_id = %s AND status = 'pending_enrichment'",

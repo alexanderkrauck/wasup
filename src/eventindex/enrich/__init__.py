@@ -112,20 +112,31 @@ class _EventScaleEst(BaseModel):
         return self
 
 
-class _EnergyEst(BaseModel):
+class _AudienceFloatEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: float
+    confidence: float = Field(gt=0, le=1)
+
+
+class _AudienceEnergyEst(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: Literal["low", "medium", "high"]
     confidence: float = Field(gt=0, le=1)
-    evidence: str | None
+
+
+class _AudienceBoolEst(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: bool
+    confidence: float = Field(gt=0, le=1)
 
 
 class AudienceEssentials(BaseModel):
     """The exhaustive audience facets required before publication."""
 
     model_config = ConfigDict(extra="forbid")
-    gender_split: _Est
-    energy: _EnergyEst
-    solo_friendly: _BoolEst
+    gender_split: _AudienceFloatEst
+    energy: _AudienceEnergyEst
+    solo_friendly: _AudienceBoolEst
 
     @model_validator(mode="after")
     def valid_gender_split(self):
@@ -193,7 +204,7 @@ class Enrichment(BaseModel):
 # Bump when the schema or extraction contract changes: old cache rows either
 # lack fields or embody the old prompt, so a version change re-enriches them.
 SCHEMA_VERSION = 11
-AUDIENCE_ESSENTIALS_SCHEMA_VERSION = 1
+AUDIENCE_ESSENTIALS_SCHEMA_VERSION = 2
 MIN_INFERRED_TAGS = 6
 DESCRIPTION_CHARS = 6000
 
@@ -236,30 +247,17 @@ def _prior_for(tx, categories: list[str]) -> dict:
     return row["priors"] if row else {}
 
 
-def _audience_source_text(event: dict) -> str:
-    return " ".join(filter(None, [
-        event.get("title") or "",
-        (event.get("description") or "")[
-            :config.AUDIENCE_ESSENTIALS_DESCRIPTION_CHARS
-        ],
-        event.get("venue_name") or "",
-    ]))
+def _clamp_audience_essentials(attributes: dict, _event: dict) -> dict:
+    """Cap certainty without ever discarding a required estimate."""
 
-
-def _clamp_audience_essentials(attributes: dict, event: dict) -> dict:
-    """Cap certainty and discard invented evidence without losing a value."""
-
-    source_folded = _audience_source_text(event).casefold()
     for name in ("gender_split", "energy", "solo_friendly"):
         estimate = attributes[name]
-        estimate["confidence"] = min(estimate["confidence"], CONFIDENCE_CAP)
-        evidence = str(estimate.get("evidence") or "").strip()
-        if evidence and evidence.casefold() not in source_folded:
-            estimate["evidence"] = None
-        if estimate.get("evidence") is None:
-            estimate["confidence"] = min(
-                estimate["confidence"], PRIOR_CONFIDENCE_CAP
-            )
+        # This deliberately tiny pass does not retain verbatim evidence. Keep
+        # every result at prior-level certainty; the later full enrichment can
+        # carry richer evidence without making publication wait for it.
+        estimate["confidence"] = min(
+            estimate["confidence"], PRIOR_CONFIDENCE_CAP
+        )
     return attributes
 
 
@@ -283,6 +281,16 @@ def persist_audience_essentials(
     )
 
 
+def with_audience_essentials(attributes: dict, essentials: dict) -> dict:
+    """Keep the publication facets equal to their committed cache winner."""
+
+    merged = dict(attributes)
+    merged["gender_split"] = essentials["gender_split"]
+    merged["energy"] = essentials["energy"]["value"]
+    merged["solo_friendly"] = essentials["solo_friendly"]
+    return merged
+
+
 def audience_essentials_from_full(attributes: dict) -> dict | None:
     """Read the required facets from the existing full-enrichment contract.
 
@@ -291,20 +299,30 @@ def audience_essentials_from_full(attributes: dict) -> dict | None:
     low confidence when adapting that legacy cache rather than paying again.
     """
 
-    gender = attributes.get("gender_split")
+    gender = attributes.get("gender_split") or {}
     energy = attributes.get("energy")
-    solo_friendly = attributes.get("solo_friendly")
+    solo_friendly = attributes.get("solo_friendly") or {}
     if isinstance(energy, str):
         energy = {
             "value": energy,
             "confidence": GUESS_CONFIDENCE,
-            "evidence": None,
+        }
+    elif isinstance(energy, dict):
+        energy = {
+            "value": energy.get("value"),
+            "confidence": energy.get("confidence"),
         }
     try:
         return AudienceEssentials.model_validate({
-            "gender_split": gender,
+            "gender_split": {
+                "value": gender.get("value"),
+                "confidence": gender.get("confidence"),
+            },
             "energy": energy,
-            "solo_friendly": solo_friendly,
+            "solo_friendly": {
+                "value": solo_friendly.get("value"),
+                "confidence": solo_friendly.get("confidence"),
+            },
         }).model_dump()
     except (ValueError, TypeError):
         return None
@@ -384,11 +402,10 @@ def estimate_audience_essentials(
         "quality. solo_friendly is true when attending alone is normal and "
         "comfortable (for example a concert or run club), false when the "
         "format normally requires an existing partner/group. Confidence "
-        "encodes uncertainty: about 0.2 for pure world-"
-        "knowledge, about 0.35 for a normal category/format prior, and up to "
-        "0.8 only for explicit text. Evidence must be an exact contiguous "
-        "quote from that event's title, description, or venue; otherwise it "
-        "must be null. Do not explain outside the schema.\n\nEVENTS:\n"
+        "encodes uncertainty: use about 0.2 for a pure world-knowledge guess "
+        "and at most 0.35 for a strong category/format/context estimate. "
+        "Return only these values and confidence; "
+        "do not explain outside the schema.\n\nEVENTS:\n"
         + json.dumps(prompt_events, ensure_ascii=False, separators=(",", ":")),
         AudienceEssentialsBatch,
         job_id=job_id,

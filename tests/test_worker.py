@@ -341,10 +341,10 @@ def test_audience_handler_releases_event_before_full_enrichment(
         (event_id,),
     )
     attrs = {
-        "gender_split": {"value": 0.6, "confidence": 0.3, "evidence": None},
-        "energy": {"value": "high", "confidence": 0.3, "evidence": None},
+        "gender_split": {"value": 0.6, "confidence": 0.3},
+        "energy": {"value": "high", "confidence": 0.3},
         "solo_friendly": {
-            "value": True, "confidence": 0.2, "evidence": None,
+            "value": True, "confidence": 0.2,
         },
     }
     key = audience.audience_essentials_content_key({
@@ -416,9 +416,9 @@ def test_audience_handler_rechecks_content_after_model_call(conn, monkeypatch):
         "venue_name": None,
     }
     attrs = {
-        "gender_split": {"value": 0.5, "confidence": 0.2, "evidence": None},
-        "energy": {"value": "low", "confidence": 0.2, "evidence": None},
-        "solo_friendly": {"value": True, "confidence": 0.2, "evidence": None},
+        "gender_split": {"value": 0.5, "confidence": 0.2},
+        "energy": {"value": "low", "confidence": 0.2},
+        "solo_friendly": {"value": True, "confidence": 0.2},
     }
 
     def estimate(tx, rows, job_id=None):
@@ -517,7 +517,7 @@ def test_audience_handler_seeds_confidence_from_full_cache(conn):
     assert row["expected_gender_split"] == 0.55
     assert row["inferred"]["energy"] == "low"
     assert row["inferred"]["_audience_essentials"]["energy"] == {
-        "value": "low", "confidence": 0.2, "evidence": None,
+        "value": "low", "confidence": 0.2,
     }
     assert conn.execute(
         "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),

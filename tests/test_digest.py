@@ -1,6 +1,9 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from eventindex.jobs.digest import render
+from psycopg.types.json import Jsonb
+
+from eventindex.jobs.digest import gather_stats, render
 
 NOW = datetime(2026, 7, 3, 22, 0, tzinfo=timezone.utc)
 
@@ -152,3 +155,142 @@ def test_field_completeness_and_hydration_render():
     assert "hydration jobs: 8 unresolved, oldest 6:00:00 ago" in text
     assert "risk verification: 3 unresolved, oldest 2:00:00 ago" in text
     assert "supported=4, contradicted=1, unverified=2" in text
+
+
+def test_audience_readiness_violations_are_loud():
+    stats = _stats(NOW) | {
+        "audience_readiness": {
+            "pending_events": 4,
+            "oldest_pending": NOW - timedelta(hours=3),
+            "orphan_pending": 1,
+            "scheduled_violations": 2,
+            "gender_violations": 1,
+            "energy_violations": 2,
+            "solo_violations": 1,
+            "failed_24h": 3,
+        }
+    }
+
+    text = render(stats, NOW)
+
+    assert "AUDIENCE READINESS ALERT" in text
+    assert "pending (not public): 4; oldest 3:00:00 ago" in text
+    assert "pending without active estimate_audience job: 1" in text
+    assert "SCHEDULED INVARIANT VIOLATIONS: 2" in text
+    assert "gender=1, energy=2, solo=1" in text
+    assert "failed estimate_audience jobs (24h): 3" in text
+
+
+def test_healthy_audience_readiness_stays_concise():
+    stats = _stats(NOW) | {
+        "audience_readiness": {
+            "pending_events": 0,
+            "oldest_pending": None,
+            "orphan_pending": 0,
+            "scheduled_violations": 0,
+            "gender_violations": 0,
+            "energy_violations": 0,
+            "solo_violations": 0,
+            "failed_24h": 0,
+        }
+    }
+
+    text = render(stats, NOW)
+
+    assert "AUDIENCE READINESS ALERT" not in text
+    assert "audience publication readiness: healthy" in text
+
+
+def test_gather_stats_audits_batch_jobs_and_all_required_facets(conn, monkeypatch):
+    monkeypatch.setattr(
+        "eventindex.jobs.digest.openrouter_balance", lambda: None
+    )
+    queued_id = uuid.uuid4()
+    orphan_id = uuid.uuid4()
+    invalid_scheduled_id = uuid.uuid4()
+    valid_scheduled_id = uuid.uuid4()
+    valid_inferred = {
+        "energy": "medium",
+        "_audience_essentials": {
+            "energy": {
+                "value": "medium",
+                "confidence": 0.35,
+                "evidence": None,
+            }
+        },
+        "solo_friendly": {
+            "value": True,
+            "confidence": 0.35,
+            "evidence": None,
+        },
+    }
+    invalid_inferred = {
+        "energy": "high",
+        "_audience_essentials": {
+            "energy": {"value": "high", "confidence": "invalid"}
+        },
+        "solo_friendly": {"value": False, "confidence": 0},
+    }
+
+    for event_id, title, inferred, gender, gender_conf, age in (
+        (queued_id, "Queued", {}, None, None, "1 hour"),
+        (orphan_id, "Orphan", {}, None, None, "5 hours"),
+        (
+            invalid_scheduled_id,
+            "Invalid scheduled",
+            invalid_inferred,
+            0.5,
+            0,
+            "2 hours",
+        ),
+        (
+            valid_scheduled_id,
+            "Valid scheduled",
+            valid_inferred,
+            0.5,
+            0.35,
+            "2 hours",
+        ),
+    ):
+        conn.execute(
+            "INSERT INTO event "
+            "(id, kind, title, inferred, expected_gender_split, "
+            "expected_gender_split_confidence, updated_at) "
+            "VALUES (%s, 'one_off', %s, %s, %s, %s, "
+            "now() - %s::interval)",
+            (event_id, title, Jsonb(inferred), gender, gender_conf, age),
+        )
+
+    for event_id, status in (
+        (queued_id, "pending_enrichment"),
+        (orphan_id, "pending_enrichment"),
+        (invalid_scheduled_id, "scheduled"),
+        (invalid_scheduled_id, "scheduled"),
+        (valid_scheduled_id, "scheduled"),
+    ):
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at, status) "
+            "VALUES (%s, now() + interval '1 day', %s)",
+            (event_id, status),
+        )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload, status) "
+        "VALUES ('estimate_audience', %s, 'pending')",
+        (Jsonb({"event_ids": [str(queued_id)]}),),
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload, status, finished_at) "
+        "VALUES ('estimate_audience', %s, 'failed', now())",
+        (Jsonb({"event_ids": [str(orphan_id)]}),),
+    )
+
+    audience = gather_stats(conn)["audience_readiness"]
+
+    assert audience["pending_events"] == 2
+    assert audience["oldest_pending"] is not None
+    assert audience["orphan_pending"] == 1
+    assert audience["scheduled_violations"] == 1
+    assert audience["gender_violations"] == 1
+    assert audience["energy_violations"] == 1
+    assert audience["solo_violations"] == 1
+    assert audience["failed_24h"] == 1

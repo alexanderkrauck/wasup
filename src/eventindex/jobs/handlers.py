@@ -502,6 +502,12 @@ def estimate_audience(job: dict, tx) -> list[dict]:
             "WHERE event_id = ANY(%s) AND status = 'pending_enrichment'",
             (released_ids,),
         )
+    if stale_ids:
+        tx.execute(
+            "UPDATE occurrence SET status = 'pending_enrichment' "
+            "WHERE event_id = ANY(%s) AND status = 'scheduled'",
+            (stale_ids,),
+        )
 
     already_enrich_queued = {
         row["event_id"]
@@ -587,6 +593,11 @@ def enrich(job: dict, tx) -> list[dict]:
     if current is None:
         return []
     if content_key(current) != original_key:
+        tx.execute(
+            "UPDATE occurrence SET status = 'pending_enrichment' "
+            "WHERE event_id = %s AND status = 'scheduled'",
+            (current["id"],),
+        )
         next_start = tx.execute(
             "SELECT min(starts_at) AS next_start FROM occurrence "
             "WHERE event_id = %s "

@@ -54,6 +54,47 @@ Weekday = Literal[
 LINZ_CENTER = (48.3069, 14.2858)
 DEFAULT_RADIUS_KM = 15
 
+# Publication is fail-closed for the three exhaustive audience facets.  The
+# occurrence status is the primary pipeline gate; this predicate is defense in
+# depth for corrupt/manual rows and every public read surface must apply it.
+# Energy's legacy top-level enum is paired with the explicit confidence stored
+# by the compact audience pass under its private metadata marker.
+PUBLIC_AUDIENCE_READY_SQL = """
+(
+    e.expected_gender_split BETWEEN 0 AND 1
+    AND e.expected_gender_split_confidence > 0
+    AND e.expected_gender_split_confidence <= 1
+    AND e.inferred->>'energy' IN ('low', 'medium', 'high')
+    AND e.inferred->'_audience_essentials'->'energy'->>'value'
+        = e.inferred->>'energy'
+    AND CASE
+        WHEN jsonb_typeof(
+            e.inferred->'_audience_essentials'->'energy'->'confidence'
+        ) = 'number'
+        THEN (
+            e.inferred->'_audience_essentials'->'energy'->>'confidence'
+        )::double precision > 0
+        AND (
+            e.inferred->'_audience_essentials'->'energy'->>'confidence'
+        )::double precision <= 1
+        ELSE false
+    END
+    AND jsonb_typeof(e.inferred->'solo_friendly'->'value') = 'boolean'
+    AND CASE
+        WHEN jsonb_typeof(
+            e.inferred->'solo_friendly'->'confidence'
+        ) = 'number'
+        THEN (
+            e.inferred->'solo_friendly'->>'confidence'
+        )::double precision > 0
+        AND (
+            e.inferred->'solo_friendly'->>'confidence'
+        )::double precision <= 1
+        ELSE false
+    END
+)
+"""
+
 
 def _radius_m(radius: str) -> float:
     normalized = radius.strip().lower()
@@ -381,11 +422,20 @@ class Attribute:
 
 
 def _inferred_bool(key: str) -> Attribute:
+    value_sql = (
+        f"CASE WHEN jsonb_typeof(e.inferred->'{key}'->'value') = 'boolean' "
+        f"THEN (e.inferred->'{key}'->>'value')::boolean ELSE NULL END"
+    )
+    conf_sql = (
+        f"CASE WHEN jsonb_typeof(e.inferred->'{key}'->'confidence') = "
+        f"'number' THEN (e.inferred->'{key}'->>'confidence')::float "
+        "ELSE NULL END"
+    )
     return Attribute(
         kind="bool",
-        value_sql=f"(e.inferred->'{key}'->>'value')::bool",
-        conf_sql=f"(e.inferred->'{key}'->>'confidence')::float",
-        hard_sql=f"(e.inferred->'{key}'->>'value')::bool = %({{p}})s",
+        value_sql=value_sql,
+        conf_sql=conf_sql,
+        hard_sql=f"({value_sql}) = %({{p}})s",
     )
 
 
@@ -413,7 +463,13 @@ ATTRIBUTES: dict[str, Attribute] = {
         hard_sql="e.inferred->>'interaction_structure' = %({p})s",
     ),
     "energy": Attribute(
-        kind="enum", value_sql="e.inferred->>'energy'", conf_sql=str(ENUM_CONFIDENCE),
+        kind="enum", value_sql="e.inferred->>'energy'",
+        conf_sql=(
+            "CASE WHEN jsonb_typeof(e.inferred->'_audience_essentials'"
+            "->'energy'->'confidence') = 'number' THEN "
+            "(e.inferred->'_audience_essentials'->'energy'"
+            "->>'confidence')::float ELSE NULL END"
+        ),
         hard_sql="e.inferred->>'energy' = %({p})s",
     ),
     "language": Attribute(
@@ -531,6 +587,7 @@ def build_sql(
     null attribute = unknown = never matches a hard constraint (§7)."""
     conditions = [
         "o.status = 'scheduled'",
+        PUBLIC_AUDIENCE_READY_SQL,
         f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_confidence)s",
     ]
     params: dict = {"min_confidence": f.min_confidence}
@@ -663,7 +720,10 @@ def build_sql(
         # the public index. The public API never enables this implicitly.
         conditions.append(
             "coalesce(v.sex_service, false) IS DISTINCT FROM TRUE AND "
-            "(e.inferred->'sex_service_context'->>'value')::bool "
+            "CASE WHEN jsonb_typeof("
+            "e.inferred->'sex_service_context'->'value') = 'boolean' "
+            "THEN (e.inferred->'sex_service_context'->>'value')::boolean "
+            "ELSE NULL END "
             "IS DISTINCT FROM TRUE"
         )
 

@@ -299,6 +299,8 @@ def audience_essentials_from_full(attributes: dict) -> dict | None:
     low confidence when adapting that legacy cache rather than paying again.
     """
 
+    if not isinstance(attributes, dict):
+        return None
     gender = attributes.get("gender_split") or {}
     energy = attributes.get("energy")
     solo_friendly = attributes.get("solo_friendly") or {}
@@ -324,7 +326,7 @@ def audience_essentials_from_full(attributes: dict) -> dict | None:
                 "confidence": solo_friendly.get("confidence"),
             },
         }).model_dump()
-    except (ValueError, TypeError):
+    except (AttributeError, ValueError, TypeError):
         return None
 
 
@@ -443,11 +445,11 @@ def apply_audience_essentials(
         estimate["confidence"] = min(estimate["confidence"], CONFIDENCE_CAP)
     tx.execute(
         """
-        UPDATE event SET
-            expected_gender_split = %(gender)s,
-            expected_gender_split_confidence = %(gender_conf)s,
-            updated_at = now(),
-            inferred = coalesce(inferred, '{}'::jsonb)
+        WITH next_values AS (
+            SELECT
+                %(gender)s::double precision AS gender,
+                %(gender_conf)s::double precision AS gender_conf,
+                coalesce(e.inferred, '{}'::jsonb)
                 || jsonb_build_object('energy', %(energy)s::text)
                 || jsonb_build_object(
                     'solo_friendly', %(solo_estimate)s::jsonb
@@ -461,8 +463,32 @@ def apply_audience_essentials(
                         'energy', %(energy_estimate)s::jsonb,
                         'solo_friendly', %(solo_estimate)s::jsonb
                     )
+                ) AS inferred
+            FROM event e
+            WHERE e.id = %(id)s
+        )
+        UPDATE event e SET
+            expected_gender_split = next.gender,
+            expected_gender_split_confidence = next.gender_conf,
+            updated_at = CASE
+                WHEN ROW(
+                    e.expected_gender_split,
+                    e.expected_gender_split_confidence,
+                    e.inferred
+                ) IS DISTINCT FROM ROW(
+                    next.gender,
+                    next.gender_conf,
+                    next.inferred
                 )
-        WHERE id = %(id)s
+                THEN greatest(
+                    e.updated_at + interval '1 microsecond',
+                    statement_timestamp()
+                )
+                ELSE e.updated_at
+            END,
+            inferred = next.inferred
+        FROM next_values next
+        WHERE e.id = %(id)s
         """,
         {
             "id": event_id,
@@ -764,22 +790,71 @@ def apply_to_event(
         inferred_values["_audience_essentials"] = audience_metadata
     tx.execute(
         """
-        UPDATE event SET
-            expected_age_range = CASE
+        WITH next_values AS (
+            SELECT
+            CASE
                 WHEN %(age_min)s::int IS NULL OR %(age_max)s::int IS NULL THEN NULL
-                ELSE int4range(%(age_min)s, %(age_max)s, '[]') END,
-            expected_age_range_confidence = %(age_conf)s,
-            expected_gender_split = %(gender)s,
-            expected_gender_split_confidence = %(gender_conf)s,
-            expected_attendance = %(attendance)s,
-            expected_attendance_confidence = %(attendance_conf)s,
-            lang = %(language)s,
-            venue_id = coalesce(venue_id, %(venue_id)s),
-            price_min = coalesce(price_min, %(price_min)s),
-            price_max = coalesce(price_max, %(price_max)s),
-            updated_at = now(),
-            inferred = %(inferred)s
-        WHERE id = %(id)s
+                ELSE int4range(%(age_min)s, %(age_max)s, '[]')
+            END AS age_range,
+            %(age_conf)s::double precision AS age_conf,
+            %(gender)s::double precision AS gender,
+            %(gender_conf)s::double precision AS gender_conf,
+            %(attendance)s::int AS attendance,
+            %(attendance_conf)s::double precision AS attendance_conf,
+            %(language)s::text AS language,
+            coalesce(e.venue_id, %(venue_id)s::uuid) AS venue_id,
+            coalesce(e.price_min, %(price_min)s::numeric) AS price_min,
+            coalesce(e.price_max, %(price_max)s::numeric) AS price_max,
+            %(inferred)s::jsonb AS inferred
+            FROM event e
+            WHERE e.id = %(id)s
+        )
+        UPDATE event e SET
+            expected_age_range = next.age_range,
+            expected_age_range_confidence = next.age_conf,
+            expected_gender_split = next.gender,
+            expected_gender_split_confidence = next.gender_conf,
+            expected_attendance = next.attendance,
+            expected_attendance_confidence = next.attendance_conf,
+            lang = next.language,
+            venue_id = next.venue_id,
+            price_min = next.price_min,
+            price_max = next.price_max,
+            updated_at = CASE
+                WHEN ROW(
+                    e.expected_age_range,
+                    e.expected_age_range_confidence,
+                    e.expected_gender_split,
+                    e.expected_gender_split_confidence,
+                    e.expected_attendance,
+                    e.expected_attendance_confidence,
+                    e.lang,
+                    e.venue_id,
+                    e.price_min,
+                    e.price_max,
+                    e.inferred
+                ) IS DISTINCT FROM ROW(
+                    next.age_range,
+                    next.age_conf,
+                    next.gender,
+                    next.gender_conf,
+                    next.attendance,
+                    next.attendance_conf,
+                    next.language,
+                    next.venue_id,
+                    next.price_min,
+                    next.price_max,
+                    next.inferred
+                )
+                THEN greatest(
+                    e.updated_at + interval '1 microsecond',
+                    statement_timestamp()
+                )
+                ELSE e.updated_at
+            END,
+            inferred = next.inferred
+        FROM next_values next
+        WHERE e.id = %(id)s
         """,
         {
             "id": event_id,

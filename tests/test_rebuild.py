@@ -204,7 +204,7 @@ def test_newer_higher_trust_positive_reverts_negative(conn):
            "sommerfest|2026-07-20|b", NOW - timedelta(hours=1))
     rb.rebuild(conn, now=NOW)
     _, occs = _canon(conn)
-    assert [o["status"] for o in occs] == ["scheduled"]
+    assert [o["status"] for o in occs] == ["pending_enrichment"]
 
 
 def test_explicit_multidate_becomes_one_series(conn):
@@ -423,7 +423,7 @@ def test_detached_cancellation_without_venue_is_exact_not_whole_day(conn):
         (row["starts_at"].astimezone(recurrence.VIENNA).strftime("%H:%M"),
          row["status"])
         for row in rows
-    ] == [("18:30", "cancelled"), ("20:30", "scheduled")]
+    ] == [("18:30", "cancelled"), ("20:30", "pending_enrichment")]
     assert conn.execute("SELECT count(*) AS n FROM event").fetchone()["n"] == 1
 
 
@@ -515,7 +515,7 @@ def test_this_and_future_cancellation_begins_at_exact_boundary(conn):
         "SELECT starts_at, status FROM occurrence ORDER BY starts_at"
     ).fetchall()
     assert [row["status"] for row in rows] == [
-        "scheduled", "cancelled", "cancelled", "cancelled",
+        "pending_enrichment", "cancelled", "cancelled", "cancelled",
     ]
 
 

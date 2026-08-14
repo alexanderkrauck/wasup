@@ -14,13 +14,93 @@ monthly pulse check - never deleted.
 Run: uv run python -m eventindex.jobs.schedule   (cron: every 15 min)
 """
 
-from eventindex import db
+from eventindex import config, db
 from eventindex.jobs.worker import enqueue
 
 DORMANT_MIN_CRAWLS = 5
 DORMANT_YIELD_EMA = 0.05
 MAX_ENQUEUE_PER_RUN = 100  # the envelope: least valuable work falls off first
 ENRICH_BATCH = 200
+
+
+def enqueue_audience_essentials(conn) -> int:
+    """Fail closed and repair every public event missing exhaustive facets.
+
+    The status transition and job inserts share the scheduler transaction:
+    once this sweep observes an incomplete event, public reads cannot race a
+    still-visible occurrence while its mandatory estimate waits in the queue.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT e.id,
+               coalesce(
+                 min(o.starts_at) FILTER (
+                   WHERE coalesce(o.ends_at, o.starts_at) >= now()
+                 ),
+                 now() + interval '100 years'
+               ) AS next_start
+        FROM event e
+        JOIN occurrence o ON o.event_id = e.id
+        WHERE o.status IN ('scheduled', 'pending_enrichment')
+          AND (
+            e.expected_gender_split IS NULL
+            OR NOT (e.expected_gender_split BETWEEN 0 AND 1)
+            OR coalesce(e.expected_gender_split_confidence, 0) <= 0
+            OR e.expected_gender_split_confidence > 1
+            OR coalesce(e.inferred->>'energy', '')
+               NOT IN ('low', 'medium', 'high')
+            OR e.inferred #>> '{_audience_essentials,energy,value}'
+               IS DISTINCT FROM e.inferred->>'energy'
+            OR CASE WHEN jsonb_typeof(
+                 e.inferred #> '{_audience_essentials,energy,confidence}'
+               ) = 'number' THEN NOT (
+                 (e.inferred #>>
+                   '{_audience_essentials,energy,confidence}')::numeric
+                 > 0
+                 AND (e.inferred #>>
+                   '{_audience_essentials,energy,confidence}')::numeric
+                 <= 1
+               ) ELSE true END
+            OR jsonb_typeof(e.inferred #> '{solo_friendly,value}')
+               IS DISTINCT FROM 'boolean'
+            OR CASE WHEN jsonb_typeof(
+                 e.inferred #> '{solo_friendly,confidence}'
+               ) = 'number' THEN NOT (
+                 (e.inferred #>> '{solo_friendly,confidence}')::numeric > 0
+                 AND (e.inferred #>> '{solo_friendly,confidence}')::numeric <= 1
+               ) ELSE true END
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.kind = 'estimate_audience'
+              AND j.status IN ('pending', 'running')
+              AND coalesce(j.payload->'event_ids', '[]'::jsonb) ? e.id::text
+          )
+        GROUP BY e.id
+        ORDER BY next_start, e.id
+        LIMIT %s
+        """,
+        (ENRICH_BATCH,),
+    ).fetchall()
+    if not rows:
+        return 0
+    event_ids = [row["id"] for row in rows]
+    conn.execute(
+        "UPDATE occurrence SET status = 'pending_enrichment' "
+        "WHERE event_id = ANY(%s) AND status = 'scheduled'",
+        (event_ids,),
+    )
+    for offset in range(0, len(rows), config.AUDIENCE_ESSENTIALS_BATCH_SIZE):
+        batch = rows[
+            offset:offset
+            + config.AUDIENCE_ESSENTIALS_BATCH_SIZE
+        ]
+        enqueue(conn, "estimate_audience", {
+            "event_ids": [str(row["id"]) for row in batch],
+            "next_start": min(row["next_start"] for row in batch).isoformat(),
+        })
+    return len(rows)
 
 
 def enqueue_enrichment(conn) -> int:
@@ -649,6 +729,9 @@ def venue_escalation(conn) -> int:
 
 
 def schedule(conn) -> int:
+    audience = enqueue_audience_essentials(conn)
+    if audience:
+        print(f"gated and enqueued {audience} missing audience essentials")
     enriching = enqueue_enrichment(conn)
     if enriching:
         print(f"enqueued {enriching} missing/stale event enrichments")

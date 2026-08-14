@@ -1806,12 +1806,24 @@ def rebuild(conn, now: datetime | None = None) -> dict:
 
 
 def _apply_enrichment(tx) -> list:
-    """Re-apply cached inferred attributes to the fresh canon (free); return
-    event ids that still need an enrich LLM call. The cache holds the pure
-    LLM verdict - curated venue facts (venue.sex_service) must be re-applied
-    here too, or every rebuild would strip the flag from events whose own
-    text looked innocent."""
-    from eventindex.enrich import apply_to_event, content_key, venue_override
+    """Re-apply caches and gate events missing exhaustive audience facets.
+
+    A full cache publishes immediately. An essentials-only cache publishes
+    immediately and leaves the slower full enrichment pending. With neither,
+    scheduled occurrences remain private as ``pending_enrichment`` until the
+    cheap mandatory batch succeeds. Curated venue overrides stay live here.
+    """
+    from eventindex.enrich import (
+        AudienceEssentials,
+        apply_audience_essentials,
+        apply_to_event,
+        audience_essentials_content_key,
+        audience_essentials_from_full,
+        content_key,
+        persist_audience_essentials,
+        venue_override,
+        with_audience_essentials,
+    )
 
     rows = tx.execute(
         """
@@ -1822,21 +1834,73 @@ def _apply_enrichment(tx) -> list:
         """
     ).fetchall()
     cached = {
-        r["content_key"]: r["attributes"]
-        for r in tx.execute("SELECT content_key, attributes FROM enrichment")
+        r["content_key"]: r
+        for r in tx.execute(
+            "SELECT content_key, attributes, model FROM enrichment"
+        )
     }
     pending = []
     for row in rows:
-        key = content_key(row)
-        if key in cached:
+        full_key = content_key(row)
+        full_cached = cached.get(full_key)
+        full_attributes = full_cached["attributes"] if full_cached else None
+        essentials_from_full = (
+            audience_essentials_from_full(full_attributes)
+            if full_attributes is not None else None
+        )
+        if (
+            full_attributes is not None
+            and essentials_from_full is not None
+        ):
+            essentials_key, essentials = persist_audience_essentials(
+                tx,
+                row,
+                essentials_from_full,
+                model=full_cached["model"] or config.MODEL_MINI,
+            )
+            apply_audience_essentials(
+                tx,
+                row["id"],
+                essentials,
+                enrichment_key=essentials_key,
+            )
             apply_to_event(
                 tx,
                 row["id"],
-                venue_override(row, dict(cached[key])),
-                enrichment_key=key,
+                venue_override(
+                    row,
+                    with_audience_essentials(full_attributes, essentials),
+                ),
+                enrichment_key=full_key,
+            )
+            continue
+
+        essentials_key = audience_essentials_content_key(row)
+        essentials_cached = cached.get(essentials_key)
+        essentials_attributes = (
+            essentials_cached["attributes"] if essentials_cached else None
+        )
+        if essentials_attributes is not None:
+            try:
+                essentials_attributes = AudienceEssentials.model_validate(
+                    essentials_attributes
+                ).model_dump()
+            except (ValueError, TypeError):
+                essentials_attributes = None
+        if essentials_attributes is not None:
+            apply_audience_essentials(
+                tx,
+                row["id"],
+                essentials_attributes,
+                enrichment_key=essentials_key,
             )
         else:
-            pending.append(row["id"])
+            tx.execute(
+                "UPDATE occurrence SET status = 'pending_enrichment' "
+                "WHERE event_id = %s AND status = 'scheduled'",
+                (row["id"],),
+            )
+        pending.append(row["id"])
     return pending
 
 

@@ -1,7 +1,10 @@
+import uuid
+
 from psycopg.types.json import Jsonb
 
 from eventindex.jobs.schedule import (
-    completeness_escalation, enqueue_enrichment, enqueue_nightly_qa,
+    completeness_escalation, enqueue_audience_essentials, enqueue_enrichment,
+    enqueue_nightly_qa,
     enqueue_risk_verification,
     escalate_broken, park_dormant, schedule,
 )
@@ -35,6 +38,96 @@ def test_due_and_never_crawled_enqueued_once(conn):
         )
     }
     assert names == {"due", "never"}
+
+
+def test_audience_sweep_gates_and_batches_every_incomplete_event(conn):
+    incomplete_ids = []
+    for index in range(21):
+        event_id = uuid.uuid4()
+        conn.execute(
+            "INSERT INTO event (id, kind, title) VALUES (%s, 'event', %s)",
+            (event_id, f"Needs audience {index}"),
+        )
+        incomplete_ids.append(event_id)
+        conn.execute(
+            "INSERT INTO occurrence (event_id, starts_at) "
+            "VALUES (%s, now() + interval '2 days')",
+            (event_id,),
+        )
+    ready_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, expected_gender_split, "
+        "expected_gender_split_confidence, inferred) "
+        "VALUES (%s, 'event', 'Ready', 0.5, 0.2, %s)",
+        (ready_id, Jsonb({
+            "energy": "medium",
+            "_audience_essentials": {
+                "energy": {
+                    "value": "medium", "confidence": 0.2,
+                    "evidence": None,
+                },
+            },
+            "solo_friendly": {
+                "value": True, "confidence": 0.2, "evidence": None,
+            },
+        }),),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '2 days')",
+        (ready_id,),
+    )
+
+    assert enqueue_audience_essentials(conn) == 21
+    jobs = conn.execute(
+        "SELECT payload FROM jobs WHERE kind = 'estimate_audience' "
+        "ORDER BY created_at, id"
+    ).fetchall()
+    assert sorted(len(job["payload"]["event_ids"]) for job in jobs) == [1, 20]
+    assert {
+        event_id
+        for job in jobs for event_id in job["payload"]["event_ids"]
+    } == {str(event_id) for event_id in incomplete_ids}
+    statuses = conn.execute(
+        "SELECT DISTINCT status FROM occurrence WHERE event_id = ANY(%s)",
+        (incomplete_ids,),
+    ).fetchall()
+    assert [row["status"] for row in statuses] == ["pending_enrichment"]
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (ready_id,)
+    ).fetchone()["status"] == "scheduled"
+    assert enqueue_audience_essentials(conn) == 0
+
+
+def test_audience_sweep_prioritizes_future_before_history(conn, monkeypatch):
+    monkeypatch.setattr("eventindex.jobs.schedule.ENRICH_BATCH", 2)
+    ids = {}
+    for label, starts_sql in (
+        ("past-a", "now() - interval '2 days'"),
+        ("past-b", "now() - interval '1 day'"),
+        ("future", "now() + interval '1 hour'"),
+    ):
+        event_id = uuid.uuid4()
+        ids[label] = event_id
+        conn.execute(
+            "INSERT INTO event (id, kind, title) VALUES (%s, 'event', %s)",
+            (event_id, label),
+        )
+        conn.execute(
+            f"INSERT INTO occurrence (event_id, starts_at) VALUES (%s, {starts_sql})",
+            (event_id,),
+        )
+
+    assert enqueue_audience_essentials(conn) == 2
+    queued = {
+        event_id
+        for row in conn.execute(
+            "SELECT payload FROM jobs WHERE kind = 'estimate_audience'"
+        )
+        for event_id in row["payload"]["event_ids"]
+    }
+    assert str(ids["future"]) in queued
+    assert len(queued & {str(ids["past-a"]), str(ids["past-b"])}) == 1
 
 
 def test_capped_feed_gets_companion_site_and_agent_once(conn):

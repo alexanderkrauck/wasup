@@ -17,15 +17,28 @@ NOW = datetime.now(timezone.utc)
 
 def _add_event(conn, title, *, starts, lat=None, lon=None, category=None):
     event_id = uuid.uuid4()
+    inferred = Jsonb({
+        "energy": "medium",
+        "solo_friendly": {"value": True, "confidence": 0.5},
+        "_audience_essentials": {
+            "energy": {"value": "medium", "confidence": 0.5},
+        },
+    })
     conn.execute(
         """
-        INSERT INTO event (id, kind, title, category, geo, confidence, status)
+        INSERT INTO event (
+            id, kind, title, category, geo, confidence, status, inferred,
+            expected_gender_split, expected_gender_split_confidence
+        )
         VALUES (%(id)s, 'one_off', %(title)s, %(cats)s,
                 CASE WHEN %(lat)s::float IS NULL THEN NULL
                      ELSE ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326) END,
-                0.9, 'confirmed')
+                0.9, 'confirmed', %(inferred)s, 0.5, 0.7)
         """,
-        {"id": event_id, "title": title, "cats": category or [], "lat": lat, "lon": lon},
+        {
+            "id": event_id, "title": title, "cats": category or [],
+            "lat": lat, "lon": lon, "inferred": inferred,
+        },
     )
     conn.execute(
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
@@ -210,7 +223,7 @@ def test_occurrence_summary_documents_only_real_browse_filters(client):
     ]["get"]
     assert [parameter["name"] for parameter in operation["parameters"]] == [
         "category", "is_free", "solo_friendly", "gender_split_min",
-        "gender_split_max", "energy",
+        "gender_split_max", "energy", "gender_split_band",
     ]
 
 
@@ -247,6 +260,9 @@ def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
             }
         if energy is not None:
             inferred["energy"] = energy
+            inferred["_audience_essentials"] = {
+                "energy": {"value": energy, "confidence": 0.66},
+            }
         conn.execute(
             "UPDATE event SET price_min = %s, price_max = %s, inferred = %s, "
             "expected_gender_split = %s, "
@@ -288,6 +304,7 @@ def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
         {"is_free": "true"},
         {"solo_friendly": "true"},
         {"gender_split_min": 0.6, "gender_split_max": 0.8},
+        {"gender_split_band": "high"},
         {"energy": "high"},
         {
             "is_free": "true", "solo_friendly": "true",
@@ -327,7 +344,7 @@ def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
     assert combo[0]["estimates"] == {
         "solo_friendly": {"value": True, "confidence": 0.72},
         "gender_split": {"value": 0.65, "confidence": 0.68},
-        "energy": {"value": "high", "confidence": None},
+        "energy": {"value": "high", "confidence": 0.66},
     }
     assert [tag["name"] for tag in combo[0]["tags"]] == [
         "live music", "dancing", "social", "night event",
@@ -339,7 +356,7 @@ def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
         "category": "tech", "from": "2026-08-14T00:00:00+02:00",
         "to": "2026-08-14T23:59:59+02:00", "is_free": "false",
     }).json()["occurrences"]
-    assert len(unfiltered) == 6
+    assert len(unfiltered) == 5
 
     for path in ("/v1/occurrences", "/v1/occurrences/summary"):
         assert client.get(path, params={
@@ -347,6 +364,266 @@ def test_browse_estimate_filters_keep_summary_cursor_and_rows_in_sync(
         }).status_code == 422
         assert client.get(path, params={"gender_split_min": 1.1}).status_code == 422
         assert client.get(path, params={"energy": "extreme"}).status_code == 422
+        assert client.get(
+            path, params={"gender_split_band": "unknown"},
+        ).status_code == 422
+
+
+def test_public_ready_set_is_exactly_partitioned_in_every_calendar_range(
+    conn, client, monkeypatch,
+):
+    from eventindex.api import app as app_mod
+
+    vienna = ZoneInfo("Europe/Vienna")
+    fixed_now = datetime(2026, 8, 14, 10, 0, tzinfo=vienna)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                fixed_now.replace(tzinfo=None)
+                if tz is None else fixed_now.astimezone(tz)
+            )
+
+    monkeypatch.setattr(app_mod, "datetime", FrozenDateTime)
+
+    def add(title, starts, *, energy, gender, solo=True):
+        event_id = _add_event(
+            conn, title, starts=starts, lat=48.3069, lon=14.2858,
+            category=["sport"],
+        )
+        inferred = {
+            "solo_friendly": {"value": solo, "confidence": 0.6},
+        }
+        if energy is not None:
+            inferred |= {
+                "energy": energy,
+                "_audience_essentials": {
+                    "energy": {"value": energy, "confidence": 0.6},
+                },
+            }
+        conn.execute(
+            "UPDATE event SET inferred = %s, expected_gender_split = %s, "
+            "expected_gender_split_confidence = %s "
+            "WHERE id = %s",
+            (Jsonb(inferred), gender, 0.6 if gender is not None else None, event_id),
+        )
+
+    slots = (
+        ("today", datetime(2026, 8, 14, 12, tzinfo=vienna)),
+        ("week", datetime(2026, 8, 15, 12, tzinfo=vienna)),
+        ("month", datetime(2026, 8, 20, 12, tzinfo=vienna)),
+    )
+    balanced_values = (0.4, 0.6, 0.5)
+    for index, (slot, starts) in enumerate(slots):
+        add(f"{slot} low", starts, energy="low", gender=0.39, solo=True)
+        add(
+            f"{slot} balanced", starts, energy="medium",
+            gender=balanced_values[index], solo=False,
+        )
+        add(f"{slot} high", starts, energy="high", gender=0.61, solo=True)
+
+    # Incomplete or invalid estimates are not silently assigned to a bucket;
+    # they stay outside the public-ready chronological calendar.
+    today = slots[0][1]
+    add("missing energy", today, energy=None, gender=0.5)
+    add("missing gender", today, energy="low", gender=None)
+    add("invalid energy", today, energy="extreme", gender=0.5)
+    add("gender below domain", today, energy="low", gender=-0.1)
+    add("gender above domain", today, energy="high", gender=1.1)
+    conn.commit()
+
+    filter_sets = {
+        "all": {},
+        "energy_low": {"energy": "low"},
+        "energy_medium": {"energy": "medium"},
+        "energy_high": {"energy": "high"},
+        "gender_low": {"gender_split_band": "low"},
+        "gender_balanced": {"gender_split_band": "balanced"},
+        "gender_high": {"gender_split_band": "high"},
+        "solo_true": {"solo_friendly": "true"},
+        "solo_false": {"solo_friendly": "false"},
+    }
+    counts = {label: {} for label in filter_sets}
+    listed = {label: {} for label in filter_sets}
+
+    for label, filters in filter_sets.items():
+        summary_response = client.get(
+            "/v1/occurrences/summary",
+            params={"category": "sport", **filters},
+        )
+        assert summary_response.status_code == 200
+        ranges = summary_response.json()["ranges"]
+        for range_name, window in ranges.items():
+            cursor = None
+            rows = []
+            while True:
+                params = {
+                    "category": "sport", "from": window["from"],
+                    "to": window["to"], "limit": 2, **filters,
+                }
+                if cursor is not None:
+                    params["cursor"] = cursor
+                listing_response = client.get(
+                    "/v1/occurrences", params=params,
+                )
+                assert listing_response.status_code == 200
+                page = listing_response.json()
+                rows.extend(page["occurrences"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+            ids = [row["id"] for row in rows]
+            assert len(ids) == len(set(ids)) == window["count"]
+            counts[label][range_name] = window["count"]
+            listed[label][range_name] = rows
+
+    assert [counts["all"][name] for name in (
+        "today", "this_week", "next_30_days",
+    )] == [3, 6, 9]
+    assert {row["title"] for row in listed["all"]["today"]} == {
+        "today low", "today balanced", "today high",
+    }
+    for range_name in ("today", "this_week", "next_30_days"):
+        assert counts["all"][range_name] == sum(
+            counts[f"energy_{bucket}"][range_name]
+            for bucket in ("low", "medium", "high")
+        )
+        assert counts["all"][range_name] == sum(
+            counts[f"gender_{bucket}"][range_name]
+            for bucket in ("low", "balanced", "high")
+        )
+        assert counts["all"][range_name] == sum(
+            counts[f"solo_{value}"][range_name]
+            for value in ("true", "false")
+        )
+
+
+def test_audience_publication_gate_covers_every_public_read_surface(
+    conn, client, monkeypatch,
+):
+    """Neither a pending row nor corrupt mandatory estimates may leak."""
+    from eventindex.api import app as app_mod
+    from eventindex.api import search as search_mod
+
+    hidden_id = _add_event(
+        conn, "Audience Gate Hidden", starts=NOW + timedelta(days=1),
+        lat=48.3069, lon=14.2858, category=["sport"],
+    )
+    hidden_occurrence = conn.execute(
+        "SELECT id FROM occurrence WHERE event_id = %s", (hidden_id,)
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE event SET inferred = inferred - '_audience_essentials' "
+        "WHERE id = %s",
+        (hidden_id,),
+    )
+
+    pending_id = _add_event(
+        conn, "Audience Gate Pending", starts=NOW + timedelta(days=2),
+        lat=48.3069, lon=14.2858, category=["sport"],
+    )
+    pending_occurrence = conn.execute(
+        "SELECT id FROM occurrence WHERE event_id = %s", (pending_id,)
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE occurrence SET status = 'pending_enrichment' WHERE id = %s",
+        (pending_occurrence,),
+    )
+    conn.commit()
+
+    browse_params = {"category": "sport", "radius": "any", "min_confidence": 0}
+    assert client.get(
+        "/v1/occurrences", params=browse_params,
+    ).json()["occurrences"] == []
+    assert client.get(
+        "/v1/occurrences/summary", params={"category": "sport"},
+    ).json()["ranges"]["next_30_days"]["count"] == 0
+    feed = client.get("/v1/feed.ics", params=browse_params)
+    assert b"Audience Gate Hidden" not in feed.content
+    assert b"Audience Gate Pending" not in feed.content
+    assert client.post(
+        "/v1/query?limit=100", json={
+            "categories": ["sport"], "radius": "any", "min_confidence": 0,
+        },
+    ).json()["occurrences"] == []
+
+    parsed = search_mod.SearchFilters(**(
+        search_mod.FILTER_DEFAULTS
+        | {"categories": ["sport"], "radius": "any", "min_confidence": 0}
+    ))
+    monkeypatch.setattr(search_mod, "parse_query", lambda *_: parsed)
+    assert client.get(
+        "/v1/search", params={"q": "sport", "limit": 100},
+    ).json()["occurrences"] == []
+
+    changes = client.get("/v1/changes", params={"limit": 500}).json()["events"]
+    changed_ids = {uuid.UUID(row["id"]) for row in changes}
+    assert hidden_id not in changed_ids
+    assert pending_id not in changed_ids
+    assert client.get(f"/v1/events/{hidden_id}").status_code == 404
+    assert client.get(f"/v1/events/{pending_id}").status_code == 404
+
+    coverage = app_mod._feed_coverage(
+        [hidden_occurrence, pending_occurrence], from_=NOW, radius="any",
+        category="sport", min_confidence=0,
+        include_time_unknown=True, limit=10,
+    )
+    assert coverage[0]["included"] is False
+    assert coverage[0]["title"] is None
+    assert "audience_ready" in coverage[0]["reasons"]
+    assert coverage[1] == {
+        "occurrence_id": pending_occurrence,
+        "title": None,
+        "included": False,
+        "reasons": ["not_scheduled"],
+    }
+
+
+def test_publication_gate_validates_values_and_positive_confidence(conn, client):
+    def audience(*, energy="medium", energy_meta="medium", energy_conf=0.5,
+                 solo=True, solo_conf=0.5):
+        inferred = {
+            "energy": energy,
+            "_audience_essentials": {
+                "energy": {"value": energy_meta, "confidence": energy_conf},
+            },
+        }
+        if solo is not None:
+            inferred["solo_friendly"] = {
+                "value": solo, "confidence": solo_conf,
+            }
+        return inferred
+
+    def add(title, *, inferred, gender=0.5, gender_conf=0.5):
+        event_id = _add_event(
+            conn, title, starts=NOW + timedelta(days=1),
+            lat=48.3069, lon=14.2858, category=["community"],
+        )
+        conn.execute(
+            "UPDATE event SET inferred = %s, expected_gender_split = %s, "
+            "expected_gender_split_confidence = %s WHERE id = %s",
+            (Jsonb(inferred), gender, gender_conf, event_id),
+        )
+
+    add("Ready control", inferred=audience())
+    add("Zero gender confidence", inferred=audience(), gender_conf=0)
+    add("Zero energy confidence", inferred=audience(energy_conf=0))
+    add("Mismatched energy metadata", inferred=audience(energy_meta="high"))
+    add("Missing solo value", inferred=audience(solo=None))
+    add("Zero solo confidence", inferred=audience(solo_conf=0))
+    add("Invalid solo type", inferred=audience(solo="definitely"))
+    conn.commit()
+
+    for extra_params in ({}, {"solo_friendly": "true"}):
+        response = client.get("/v1/occurrences", params={
+            "category": "community", "radius": "any", "min_confidence": 0,
+            **extra_params,
+        })
+        assert response.status_code == 200
+        assert [
+            row["title"] for row in response.json()["occurrences"]
+        ] == ["Ready control"]
 
 
 @pytest.mark.parametrize(
@@ -753,7 +1030,7 @@ def test_feed_can_exclude_known_adult_context_without_dropping_unknown(conn, cli
         lat=48.3069, lon=14.2858, category=["nightlife"],
     )
     conn.execute(
-        "UPDATE event SET inferred = %s WHERE id = %s",
+        "UPDATE event SET inferred = inferred || %s WHERE id = %s",
         (Jsonb({"sex_service_context": {
             "value": True, "confidence": 0.8, "evidence": "venue",
         }}), adult_id),
@@ -796,6 +1073,72 @@ def test_changes_keyset_cursor_walks_everything_once(client):
         if cursor is None:
             break
     assert len(seen) == len(set(seen)) == 5
+
+
+def test_changes_emits_event_once_when_audience_gate_releases(conn, client):
+    from eventindex.enrich import (
+        apply_audience_essentials, audience_essentials_content_key,
+    )
+
+    event_id = _add_event(
+        conn, "Wartet auf Audience", starts=NOW + timedelta(days=1),
+        category=["culture"],
+    )
+    conn.execute(
+        "UPDATE event SET inferred = '{}'::jsonb, "
+        "expected_gender_split = NULL, "
+        "expected_gender_split_confidence = NULL, "
+        "updated_at = now() - interval '1 day' WHERE id = %s",
+        (event_id,),
+    )
+    conn.execute(
+        "UPDATE occurrence SET status = 'pending_enrichment' "
+        "WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+
+    cursor = None
+    while True:
+        params = {"limit": 1}
+        if cursor is not None:
+            params["since"] = cursor
+        page = client.get("/v1/changes", params=params).json()
+        if not page["events"]:
+            break
+        cursor = page["next_cursor"]
+        assert cursor is not None
+
+    canonical = {
+        "title": "Wartet auf Audience", "description": None,
+        "category": ["culture"], "venue_name": None,
+    }
+    attributes = {
+        "gender_split": {"value": 0.5, "confidence": 0.2},
+        "energy": {"value": "low", "confidence": 0.2},
+        "solo_friendly": {"value": True, "confidence": 0.2},
+    }
+    apply_audience_essentials(
+        conn,
+        event_id,
+        attributes,
+        enrichment_key=audience_essentials_content_key(canonical),
+    )
+    conn.execute(
+        "UPDATE occurrence SET status = 'scheduled' WHERE event_id = %s",
+        (event_id,),
+    )
+    conn.commit()
+
+    released = client.get(
+        "/v1/changes", params={"since": cursor, "limit": 1},
+    ).json()
+    assert [row["id"] for row in released["events"]] == [str(event_id)]
+    assert released["next_cursor"] is not None
+    assert client.get(
+        "/v1/changes",
+        params={"since": released["next_cursor"], "limit": 1},
+    ).json()["events"] == []
 
 
 def test_query_endpoint_needs_no_llm_and_accepts_partial_filters(client):
@@ -957,6 +1300,10 @@ def test_event_detail_serializes_enriched_events(conn, client):
     resp = client.get(f"/v1/events/{event_id}")
     assert resp.status_code == 200
     assert resp.json()["event"]["expected_age_range"] == "[20, 31)"
+    estimates = resp.json()["event"]["estimates"]
+    assert estimates["gender_split"] == {"value": 0.5, "confidence": 0.7}
+    assert estimates["energy"] == {"value": "medium", "confidence": 0.5}
+    assert "_audience_essentials" not in estimates
 
 
 def test_query_rows_carry_venue(conn, client):
@@ -997,15 +1344,13 @@ def test_ongoing_occurrence_is_visible_with_flag(client, conn):
     windows; an event spanning a specifically requested date must match."""
     window_start = (NOW + timedelta(days=20)).replace(microsecond=0)
     window_end = window_start + timedelta(hours=1)
-    eid = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'one_off', 'Laufende Ausstellung', '{art}', 0.9, 'confirmed')",
-        (eid,),
+    eid = _add_event(
+        conn, "Laufende Ausstellung",
+        starts=window_start - timedelta(days=1), category=["art"],
     )
     conn.execute(
-        "INSERT INTO occurrence (event_id, starts_at, ends_at) VALUES (%s, %s, %s)",
-        (eid, window_start - timedelta(days=1), window_start + timedelta(days=1)),
+        "UPDATE occurrence SET ends_at = %s WHERE event_id = %s",
+        (window_start + timedelta(days=1), eid),
     )
     conn.commit()
     body = client.get("/v1/occurrences", params={
@@ -1046,13 +1391,12 @@ def test_impossible_ranges_are_422(client):
 
 
 def test_distinct_event_and_sort_starts_at(client, conn):
-    eid = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'series', 'Tagesführung', '{culture}', 0.9, 'confirmed')",
-        (eid,),
+    eid = _add_event(
+        conn, "Tagesführung", starts=NOW + timedelta(days=1),
+        category=["culture"],
     )
-    for d in (1, 2, 3):
+    conn.execute("UPDATE event SET kind = 'series' WHERE id = %s", (eid,))
+    for d in (2, 3):
         conn.execute(
             "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
             (eid, NOW + timedelta(days=d)),
@@ -1075,18 +1419,15 @@ def test_weekday_filter_selects_the_matching_series_occurrence(client, conn):
             hour=20, minute=0, second=0, microsecond=0
         )
 
-    eid = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'series', 'Weekday Dance Series', '{nightlife}', "
-        "0.9, 'confirmed')",
-        (eid,),
+    eid = _add_event(
+        conn, "Weekday Dance Series", starts=next_day(1),
+        category=["nightlife"],
     )
-    for starts in (next_day(1), next_day(5)):
-        conn.execute(
-            "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
-            (eid, starts),
-        )
+    conn.execute("UPDATE event SET kind = 'series' WHERE id = %s", (eid,))
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
+        (eid, next_day(5)),
+    )
     conn.commit()
 
     rows = client.post(
@@ -1105,15 +1446,9 @@ def test_weekday_filter_selects_the_matching_series_occurrence(client, conn):
 
 
 def test_to_dt_bare_date_covers_the_whole_day(client, conn):
-    eid = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'one_off', 'Abendkonzert 18ter', '{music}', 0.9, 'confirmed')",
-        (eid,),
-    )
     evening = (NOW + timedelta(days=3)).replace(hour=19)
-    conn.execute(
-        "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)", (eid, evening),
+    eid = _add_event(
+        conn, "Abendkonzert 18ter", starts=evening, category=["music"],
     )
     conn.commit()
     day = evening.date().isoformat()

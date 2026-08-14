@@ -323,7 +323,7 @@ class CalendarCoverage(_Output):
     included: bool
     reasons: list[Literal[
         "not_found", "date_window", "not_scheduled", "geography", "category",
-        "confidence", "name", "organizer", "venue", "source",
+        "audience_ready", "confidence", "name", "organizer", "venue", "source",
         "sex_service_safety", "weekday", "time_unknown", "stated_price",
         "event_scale", "tag_match", "tag_concept_match", "feed_limit",
     ]]

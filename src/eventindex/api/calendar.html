@@ -615,14 +615,14 @@
       <label class="control-shell" title="Geschätzter Anteil von Frauen im Publikum">
         <span>Frauenanteil <span class="estimate-mark" aria-label="geschätzt">≈</span></span>
         <select id="gender-range" aria-label="Geschätzter Frauenanteil im Publikum">
-          <option value="">Alle Verteilungen</option>
-          <option value="0:0.4">Bis 40 % Frauen</option>
-          <option value="0.4:0.6">40–60 % Frauen</option>
-          <option value="0.6:1">Ab 60 % Frauen</option>
+          <option value="">Alle Frauenanteile</option>
+          <option value="low">Unter 40 % Frauen</option>
+          <option value="balanced">40–60 % Frauen</option>
+          <option value="high">Über 60 % Frauen</option>
         </select>
       </label>
     </div>
-    <p class="estimate-note"><span class="estimate-mark" aria-hidden="true">≈</span> Schätzung aus verfügbaren Eventinformationen. Bei aktiven Schätzfiltern fallen Termine ohne entsprechenden Wert weg.</p>
+    <p class="estimate-note"><span class="estimate-mark" aria-hidden="true">≈</span> Für Solo-Eignung, Energie und Frauenanteil besitzt jeder veröffentlichte Termin eine klar gekennzeichnete KI-Schätzung. Die drei Energielevel beziehungsweise Frauenanteils-Bänder ergeben zusammen jeweils exakt alle Termine.</p>
   </section>
   <p class="ai-helper">Komplexer Wunsch? <a href="/#use">Frag Wasup über deine KI.</a></p>
 
@@ -641,7 +641,7 @@
   </section>
 
   <footer>
-    <p>„Uhrzeit unbekannt“, „projiziert“ und <span class="estimate-mark">≈</span> sind Absicht: Wasup behauptet nichts, was der Index nicht belegen kann. Der allgemeine Kalender-Feed übernimmt keine Publikums-Schätzfilter.</p>
+    <p>Wasup trennt belegte Fakten von klar markierten Schätzungen: „Uhrzeit unbekannt“, „projiziert“ und <span class="estimate-mark">≈</span> zeigen transparent, was bekannt und was geschätzt ist. Der allgemeine Kalender-Feed übernimmt keine Publikums-Schätzfilter.</p>
     <nav aria-label="Fußnavigation">
       <a href="/">Start</a>
       <a href="/v1/feed.ics?exclude_sex_service_context=true&amp;include_time_unknown=false" title="Allgemeinen Kalender-Feed öffnen">Kalender-Feed</a>
@@ -804,9 +804,7 @@ function browseFilterParams() {
   if ($("solo-only").checked) params.set("solo_friendly", "true");
   if ($("energy").value) params.set("energy", $("energy").value);
   if ($("gender-range").value) {
-    const [minimum, maximum] = $("gender-range").value.split(":");
-    params.set("gender_split_min", minimum);
-    params.set("gender_split_max", maximum);
+    params.set("gender_split_band", $("gender-range").value);
   }
   return params;
 }
@@ -1319,12 +1317,12 @@ async function init() {
   $("free-only").checked = query.get("is_free") === "true";
   $("solo-only").checked = query.get("solo_friendly") === "true";
   const energy = query.get("energy");
-  if (energy && Object.hasOwn(ENERGY_LABELS, energy)) $("energy").value = energy;
-  const genderRange = [
-    query.get("gender_split_min"), query.get("gender_split_max"),
-  ].join(":");
-  if ([...$("gender-range").options].some(option => option.value === genderRange)) {
-    $("gender-range").value = genderRange;
+  if ([...$("energy").options].some(option => option.value === energy)) {
+    $("energy").value = energy;
+  }
+  const genderBand = query.get("gender_split_band");
+  if ([...$("gender-range").options].some(option => option.value === genderBand)) {
+    $("gender-range").value = genderBand;
   }
   const requestedWindow = query.get("window");
   const rawFrom = query.get("from");
@@ -1343,6 +1341,7 @@ async function init() {
       state.activeWindow = "custom";
       setWindowButtons();
       updateResultsTitle();
+      updateUrl();
       await loadOccurrences();
     } else {
       const windowName = Object.hasOwn(state.ranges, requestedWindow)

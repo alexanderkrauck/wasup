@@ -6,9 +6,19 @@ from threading import Barrier, Thread
 import psycopg
 import pytest
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from eventindex import enrich as en
-from eventindex.enrich import Enrichment, apply_to_event, content_key, enrich_event
+from eventindex.enrich import (
+    AudienceEssentialsBatch,
+    Enrichment,
+    apply_audience_essentials,
+    apply_to_event,
+    audience_essentials_content_key,
+    content_key,
+    enrich_event,
+    estimate_audience_essentials,
+)
 
 
 def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
@@ -49,6 +59,29 @@ def _fake_enrichment(age_conf=0.95):  # over the cap on purpose
     })
 
 
+def _fake_audience_batch(event_ids):
+    return AudienceEssentialsBatch.model_validate({
+        "events": [
+            {
+                "event_id": str(event_id),
+                "gender_split": {
+                    "value": 0.62,
+                    "confidence": 0.9,
+                },
+                "energy": {
+                    "value": "high",
+                    "confidence": 0.7,
+                },
+                "solo_friendly": {
+                    "value": True,
+                    "confidence": 0.6,
+                },
+            }
+            for event_id in event_ids
+        ]
+    })
+
+
 @pytest.fixture
 def event_row(conn):
     event_id = uuid.uuid4()
@@ -86,6 +119,165 @@ def test_enrich_caches_and_never_pays_twice(conn, event_row, monkeypatch):
     assert "Never add one-word head tags mechanically" in calls[0]
     assert "exact original source-language quote" in calls[0]
     assert first == second
+
+
+def test_audience_essentials_are_batched_cached_and_cheap(
+    conn, event_row, monkeypatch,
+):
+    second_id = uuid.uuid4()
+    second = dict(
+        event_row,
+        id=second_id,
+        title="Leiser Leseabend",
+        description="Gemeinsames stilles Lesen",
+        category=["learning"],
+    )
+    calls = []
+
+    def fake_complete(tx, prompt, schema, **kwargs):
+        calls.append((prompt, schema, kwargs))
+        return _fake_audience_batch([event_row["id"], second_id])
+
+    monkeypatch.setattr(en.llm, "complete", fake_complete)
+    first = estimate_audience_essentials(conn, [event_row, second], job_id=uuid.uuid4())
+    again = estimate_audience_essentials(conn, [event_row, second], job_id=uuid.uuid4())
+
+    assert first == again
+    assert len(calls) == 1
+    prompt, schema, kwargs = calls[0]
+    assert schema is AudienceEssentialsBatch
+    assert "no value may be null or unknown" in prompt
+    assert kwargs["budget_lane"] == "core"
+    assert kwargs["max_tokens"] == en.config.AUDIENCE_ESSENTIALS_MAX_OUTPUT_TOKENS
+    assert kwargs["reservation_eur"] == \
+        en.config.AUDIENCE_ESSENTIALS_RESERVATION_EUR
+    assert kwargs["reasoning_effort"] == "none"
+    assert audience_essentials_content_key(event_row) != content_key(event_row)
+    assert first[str(event_row["id"])][1] == {
+        "gender_split": {
+            "value": 0.62,
+            "confidence": 0.35,
+        },
+        "energy": {
+            "value": "high",
+            "confidence": 0.35,
+        },
+        "solo_friendly": {
+            "value": True,
+            "confidence": 0.35,
+        },
+    }
+    assert conn.execute(
+        "SELECT count(*) AS n FROM enrichment"
+    ).fetchone()["n"] == 2
+
+
+def test_full_enrichment_cannot_overwrite_committed_audience_partition(
+    conn, event_row,
+):
+    compact = {
+        "gender_split": {"value": 0.2, "confidence": 0.25},
+        "energy": {"value": "low", "confidence": 0.25},
+        "solo_friendly": {
+            "value": False, "confidence": 0.25,
+        },
+    }
+    full = {
+        "gender_split": {"value": 0.8, "confidence": 0.5, "evidence": None},
+        "energy": "high",
+        "solo_friendly": {
+            "value": True, "confidence": 0.5, "evidence": None,
+        },
+    }
+    _, committed = en.persist_audience_essentials(
+        conn, event_row, compact, model="compact"
+    )
+    _, winner = en.persist_audience_essentials(
+        conn,
+        event_row,
+        en.audience_essentials_from_full(full),
+        model="full",
+    )
+
+    assert winner == committed
+    merged = en.with_audience_essentials(full, winner)
+    assert merged["gender_split"] == compact["gender_split"]
+    assert merged["energy"] == "low"
+    assert merged["solo_friendly"] == compact["solo_friendly"]
+
+
+@pytest.mark.parametrize("invalid", [None, [], "broken", 42])
+def test_invalid_full_cache_falls_back_to_compact_repair(invalid):
+    assert en.audience_essentials_from_full(invalid) is None
+
+
+def test_apply_audience_essentials_writes_every_publication_gate(
+    conn, event_row,
+):
+    conn.execute(
+        "UPDATE event SET updated_at = now() - interval '1 day' WHERE id = %s",
+        (event_row["id"],),
+    )
+    before = conn.execute(
+        "SELECT updated_at FROM event WHERE id = %s", (event_row["id"],),
+    ).fetchone()["updated_at"]
+    attrs = _fake_audience_batch([event_row["id"]]).events[0].model_dump(
+        exclude={"event_id"}
+    )
+    key = audience_essentials_content_key(event_row)
+
+    apply_audience_essentials(
+        conn, event_row["id"], attrs, enrichment_key=key
+    )
+
+    row = conn.execute(
+        "SELECT expected_gender_split, expected_gender_split_confidence, "
+        "inferred, updated_at FROM event WHERE id = %s",
+        (event_row["id"],),
+    ).fetchone()
+    assert row["expected_gender_split"] == 0.62
+    assert row["expected_gender_split_confidence"] == 0.8
+    assert row["updated_at"] > before
+    assert row["inferred"]["energy"] == "high"
+    assert row["inferred"]["solo_friendly"]["value"] is True
+    meta = row["inferred"]["_audience_essentials"]
+    assert meta["content_key"] == key
+    assert meta["energy"]["confidence"] == 0.7
+    assert meta["solo_friendly"]["confidence"] == 0.6
+
+    apply_audience_essentials(
+        conn, event_row["id"], attrs, enrichment_key=key
+    )
+    assert conn.execute(
+        "SELECT updated_at FROM event WHERE id = %s", (event_row["id"],),
+    ).fetchone()["updated_at"] == row["updated_at"]
+
+
+def test_audience_readiness_timestamp_never_moves_backwards(
+    conn, event_row,
+):
+    future = conn.execute(
+        "UPDATE event SET updated_at = statement_timestamp() + interval '1 hour' "
+        "WHERE id = %s RETURNING updated_at",
+        (event_row["id"],),
+    ).fetchone()["updated_at"]
+    attrs = _fake_audience_batch([event_row["id"]]).events[0].model_dump(
+        exclude={"event_id"}
+    )
+
+    apply_audience_essentials(
+        conn,
+        event_row["id"],
+        attrs,
+        enrichment_key=audience_essentials_content_key(event_row),
+    )
+
+    row = conn.execute(
+        "SELECT inferred, updated_at FROM event WHERE id = %s",
+        (event_row["id"],),
+    ).fetchone()
+    assert row["inferred"]["energy"] == "high"
+    assert row["updated_at"] > future
 
 
 def test_concurrent_cache_miss_returns_the_committed_winner(
@@ -248,6 +440,14 @@ def test_apply_writes_typed_columns_and_inferred(conn, event_row, monkeypatch):
     }
     assert next(tag for tag in tags if tag["name"] == "techno")["confidence"] == 0.8
 
+    updated_at = conn.execute(
+        "SELECT updated_at FROM event WHERE id = %s", (event_row["id"],),
+    ).fetchone()["updated_at"]
+    apply_to_event(conn, event_row["id"], attrs)
+    assert conn.execute(
+        "SELECT updated_at FROM event WHERE id = %s", (event_row["id"],),
+    ).fetchone()["updated_at"] == updated_at
+
 
 def test_content_key_changes_with_content(event_row):
     other = dict(event_row, title="Seniorencafé")
@@ -301,6 +501,53 @@ def test_rebuild_reapply_keeps_venue_override(conn, event_row, monkeypatch):
         "SELECT inferred FROM event WHERE id = %s", (event_row["id"],)
     ).fetchone()
     assert row["inferred"]["sex_service_context"]["value"] is True
+
+
+def test_rebuild_gates_unknown_audience_and_releases_cached_essentials(
+    conn, event_row,
+):
+    from eventindex.resolve.rebuild import _apply_enrichment
+
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '1 day', 'scheduled')",
+        (event_row["id"],),
+    )
+
+    pending = _apply_enrichment(conn)
+
+    assert pending == [event_row["id"]]
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s",
+        (event_row["id"],),
+    ).fetchone()["status"] == "pending_enrichment"
+
+    attrs = _fake_audience_batch([event_row["id"]]).events[0].model_dump(
+        exclude={"event_id"}
+    )
+    # The canonical row has no venue_id, so rebuild sees no venue name.
+    key = audience_essentials_content_key(dict(event_row, venue_name=None))
+    conn.execute(
+        "INSERT INTO enrichment (content_key, attributes) VALUES (%s, %s)",
+        (key, Jsonb(attrs)),
+    )
+    conn.execute(
+        "UPDATE occurrence SET status = 'scheduled' WHERE event_id = %s",
+        (event_row["id"],),
+    )
+
+    assert _apply_enrichment(conn) == [event_row["id"]]
+    row = conn.execute(
+        "SELECT expected_gender_split, inferred FROM event WHERE id = %s",
+        (event_row["id"],),
+    ).fetchone()
+    assert row["expected_gender_split"] == 0.62
+    assert row["inferred"]["energy"] == "high"
+    assert row["inferred"]["solo_friendly"]["value"] is True
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s",
+        (event_row["id"],),
+    ).fetchone()["status"] == "scheduled"
 
 
 def test_sex_service_context_lands_in_inferred(conn, event_row, monkeypatch):

@@ -50,7 +50,7 @@ Explicitly FORBIDDEN in v1, even as stubs, interfaces, or "preparation" (HURDLES
 - socials scraping (Instagram/Facebook/Telegram)
 - vision/PDF extraction path
 - tier-D agentic crawls
-- ~~demographics/gender/fullness *inference*~~ — re-entry trigger FIRED 2026-07-06 (Alexander: agent search needs rich inferred attributes). In scope per H5: priors + explicit-text-evidence only, confidence-capped, labeled estimates.
+- ~~demographics/gender/fullness *inference*~~ — re-entry trigger FIRED 2026-07-06 (Alexander: agent search needs rich inferred attributes). In scope per H5 as amended: every applicable queryable audience attribute ALWAYS gets the model's best estimate with positive confidence (world knowledge/category priors are allowed); `null` is only for truly inapplicable attributes. Estimates stay confidence-capped and visibly labeled.
 - takedown self-service endpoint (manual email suffices; the suppression heuristics of §9b ARE in scope)
 - ~~any frontend~~ — re-entry trigger FIRED 2026-07-09 (Alexander: visualization page). In scope: exactly one dependency-free HTML calendar page over the public read API (`GET /`). Still forbidden: frameworks, SPA, build step, any second page without a new trigger.
 - multi-city support (no `city_id` columns "for later" - the design is city-agnostic by nature of the source registry; that is enough)
@@ -62,8 +62,9 @@ Building any of these early = the exact tech-debt failure mode this file exists 
 - A phase is done when its done-criterion (BUILD-PLAN.md) is demonstrated **against real Linz data**, not fixtures. Post the evidence (query + output) in the phase completion note.
 - Every extractor/resolver change runs against the gold set (HURDLES §H2) and fixture replays (§H3.4) before merge. Falling precision = blocked merge, no exceptions.
 - All LLM calls: structured output, validated against pydantic schemas, with the deterministic sanity checks from ARCHITECTURE §7 (dates parse, geo in bounds, schema valid). An unvalidated LLM output reaching the DB is a bug by definition.
+- Audience readiness is a publication invariant: a scheduled public event must already have valid, positive-confidence estimates for the publication-mandatory exhaustive GUI facets (currently energy, gender split, and solo friendliness). Missing mandatory estimates remain pending, trigger immediate prioritized repair, and must never be silently served. For every single-choice mandatory audience dimension, the disjoint buckets must sum exactly to the unfiltered public count over the same window and filters; richer AI-query attributes continue through non-blocking full enrichment.
 - Budget guardrails (ARCHITECTURE §5b/cost governance) are implemented in phase 0, not retrofitted. No LLM call happens outside a budget context.
-- Write tests for behavior, not coverage. The valuable tests: recurrence compiler, fingerprinting, merge logic, staleness decay math, API filter semantics (null = unknown!).
+- Write tests for behavior, not coverage. The valuable tests: recurrence compiler, fingerprinting, merge logic, staleness decay math, API filter semantics (null = unknown for optional facts; mandatory audience filters never publish null!).
 
 ## Working style
 

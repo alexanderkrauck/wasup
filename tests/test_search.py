@@ -32,9 +32,16 @@ def _add(conn, title, *, category=None, age=None, energy=None, tags=None,
         venue_id = uuid.uuid4()
         conn.execute("INSERT INTO venue (id, name) VALUES (%s, %s)",
                      (venue_id, venue))
-    inferred = {}
-    if energy:
-        inferred["energy"] = energy
+    energy = energy or "medium"
+    gender = 0.5 if gender is None else gender
+    gender_conf = 0.5 if gender_conf is None else gender_conf
+    inferred = {
+        "energy": energy,
+        "solo_friendly": {"value": True, "confidence": 0.5},
+        "_audience_essentials": {
+            "energy": {"value": energy, "confidence": 0.5},
+        },
+    }
     if kid is not None:
         inferred["kid_friendly"] = {"value": kid, "confidence": kid_conf}
     if estimated_price is not None:
@@ -106,9 +113,9 @@ def test_exclusions_are_leakproof(conn):
     assert "Jazz Brunch" in titles
 
 
-def test_exclude_terms_do_not_drop_unenriched_events(conn):
-    # inferred IS NULL must mean "judge by title", never "hide the event"
-    _add(conn, "Sommerfest im Park")  # no inferred at all
+def test_exclude_terms_do_not_drop_events_with_unknown_unrelated_facts(conn):
+    # Unknown non-mandatory estimates must mean "judge by title", never hide.
+    _add(conn, "Sommerfest im Park")
     _add(conn, "Techno Nacht")
     conn.commit()
     titles = _run(conn, _filters(exclude_terms=["techno"]))
@@ -170,6 +177,25 @@ def test_required_kid_friendly_is_set_logic(conn):
     titles = _run(conn, _filters(kid_friendly=True,
                                  required_attributes=["kid_friendly"]))
     assert titles == ["Kinderfest"]
+
+
+def test_corrupt_audience_boolean_fails_closed_without_query_error(conn):
+    ready_id = _add(conn, "Ready solo event")
+    corrupt_id = _add(conn, "Corrupt solo event")
+    conn.execute(
+        "UPDATE event SET inferred = jsonb_set("
+        "inferred, '{solo_friendly,value}', '\"definitely\"'::jsonb) "
+        "WHERE id = %s",
+        (corrupt_id,),
+    )
+    conn.commit()
+
+    titles = _run(conn, _filters(
+        solo_friendly=True, required_attributes=["solo_friendly"],
+    ))
+
+    assert titles == ["Ready solo event"]
+    assert ready_id != corrupt_id
 
 
 # --------------------------------------- soft: importance x certainty ranks

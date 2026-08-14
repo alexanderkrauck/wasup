@@ -172,6 +172,90 @@ def gather_stats(conn) -> dict:
         WHERE j.kind = 'verify_event'
         """
     ).fetchone()
+    audience_readiness = conn.execute(
+        """
+        WITH future_pending AS (
+            SELECT e.id, e.updated_at
+            FROM event e
+            JOIN occurrence o ON o.event_id = e.id
+            WHERE o.status = 'pending_enrichment'
+              AND coalesce(o.ends_at, o.starts_at) >= now()
+            GROUP BY e.id, e.updated_at
+        ),
+        future_scheduled AS (
+            SELECT DISTINCT e.id,
+                   coalesce(
+                       e.expected_gender_split BETWEEN 0 AND 1
+                       AND e.expected_gender_split_confidence > 0
+                       AND e.expected_gender_split_confidence <= 1,
+                       false
+                   ) AS gender_valid,
+                   coalesce(
+                       e.inferred->>'energy' IN ('low', 'medium', 'high')
+                       AND e.inferred #>>
+                           '{_audience_essentials,energy,value}' =
+                           e.inferred->>'energy'
+                       AND CASE WHEN jsonb_typeof(
+                           e.inferred #>
+                           '{_audience_essentials,energy,confidence}'
+                       ) = 'number' THEN
+                           (e.inferred #>>
+                               '{_audience_essentials,energy,confidence}'
+                           )::numeric > 0
+                           AND (e.inferred #>>
+                               '{_audience_essentials,energy,confidence}'
+                           )::numeric <= 1
+                       ELSE false END,
+                       false
+                   ) AS energy_valid,
+                   coalesce(
+                       jsonb_typeof(
+                           e.inferred #> '{solo_friendly,value}'
+                       ) = 'boolean'
+                       AND CASE WHEN jsonb_typeof(
+                           e.inferred #> '{solo_friendly,confidence}'
+                       ) = 'number' THEN
+                           (e.inferred #>>
+                               '{solo_friendly,confidence}'
+                           )::numeric > 0
+                           AND (e.inferred #>>
+                               '{solo_friendly,confidence}'
+                           )::numeric <= 1
+                       ELSE false END,
+                       false
+                   ) AS solo_valid
+            FROM event e
+            JOIN occurrence o ON o.event_id = e.id
+            WHERE o.status = 'scheduled'
+              AND coalesce(o.ends_at, o.starts_at) >= now()
+        )
+        SELECT
+            (SELECT count(*) FROM future_pending) AS pending_events,
+            (SELECT min(updated_at) FROM future_pending) AS oldest_pending,
+            (SELECT count(*) FROM future_pending p
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM jobs j
+                 WHERE j.kind = 'estimate_audience'
+                   AND j.status IN ('pending', 'running')
+                   AND coalesce(
+                       j.payload->'event_ids', '[]'::jsonb
+                   ) ? p.id::text
+             )) AS orphan_pending,
+            (SELECT count(*) FROM future_scheduled
+             WHERE NOT (gender_valid AND energy_valid AND solo_valid))
+                AS scheduled_violations,
+            (SELECT count(*) FROM future_scheduled WHERE NOT gender_valid)
+                AS gender_violations,
+            (SELECT count(*) FROM future_scheduled WHERE NOT energy_valid)
+                AS energy_violations,
+            (SELECT count(*) FROM future_scheduled WHERE NOT solo_valid)
+                AS solo_violations,
+            (SELECT count(*) FROM jobs
+             WHERE kind = 'estimate_audience' AND status = 'failed'
+               AND finished_at >= now() - interval '24 hours')
+                AS failed_24h
+        """
+    ).fetchone()
     return {
         "credit_parked": credit_parked,
         "openrouter_balance_usd": openrouter_balance(),
@@ -190,6 +274,7 @@ def gather_stats(conn) -> dict:
         "field_completeness": field_completeness,
         "hydration": hydration,
         "verification": verification,
+        "audience_readiness": audience_readiness,
     }
 
 
@@ -302,6 +387,43 @@ def render(stats: dict, now: datetime) -> str:
             lines.append(f"!!  {r['name']} ({r['status']}): "
                          f"{r['events']} events in canon")
         lines += ["!" * 60, ""]
+
+    audience = stats.get("audience_readiness") or {}
+    audience_pending = audience.get("pending_events") or 0
+    audience_oldest = audience.get("oldest_pending")
+    audience_orphans = audience.get("orphan_pending") or 0
+    audience_scheduled = audience.get("scheduled_violations") or 0
+    audience_failed = audience.get("failed_24h") or 0
+    if (
+        audience_pending
+        or audience_orphans
+        or audience_scheduled
+        or audience_failed
+    ):
+        oldest_age = (
+            f"; oldest {now - audience_oldest} ago"
+            if audience_oldest is not None else ""
+        )
+        lines += [
+            "!" * 60,
+            "!! AUDIENCE READINESS ALERT - PUBLICATION GATE NEEDS ATTENTION",
+            f"!!  pending (not public): {audience_pending}{oldest_age}",
+            "!!  pending without active estimate_audience job: "
+            f"{audience_orphans}",
+            f"!!  SCHEDULED INVARIANT VIOLATIONS: {audience_scheduled} "
+            f"(gender={audience.get('gender_violations') or 0}, "
+            f"energy={audience.get('energy_violations') or 0}, "
+            f"solo={audience.get('solo_violations') or 0})",
+            "!!  failed estimate_audience jobs (24h): "
+            f"{audience_failed}",
+            "!" * 60,
+            "",
+        ]
+    else:
+        lines.append(
+            "audience publication readiness: healthy "
+            "(0 pending, 0 scheduled violations, 0 failed jobs in 24h)"
+        )
 
     lines.append("crawls (24h):")
     if stats["crawls"]:

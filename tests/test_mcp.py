@@ -68,7 +68,7 @@ def _call_result(client, tool, arguments):
 
 def _mark_sex_service(conn, event_id, value=True):
     conn.execute(
-        "UPDATE event SET inferred = %s WHERE id = %s",
+        "UPDATE event SET inferred = inferred || %s WHERE id = %s",
         (Jsonb({
             "sex_service_context": {
                 "value": value, "confidence": 0.8,
@@ -476,6 +476,54 @@ def test_calendar_coverage_does_not_reveal_safety_suppressed_title(conn, client)
     }]
 
 
+def test_mcp_tools_never_expose_audience_unready_events(conn, client):
+    event_id = _add_event(
+        conn, "Audience Private Run", starts=NOW + timedelta(days=1),
+        lat=48.30, lon=14.29, category=["sport"],
+    )
+    occurrence_id = conn.execute(
+        "SELECT id FROM occurrence WHERE event_id = %s", (event_id,)
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE event SET inferred = inferred - '_audience_essentials' "
+        "WHERE id = %s",
+        (event_id,),
+    )
+    conn.commit()
+
+    discovered = _call(client, "search_events", {
+        "filters": {
+            "name": "Audience Private Run", "min_confidence": 0,
+            "radius": "any",
+        },
+        "limit": 10,
+    })
+    assert discovered["occurrences"] == []
+    assert _call(client, "search", {
+        "query": "Audience Private Run",
+    })["results"] == []
+    for tool, arguments in (
+        ("get_event", {"event_id": str(event_id)}),
+        ("fetch", {"id": str(event_id)}),
+    ):
+        body = _rpc(client, "tools/call", {
+            "name": tool, "arguments": arguments,
+        })
+        assert body["result"]["isError"] is True
+
+    calendar = _call(client, "get_calendar_link", {
+        "filters": {"categories": ["sport"]},
+        "accepted_occurrence_ids": [str(occurrence_id)],
+    })
+    assert calendar["ics_url"] is None
+    assert calendar["coverage"] == [{
+        "occurrence_id": str(occurrence_id),
+        "title": None,
+        "included": False,
+        "reasons": ["audience_ready"],
+    }]
+
+
 def test_calendar_coverage_caps_accepted_occurrence_ids(client):
     body = _rpc(client, "tools/call", {
         "name": "get_calendar_link",
@@ -569,7 +617,7 @@ def test_adult_context_is_default_denied_but_explicitly_available(conn, client):
         category=["sport"],
     )
     conn.execute(
-        "UPDATE event SET venue_id = %s, inferred = NULL WHERE id = %s",
+        "UPDATE event SET venue_id = %s WHERE id = %s",
         (venue_id, venue_only_id),
     )
     conn.commit()
@@ -628,13 +676,14 @@ def test_safety_exclusion_does_not_become_a_hidden_ranking_preference(
         category=["community"],
     )
     conn.execute(
-        "UPDATE event SET confidence = 0.4, inferred = %s WHERE id = %s",
+        "UPDATE event SET confidence = 0.4, inferred = inferred || %s "
+        "WHERE id = %s",
         (Jsonb({"sex_service_context": {
             "value": False, "confidence": 0.8, "evidence": "ordinary venue",
         }}), known_safe),
     )
     conn.execute(
-        "UPDATE event SET confidence = 0.95, inferred = NULL WHERE id = %s",
+        "UPDATE event SET confidence = 0.95 WHERE id = %s",
         (unknown,),
     )
     conn.commit()
@@ -660,23 +709,17 @@ def test_standard_search_is_hard_relevant_future_and_distinct(conn, client):
         "INSERT INTO occurrence (event_id, starts_at) VALUES (%s, %s)",
         (future_id, NOW + timedelta(days=4)),
     )
-    ongoing_id = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'one_off', 'Ongoing Run Exhibition', '{sport}', 0.9, 'confirmed')",
-        (ongoing_id,),
+    ongoing_id = _add_event(
+        conn, "Ongoing Run Exhibition", starts=NOW - timedelta(days=2),
+        category=["sport"],
     )
     conn.execute(
-        "INSERT INTO occurrence (event_id, starts_at, ends_at) VALUES (%s, %s, %s)",
-        (ongoing_id, NOW - timedelta(days=2), NOW + timedelta(days=2)),
+        "UPDATE occurrence SET ends_at = %s WHERE event_id = %s",
+        (NOW + timedelta(days=2), ongoing_id),
     )
     polluted_id = _add_event(
         conn, "Football Practice", starts=NOW + timedelta(days=2),
         lat=48.30, lon=14.29, category=["sport"],
-    )
-    conn.execute(
-        "UPDATE event SET inferred = %s WHERE id = %s",
-        (Jsonb({}), polluted_id),
     )
     conn.execute(
         "INSERT INTO event_tag (event_id, name, confidence, origins) "
@@ -765,15 +808,13 @@ def test_exact_entity_search_finds_and_labels_tentative_alphanumeric_names(
 
 
 def test_search_events_places_in_window_starts_before_ongoing(conn, client):
-    ongoing_id = uuid.uuid4()
-    conn.execute(
-        "INSERT INTO event (id, kind, title, category, confidence, status) "
-        "VALUES (%s, 'one_off', 'Long Exhibition', '{art}', 0.9, 'confirmed')",
-        (ongoing_id,),
+    ongoing_id = _add_event(
+        conn, "Long Exhibition", starts=NOW - timedelta(days=5),
+        category=["art"],
     )
     conn.execute(
-        "INSERT INTO occurrence (event_id, starts_at, ends_at) VALUES (%s, %s, %s)",
-        (ongoing_id, NOW - timedelta(days=5), NOW + timedelta(days=5)),
+        "UPDATE occurrence SET ends_at = %s WHERE event_id = %s",
+        (NOW + timedelta(days=5), ongoing_id),
     )
     conn.commit()
     out = _call(client, "search_events", {

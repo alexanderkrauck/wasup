@@ -29,7 +29,7 @@ from eventindex.api.confidence import (
     DEFAULT_MIN_CONFIDENCE,
     EFFECTIVE_CONFIDENCE_SQL,
 )
-from eventindex.api.search import QueryBody, VIENNA
+from eventindex.api.search import PUBLIC_AUDIENCE_READY_SQL, QueryBody, VIENNA
 
 MAX_LIMIT = 200
 
@@ -421,6 +421,7 @@ def _occurrence_filter_parts(
     gender_split_min: float | None = None,
     gender_split_max: float | None = None,
     energy: Literal["low", "medium", "high"] | None = None,
+    gender_split_band: Literal["low", "balanced", "high"] | None = None,
 ) -> tuple[list[tuple[str, str]], dict]:
     """Labelled shared filters for listings, feeds, and feed audits."""
     from eventindex.api.search import DEFAULT_RADIUS_KM, LINZ_CENTER, _lat_lon
@@ -430,6 +431,7 @@ def _occurrence_filter_parts(
     parts = [
         ("date_window", "coalesce(o.ends_at, o.starts_at) >= %(from)s"),
         ("not_scheduled", "o.status = 'scheduled'"),
+        ("audience_ready", PUBLIC_AUDIENCE_READY_SQL),
     ]
     params: dict = {"from": from_ or datetime.now(timezone.utc)}
 
@@ -529,8 +531,10 @@ def _occurrence_filter_parts(
         parts.append(("stated_price", "e.price_min = 0"))
     if solo_friendly is not None:
         parts.append(("solo_friendly", (
-            "(e.inferred->'solo_friendly'->>'value')::bool = "
-            "%(solo_friendly)s"
+            "CASE WHEN jsonb_typeof(e.inferred->'solo_friendly'->'value') "
+            "= 'boolean' THEN "
+            "(e.inferred->'solo_friendly'->>'value')::boolean "
+            "ELSE NULL END = %(solo_friendly)s"
         )))
         params["solo_friendly"] = solo_friendly
     if (
@@ -554,12 +558,22 @@ def _occurrence_filter_parts(
     if energy is not None:
         parts.append(("energy", "e.inferred->>'energy' = %(energy)s"))
         params["energy"] = energy
+    if gender_split_band is not None:
+        band_sql = {
+            "low": "e.expected_gender_split < 0.4",
+            "balanced": "e.expected_gender_split BETWEEN 0.4 AND 0.6",
+            "high": "e.expected_gender_split > 0.6",
+        }
+        parts.append(("gender_split", band_sql[gender_split_band]))
     if exclude_sex_service_context:
         # Keep unknown classifications: the MCP safety policy suppresses
         # only events positively identified as commercial sex services.
         parts.append(("sex_service_safety", (
             "coalesce(v.sex_service, false) IS DISTINCT FROM TRUE AND "
-            "(e.inferred->'sex_service_context'->>'value')::bool "
+            "CASE WHEN jsonb_typeof("
+            "e.inferred->'sex_service_context'->'value') = 'boolean' "
+            "THEN (e.inferred->'sex_service_context'->>'value')::boolean "
+            "ELSE NULL END "
             "IS DISTINCT FROM TRUE"
         )))
     return parts, params
@@ -574,12 +588,14 @@ def _occurrence_filters(
     gender_split_min: float | None = None,
     gender_split_max: float | None = None,
     energy: Literal["low", "medium", "high"] | None = None,
+    gender_split_band: Literal["low", "balanced", "high"] | None = None,
 ) -> tuple[list[str], dict]:
-    """The exact filter set shared by occurrence listings and summaries."""
+    """The exact public-ready set shared by listings and summaries."""
     parts, params = _occurrence_filter_parts(
         from_, to, near, radius, bbox, category, min_confidence,
         name, organizer, venue, source, exclude_sex_service_context,
         is_free, solo_friendly, gender_split_min, gender_split_max, energy,
+        gender_split_band,
     )
     return [condition for _, condition in parts], params
 
@@ -595,6 +611,8 @@ def occurrence_summary(
     gender_split_max: float | None = Query(None, ge=0, le=1),
     energy: Literal["low", "medium", "high"] | None = Query(
         None, description="hard filter on the labeled energy estimate"),
+    gender_split_band: Literal["low", "balanced", "high"] | None = Query(
+        None, description="disjoint gender estimate band: <0.4, 0.4-0.6, >0.6"),
 ):
     """Occurrence counts for the GUI's fixed Vienna calendar ranges."""
     local_now = datetime.now(VIENNA)
@@ -623,6 +641,7 @@ def occurrence_summary(
         gender_split_min=gender_split_min,
         gender_split_max=gender_split_max,
         energy=energy,
+        gender_split_band=gender_split_band,
     )
     for name, window in ranges.items():
         params[f"{name}_from"] = window["from"]
@@ -689,6 +708,8 @@ def occurrences(
     gender_split_max: float | None = Query(None, ge=0, le=1),
     energy: Literal["low", "medium", "high"] | None = Query(
         None, description="hard filter on the labeled energy estimate"),
+    gender_split_band: Literal["low", "balanced", "high"] | None = Query(
+        None, description="disjoint gender estimate band: <0.4, 0.4-0.6, >0.6"),
     limit: int = Query(50, le=MAX_LIMIT, ge=1),
     cursor: str | None = None,
 ):
@@ -703,6 +724,7 @@ def occurrences(
         gender_split_min=gender_split_min,
         gender_split_max=gender_split_max,
         energy=energy,
+        gender_split_band=gender_split_band,
     )
     desired_tags = [tag.strip() for tag in (tags or "").split(",") if tag.strip()]
     if min_tag_concept_match is not None and not desired_tags:
@@ -734,13 +756,25 @@ def occurrences(
                e.kind, e.organizer, e.status AS event_status,
                e.booking_url, e.registration_required,
                e.inferred, e.field_provenance,
-               (e.inferred->'solo_friendly'->>'value')::bool
-                   AS solo_friendly_estimate,
-               (e.inferred->'solo_friendly'->>'confidence')::float
-                   AS solo_friendly_confidence,
+               CASE WHEN jsonb_typeof(
+                    e.inferred->'solo_friendly'->'value'
+               ) = 'boolean'
+                    THEN (e.inferred->'solo_friendly'->>'value')::boolean
+                    ELSE NULL END AS solo_friendly_estimate,
+               CASE WHEN jsonb_typeof(
+                    e.inferred->'solo_friendly'->'confidence'
+               ) = 'number'
+                    THEN (e.inferred->'solo_friendly'->>'confidence')::float
+                    ELSE NULL END AS solo_friendly_confidence,
                e.expected_gender_split AS gender_split_estimate,
                e.expected_gender_split_confidence AS gender_split_confidence,
                e.inferred->>'energy' AS energy_estimate,
+               CASE WHEN jsonb_typeof(
+                    e.inferred->'_audience_essentials'->'energy'->'confidence'
+               ) = 'number'
+                    THEN (e.inferred->'_audience_essentials'->'energy'
+                       ->>'confidence')::float
+                    ELSE NULL END AS energy_confidence,
                e.expected_attendance, e.expected_attendance_confidence,
                ({_PRICE_SOURCE_SQL}) AS price_source_url,
                v.name AS venue_name, v.address AS venue_address,
@@ -819,8 +853,7 @@ def occurrences(
                 },
                 "energy": {
                     "value": row.pop("energy_estimate"),
-                    # Legacy energy values have no per-event confidence.
-                    "confidence": None,
+                    "confidence": row.pop("energy_confidence"),
                 },
             }
         rows = [_attach_public_price_and_scale(row) for row in rows]
@@ -1011,7 +1044,7 @@ def _feed_coverage(occurrence_ids: list[UUID], **feed_options) -> list[dict]:
             ORDER BY o.starts_at, o.id
             LIMIT %(limit)s
         )
-        SELECT o.id, o.event_id, e.title,
+        SELECT o.id, o.event_id, o.status AS occurrence_status, e.title,
                (included.id IS NOT NULL) AS included,
                {checks_sql}
         FROM occurrence o JOIN event e ON e.id = o.event_id
@@ -1062,10 +1095,15 @@ def _feed_coverage(occurrence_ids: list[UUID], **feed_options) -> list[dict]:
         coverage.append({
             "occurrence_id": occurrence_id,
             # The audit accepts caller-supplied UUIDs. Do not turn that into
-            # a title lookup for events the mandatory MCP safety gate would
-            # otherwise suppress.
+            # a title lookup for events a mandatory publication/safety gate
+            # would otherwise suppress.
             "title": (
-                None if "sex_service_safety" in reasons else row["title"]
+                None
+                if (
+                    {"audience_ready", "sex_service_safety"} & set(reasons)
+                    or row["occurrence_status"] == "pending_enrichment"
+                )
+                else row["title"]
             ),
             "included": bool(row["included"]),
             "reasons": reasons,
@@ -1380,6 +1418,8 @@ def _safe_estimates(inferred: dict | None) -> dict:
     for name, value in (inferred or {}).items():
         if name in {"price", "event_scale", "stated_price"}:
             continue
+        if name.startswith("_"):
+            continue
         if isinstance(value, dict):
             safe[name] = {
                 "value": value.get("value"),
@@ -1415,6 +1455,12 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
                    ({_PROVENANCE_SQL}) AS provenance_summary
             FROM event e LEFT JOIN venue v ON v.id = e.venue_id
             WHERE e.id = %s
+              AND {PUBLIC_AUDIENCE_READY_SQL}
+              AND EXISTS (
+                  SELECT 1 FROM occurrence public_o
+                  WHERE public_o.event_id = e.id
+                    AND public_o.status = 'scheduled'
+              )
             """,
             (event_id,),
         ).fetchone()
@@ -1432,6 +1478,17 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
         ):
             row.pop(key, None)
         row["estimates"] = _safe_estimates(inferred)
+        row["estimates"]["gender_split"] = {
+            "value": row.get("expected_gender_split"),
+            "confidence": row.get("expected_gender_split_confidence"),
+        }
+        energy_metadata = (
+            inferred.get("_audience_essentials", {}).get("energy", {})
+        )
+        row["estimates"]["energy"] = {
+            "value": inferred.get("energy"),
+            "confidence": energy_metadata.get("confidence"),
+        }
         row["tags"] = tag_store.public_for_event(conn, event_id)
         if row.get("expected_age_range") is not None:
             row["expected_age_range"] = str(row["expected_age_range"])
@@ -1439,6 +1496,7 @@ def _event_detail(event_id: UUID, *, include_policy_marker: bool = False) -> dic
             "SELECT id, starts_at, ends_at, status, projected, availability, "
             "waitlist_url, fullness_estimate, last_confirmed_at, time_unknown "
             "FROM occurrence WHERE event_id = %s "
+            "AND status <> 'pending_enrichment' "
             "ORDER BY starts_at",
             (event_id,),
         ).fetchall()
@@ -1514,10 +1572,17 @@ def report(body: Report):
 def changes(since: str | None = None, limit: int = Query(100, le=500, ge=1)):
     """Delta stream for downstream consumers/agents (§9): keyset cursor over
     event.updated_at."""
-    conditions, params = ["true"], {"limit": limit}
+    conditions, params = [
+        PUBLIC_AUDIENCE_READY_SQL,
+        "EXISTS (SELECT 1 FROM occurrence public_o "
+        "WHERE public_o.event_id = e.id "
+        "AND public_o.status = 'scheduled')",
+    ], {"limit": limit}
     if since is not None:
         after_ts, after_id = _parse_cursor(since)
-        conditions = ["(e.updated_at, e.id) > (%(after_ts)s, %(after_id)s)"]
+        conditions.append(
+            "(e.updated_at, e.id) > (%(after_ts)s, %(after_id)s)"
+        )
         params.update(after_ts=after_ts, after_id=after_id)
     with db.connect() as conn:
         rows = conn.execute(

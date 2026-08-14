@@ -404,7 +404,7 @@ def test_audience_handler_rechecks_content_after_model_call(conn, monkeypatch):
     )
     starts = conn.execute(
         "INSERT INTO occurrence (event_id, starts_at, status) "
-        "VALUES (%s, now() + interval '1 day', 'pending_enrichment') "
+        "VALUES (%s, now() + interval '1 day', 'scheduled') "
         "RETURNING starts_at",
         (event_id,),
     ).fetchone()["starts_at"]
@@ -523,6 +523,50 @@ def test_audience_handler_seeds_confidence_from_full_cache(conn):
         "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),
     ).fetchone()["status"] == "scheduled"
     assert jobs == []
+
+
+def test_full_enrich_gates_content_changed_during_model_call(conn, monkeypatch):
+    import uuid
+
+    from eventindex import enrich as audience
+
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title, description, category) "
+        "VALUES (%s, 'event', 'Vorher', 'Alter Inhalt', '{culture}')",
+        (event_id,),
+    )
+    starts = conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at, status) "
+        "VALUES (%s, now() + interval '1 day', 'scheduled') "
+        "RETURNING starts_at",
+        (event_id,),
+    ).fetchone()["starts_at"]
+
+    def changed_during_call(tx, row, job_id=None):
+        tx.execute("UPDATE event SET title = 'Nachher' WHERE id = %s", (event_id,))
+        return {}
+
+    monkeypatch.setattr(audience, "enrich_event", changed_during_call)
+    jobs = handlers.enrich(
+        {
+            "id": uuid.uuid4(),
+            "kind": "enrich",
+            "payload": {"event_id": str(event_id)},
+        },
+        conn,
+    )
+
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),
+    ).fetchone()["status"] == "pending_enrichment"
+    assert jobs == [{
+        "kind": "estimate_audience",
+        "payload": {
+            "event_ids": [str(event_id)],
+            "next_start": starts.isoformat(),
+        },
+    }]
 
 
 def test_resolve_queues_every_pending_enrichment_and_tag_embedding(conn, monkeypatch):

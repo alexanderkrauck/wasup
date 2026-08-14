@@ -1,5 +1,8 @@
 import uuid
+from threading import Event, Thread
 
+import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from eventindex.jobs.schedule import (
@@ -97,6 +100,126 @@ def test_audience_sweep_gates_and_batches_every_incomplete_event(conn):
         "SELECT status FROM occurrence WHERE event_id = %s", (ready_id,)
     ).fetchone()["status"] == "scheduled"
     assert enqueue_audience_essentials(conn) == 0
+
+
+def test_audience_sweep_gates_event_even_when_repair_is_already_queued(conn):
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title) VALUES (%s, 'event', 'Queued')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '1 day')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO jobs (kind, payload) VALUES ('estimate_audience', %s)",
+        (Jsonb({"event_ids": [str(event_id)]}),),
+    )
+
+    assert enqueue_audience_essentials(conn) == 0
+    assert conn.execute(
+        "SELECT status FROM occurrence WHERE event_id = %s", (event_id,),
+    ).fetchone()["status"] == "pending_enrichment"
+    assert conn.execute(
+        "SELECT count(*) AS n FROM jobs WHERE kind = 'estimate_audience'"
+    ).fetchone()["n"] == 1
+
+
+def test_audience_sweep_serializes_with_running_estimate(
+    conn, test_db_url,
+):
+    event_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO event (id, kind, title) VALUES (%s, 'event', 'Racing')",
+        (event_id,),
+    )
+    conn.execute(
+        "INSERT INTO occurrence (event_id, starts_at) "
+        "VALUES (%s, now() + interval '1 day')",
+        (event_id,),
+    )
+    conn.commit()
+    estimate_has_lock = Event()
+    allow_estimate_commit = Event()
+    sweep_started = Event()
+    errors = []
+    result = {}
+
+    def finish_estimate():
+        try:
+            with psycopg.connect(
+                test_db_url, row_factory=dict_row,
+            ) as estimate_conn:
+                with estimate_conn.transaction():
+                    estimate_conn.execute(
+                        "SELECT id FROM event WHERE id = %s FOR UPDATE",
+                        (event_id,),
+                    )
+                    estimate_conn.execute(
+                        "UPDATE event SET expected_gender_split = 0.5, "
+                        "expected_gender_split_confidence = 0.5, inferred = %s "
+                        "WHERE id = %s",
+                        (Jsonb({
+                            "energy": "medium",
+                            "_audience_essentials": {"energy": {
+                                "value": "medium", "confidence": 0.5,
+                            }},
+                            "solo_friendly": {
+                                "value": True, "confidence": 0.5,
+                            },
+                        }), event_id),
+                    )
+                    estimate_has_lock.set()
+                    assert allow_estimate_commit.wait(timeout=5)
+                    # This mirrors the handler: before the scheduler can gate,
+                    # release is legitimately a no-op on a scheduled row.
+                    estimate_conn.execute(
+                        "UPDATE occurrence SET status = 'scheduled' "
+                        "WHERE event_id = %s "
+                        "AND status = 'pending_enrichment'",
+                        (event_id,),
+                    )
+        except BaseException as exc:  # surface thread failures in the test
+            errors.append(exc)
+
+    def sweep():
+        try:
+            with psycopg.connect(
+                test_db_url, row_factory=dict_row,
+            ) as sweep_conn:
+                sweep_started.set()
+                with sweep_conn.transaction():
+                    result["enqueued"] = enqueue_audience_essentials(
+                        sweep_conn
+                    )
+        except BaseException as exc:  # surface thread failures in the test
+            errors.append(exc)
+
+    estimate_thread = Thread(target=finish_estimate)
+    estimate_thread.start()
+    assert estimate_has_lock.wait(timeout=5)
+    sweep_thread = Thread(target=sweep)
+    sweep_thread.start()
+    assert sweep_started.wait(timeout=5)
+    sweep_thread.join(timeout=0.2)
+    assert sweep_thread.is_alive(), "scheduler must wait on the event lock"
+    allow_estimate_commit.set()
+    estimate_thread.join(timeout=5)
+    sweep_thread.join(timeout=5)
+
+    assert not estimate_thread.is_alive()
+    assert not sweep_thread.is_alive()
+    assert errors == []
+    assert result["enqueued"] == 0
+    row = conn.execute(
+        "SELECT o.status, e.expected_gender_split "
+        "FROM occurrence o JOIN event e ON e.id = o.event_id "
+        "WHERE e.id = %s",
+        (event_id,),
+    ).fetchone()
+    assert row == {"status": "scheduled", "expected_gender_split": 0.5}
 
 
 def test_audience_sweep_prioritizes_future_before_history(conn, monkeypatch):

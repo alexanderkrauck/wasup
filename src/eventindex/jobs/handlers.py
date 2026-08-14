@@ -443,7 +443,7 @@ def estimate_audience(job: dict, tx) -> list[dict]:
         "SELECT e.id, e.title, e.description, e.category, e.price_min, "
         "e.price_max, v.name AS venue_name, v.sex_service AS venue_sex_service "
         "FROM event e LEFT JOIN venue v ON v.id = e.venue_id "
-        "WHERE e.id = ANY(%s::uuid[]) FOR UPDATE OF e",
+        "WHERE e.id = ANY(%s::uuid[]) ORDER BY e.id FOR UPDATE OF e",
         ([row["id"] for row in rows],),
     ).fetchall()
     current_by_id = {str(row["id"]): row for row in current_rows}

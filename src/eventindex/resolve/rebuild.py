@@ -1599,6 +1599,13 @@ def rebuild(conn, now: datetime | None = None) -> dict:
         groups = _merge_published_twins(conn, groups, holidays, now)
         _assign_identity(conn, groups)
 
+        # Canon writers share event -> occurrence lock order with audience
+        # publication gating.  Lock the small canonical event set before the
+        # FK-required occurrence-first delete so the two transactions cannot
+        # deadlock when the scheduler runs during a rebuild.
+        conn.execute(
+            "SELECT id FROM event ORDER BY id FOR UPDATE"
+        ).fetchall()
         conn.execute("DELETE FROM occurrence")
         conn.execute("DELETE FROM event")
 

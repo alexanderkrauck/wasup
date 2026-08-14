@@ -22,6 +22,34 @@ DORMANT_YIELD_EMA = 0.05
 MAX_ENQUEUE_PER_RUN = 100  # the envelope: least valuable work falls off first
 ENRICH_BATCH = 200
 
+_AUDIENCE_INCOMPLETE_SQL = """
+(
+    e.expected_gender_split IS NULL
+    OR NOT (e.expected_gender_split BETWEEN 0 AND 1)
+    OR coalesce(e.expected_gender_split_confidence, 0) <= 0
+    OR e.expected_gender_split_confidence > 1
+    OR coalesce(e.inferred->>'energy', '') NOT IN ('low', 'medium', 'high')
+    OR e.inferred #>> '{_audience_essentials,energy,value}'
+       IS DISTINCT FROM e.inferred->>'energy'
+    OR CASE WHEN jsonb_typeof(
+         e.inferred #> '{_audience_essentials,energy,confidence}'
+       ) = 'number' THEN NOT (
+         (e.inferred #>>
+           '{_audience_essentials,energy,confidence}')::numeric > 0
+         AND (e.inferred #>>
+           '{_audience_essentials,energy,confidence}')::numeric <= 1
+       ) ELSE true END
+    OR jsonb_typeof(e.inferred #> '{solo_friendly,value}')
+       IS DISTINCT FROM 'boolean'
+    OR CASE WHEN jsonb_typeof(
+         e.inferred #> '{solo_friendly,confidence}'
+       ) = 'number' THEN NOT (
+         (e.inferred #>> '{solo_friendly,confidence}')::numeric > 0
+         AND (e.inferred #>> '{solo_friendly,confidence}')::numeric <= 1
+       ) ELSE true END
+)
+"""
+
 
 def enqueue_audience_essentials(conn) -> int:
     """Fail closed and repair every public event missing exhaustive facets.
@@ -31,8 +59,29 @@ def enqueue_audience_essentials(conn) -> int:
     still-visible occurrence while its mandatory estimate waits in the queue.
     """
 
+    gated_event_ids = [
+        row["id"] for row in conn.execute(
+            f"""
+            SELECT e.id
+            FROM event e
+            WHERE {_AUDIENCE_INCOMPLETE_SQL}
+              AND EXISTS (
+                SELECT 1 FROM occurrence o
+                WHERE o.event_id = e.id AND o.status = 'scheduled'
+              )
+            ORDER BY e.id
+            FOR UPDATE OF e
+            """
+        ).fetchall()
+    ]
+    if gated_event_ids:
+        conn.execute(
+            "UPDATE occurrence SET status = 'pending_enrichment' "
+            "WHERE event_id = ANY(%s) AND status = 'scheduled'",
+            (gated_event_ids,),
+        )
     rows = conn.execute(
-        """
+        f"""
         SELECT e.id,
                coalesce(
                  min(o.starts_at) FILTER (
@@ -43,34 +92,7 @@ def enqueue_audience_essentials(conn) -> int:
         FROM event e
         JOIN occurrence o ON o.event_id = e.id
         WHERE o.status IN ('scheduled', 'pending_enrichment')
-          AND (
-            e.expected_gender_split IS NULL
-            OR NOT (e.expected_gender_split BETWEEN 0 AND 1)
-            OR coalesce(e.expected_gender_split_confidence, 0) <= 0
-            OR e.expected_gender_split_confidence > 1
-            OR coalesce(e.inferred->>'energy', '')
-               NOT IN ('low', 'medium', 'high')
-            OR e.inferred #>> '{_audience_essentials,energy,value}'
-               IS DISTINCT FROM e.inferred->>'energy'
-            OR CASE WHEN jsonb_typeof(
-                 e.inferred #> '{_audience_essentials,energy,confidence}'
-               ) = 'number' THEN NOT (
-                 (e.inferred #>>
-                   '{_audience_essentials,energy,confidence}')::numeric
-                 > 0
-                 AND (e.inferred #>>
-                   '{_audience_essentials,energy,confidence}')::numeric
-                 <= 1
-               ) ELSE true END
-            OR jsonb_typeof(e.inferred #> '{solo_friendly,value}')
-               IS DISTINCT FROM 'boolean'
-            OR CASE WHEN jsonb_typeof(
-                 e.inferred #> '{solo_friendly,confidence}'
-               ) = 'number' THEN NOT (
-                 (e.inferred #>> '{solo_friendly,confidence}')::numeric > 0
-                 AND (e.inferred #>> '{solo_friendly,confidence}')::numeric <= 1
-               ) ELSE true END
-          )
+          AND {_AUDIENCE_INCOMPLETE_SQL}
           AND NOT EXISTS (
             SELECT 1 FROM jobs j
             WHERE j.kind = 'estimate_audience'
@@ -85,12 +107,6 @@ def enqueue_audience_essentials(conn) -> int:
     ).fetchall()
     if not rows:
         return 0
-    event_ids = [row["id"] for row in rows]
-    conn.execute(
-        "UPDATE occurrence SET status = 'pending_enrichment' "
-        "WHERE event_id = ANY(%s) AND status = 'scheduled'",
-        (event_ids,),
-    )
     for offset in range(0, len(rows), config.AUDIENCE_ESSENTIALS_BATCH_SIZE):
         batch = rows[
             offset:offset

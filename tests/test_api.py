@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from eventindex import config
 from eventindex.api.app import app
 
 NOW = datetime.now(timezone.utc)
@@ -116,6 +117,205 @@ def test_category_filter_never_matches_unknown(client):
     assert "Nearby Concert" in titles
 
 
+def test_occurrence_summary_uses_vienna_calendar_ranges_and_listing_policy(
+    conn, client, monkeypatch,
+):
+    from eventindex.api import app as app_mod
+
+    vienna = ZoneInfo("Europe/Vienna")
+    fixed_now = datetime(2026, 8, 12, 14, 30, tzinfo=vienna)  # Wednesday
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                fixed_now.replace(tzinfo=None)
+                if tz is None else fixed_now.astimezone(tz)
+            )
+
+    monkeypatch.setattr(app_mod, "datetime", FrozenDateTime)
+
+    def local(day, hour=12, minute=0):
+        return datetime(2026, 8, day, hour, minute, tzinfo=vienna)
+
+    def add(title, starts, *, ends=None, lat=48.3069, lon=14.2858):
+        event_id = _add_event(
+            conn, title, starts=starts, lat=lat, lon=lon,
+            category=["culture"],
+        )
+        if ends is not None:
+            conn.execute(
+                "UPDATE occurrence SET ends_at = %s WHERE event_id = %s",
+                (ends, event_id),
+            )
+        return event_id
+
+    add("Today boundary", local(12, 0))
+    add("Monday", local(10))
+    add("Sunday", local(16, 23, 59))
+    add("Next Monday boundary", local(17, 0))
+    add(
+        "Last day of 30", datetime(2026, 9, 10, 23, 59, tzinfo=vienna),
+    )
+    add(
+        "Outside 30", datetime(2026, 9, 11, 0, 0, tzinfo=vienna),
+    )
+    add("Ongoing", local(1), ends=local(12, 15))
+    add("Ended before week", local(1), ends=local(9, 23, 59))
+    moved = add("Moved", local(12, 16))
+    conn.execute(
+        "UPDATE occurrence SET status = 'moved' WHERE event_id = %s", (moved,),
+    )
+    low_confidence = add("Low confidence", local(12, 17))
+    conn.execute(
+        "UPDATE event SET confidence = 0.39 WHERE id = %s", (low_confidence,),
+    )
+    add("Far away", local(12, 18), lat=48.15, lon=14.03)
+    add("Unknown location", local(12, 19), lat=None, lon=None)
+    conn.commit()
+
+    response = client.get(
+        "/v1/occurrences/summary", params={"category": "culture"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["timezone"] == "Europe/Vienna"
+    assert datetime.fromisoformat(body["as_of"]) == fixed_now
+    assert {
+        name: window["count"] for name, window in body["ranges"].items()
+    } == {"today": 3, "this_week": 5, "next_30_days": 6}
+
+    expected = {
+        "today": (
+            local(12, 0),
+            datetime(2026, 8, 12, 23, 59, 59, 999999, tzinfo=vienna),
+        ),
+        "this_week": (
+            local(10, 0),
+            datetime(2026, 8, 16, 23, 59, 59, 999999, tzinfo=vienna),
+        ),
+        "next_30_days": (
+            local(12, 0),
+            datetime(2026, 9, 10, 23, 59, 59, 999999, tzinfo=vienna),
+        ),
+    }
+    for name, (from_, to) in expected.items():
+        assert datetime.fromisoformat(body["ranges"][name]["from"]) == from_
+        assert datetime.fromisoformat(body["ranges"][name]["to"]) == to
+
+
+def test_occurrence_summary_documents_only_the_real_category_filter(client):
+    operation = client.get("/openapi.json").json()["paths"][
+        "/v1/occurrences/summary"
+    ]["get"]
+    assert [parameter["name"] for parameter in operation["parameters"]] == [
+        "category"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("local_now", "day_hours"),
+    [
+        (datetime(2026, 3, 29, 12, tzinfo=ZoneInfo("Europe/Vienna")), 23),
+        (datetime(2026, 10, 25, 12, tzinfo=ZoneInfo("Europe/Vienna")), 25),
+    ],
+)
+def test_occurrence_summary_keeps_vienna_midnights_across_dst(
+    client, monkeypatch, local_now, day_hours,
+):
+    from eventindex.api import app as app_mod
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return local_now.replace(tzinfo=None) if tz is None else local_now.astimezone(tz)
+
+    monkeypatch.setattr(app_mod, "datetime", FrozenDateTime)
+    today = client.get("/v1/occurrences/summary").json()["ranges"]["today"]
+    start = datetime.fromisoformat(today["from"])
+    exclusive_end = datetime.fromisoformat(today["to"]) + timedelta(microseconds=1)
+
+    assert (start.hour, start.minute, exclusive_end.hour, exclusive_end.minute) == (
+        0, 0, 0, 0,
+    )
+    assert (exclusive_end.astimezone(timezone.utc) - start.astimezone(timezone.utc)) == (
+        timedelta(hours=day_hours)
+    )
+
+
+def test_occurrence_summary_is_exact_beyond_one_listing_page(conn, client):
+    vienna = ZoneInfo("Europe/Vienna")
+    starts = datetime.now(vienna).replace(hour=12, minute=0, second=0, microsecond=0)
+    for index in range(205):
+        _add_event(
+            conn, f"Tech Termin {index:03d}", starts=starts,
+            lat=48.3069, lon=14.2858, category=["tech"],
+        )
+    conn.commit()
+
+    summary = client.get(
+        "/v1/occurrences/summary", params={"category": "tech"},
+    ).json()["ranges"]["today"]
+    seen = []
+    cursor = None
+    while True:
+        params = {
+            "from": summary["from"], "to": summary["to"],
+            "category": "tech", "limit": 200,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = client.get("/v1/occurrences", params=params).json()
+        seen.extend(row["id"] for row in body["occurrences"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    assert summary["count"] == len(seen) == len(set(seen)) == 205
+
+
+def test_calendar_gui_is_browse_first_and_uses_only_real_query_surfaces(client):
+    response = client.get("/calendar")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    html = response.text
+
+    assert "{categories_json}" not in html
+    assert 'lang="de"' in html
+    assert '/v1/occurrences/summary' in html
+    assert '/v1/occurrences?' in html
+    assert '/v1/feed.ics?' in html
+    assert 'data-window="today"' in html
+    assert 'data-window="this_week"' in html
+    assert 'data-window="next_30_days"' in html
+    assert 'id="category"' in html and 'id="from"' in html
+    assert 'aria-live="polite"' in html
+    assert "prefers-reduced-motion" in html
+    assert "innerHTML" not in html
+    for category in config.CATEGORIES:
+        assert f'"{category}"' in html
+
+    # Complex intent belongs to Wasup's AI surface, not a misleading form.
+    assert "Was möchtest du erleben?" not in html
+    assert 'type="search"' not in html
+    assert 'id="tags"' not in html
+    assert "Mehr Filter" not in html
+    assert "/v1/search" not in html and "/v1/query" not in html
+    assert "Mit KI fragen" in html
+
+
+def test_calendar_gui_remains_keyless_when_api_keys_exist(conn, client):
+    conn.execute("INSERT INTO api_key (key, name) VALUES ('calendar-key', 't')")
+    conn.commit()
+    assert client.get("/calendar").status_code == 200
+
+
+def test_landing_page_exposes_the_event_browser(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.text.count('href="/calendar"') >= 2
+
+
 def test_keyset_pagination_walks_everything_once(client):
     seen = []
     cursor = None
@@ -182,6 +382,7 @@ def test_reads_are_keyless_but_search_and_writes_are_gated(conn, client):
     conn.commit()
     # public reads: keyless, even with keys registered
     assert client.get("/v1/occurrences").status_code == 200
+    assert client.get("/v1/occurrences/summary").status_code == 200
     assert client.post("/v1/query", json={}).status_code == 200
     assert client.get("/v1/feed.ics").status_code == 200
     assert client.get("/v1/changes").status_code == 200
@@ -206,6 +407,23 @@ def test_anonymous_reads_are_rate_limited(conn, client, monkeypatch):
     # a key lifts the limit
     assert client.get(
         "/v1/occurrences", headers={"X-API-Key": "sekrit"}
+    ).status_code == 200
+    app_mod._rate.clear()
+
+
+def test_occurrence_summary_is_rate_limited_and_key_bypasses_it(
+    conn, client, monkeypatch,
+):
+    from eventindex.api import app as app_mod
+
+    conn.execute("INSERT INTO api_key (key, name) VALUES ('summary-key', 't')")
+    conn.commit()
+    monkeypatch.setattr(app_mod, "PUBLIC_READ_RATE_PER_MIN", 2)
+    app_mod._rate.clear()
+    codes = [client.get("/v1/occurrences/summary").status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+    assert client.get(
+        "/v1/occurrences/summary", headers={"X-API-Key": "summary-key"},
     ).status_code == 200
     app_mod._rate.clear()
 
@@ -660,6 +878,10 @@ def test_unknown_category_is_422_not_empty(client):
     exclude_categories it silently weakened a guarantee."""
     assert client.post("/v1/query", json={"categories": ["konzert"]}).status_code == 422
     assert client.get("/v1/query", params={"categories": "konzert"}).status_code == 422
+    for path in ("/v1/occurrences", "/v1/occurrences/summary", "/v1/feed.ics"):
+        assert client.get(path, params={"category": "konzert"}).status_code == 422
+        assert client.get(path, params={"category": "music,konzert"}).status_code == 422
+        assert client.get(path, params={"category": ""}).status_code == 422
     assert client.post(
         "/v1/query", json={"exclude_categories": ["nightlfe"]}
     ).status_code == 422

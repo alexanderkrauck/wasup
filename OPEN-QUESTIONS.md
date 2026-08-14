@@ -6,7 +6,11 @@ Protocol: the coding agent appends questions here (numbered, concrete, one-sente
 
 11. **Weekly review summary** - the system already writes lists of suspicious new venue names and events whose locations were hidden for privacy; should the nightly/weekly digest show the few items that need your approval instead of leaving them only in files nobody checks? y/n.
 
+19. **Adult-context GUI default** - should `/calendar` hide events known to have `sex_service_context=true` by default (unknown stays visible), leaving explicit requests to the AI/API rather than adding a GUI toggle? y/n.
+
 ## Answered
+
+18. **GUI count semantics** → **yes**: `/calendar` uses one read-only aggregate query sharing listing policy and counts occurrences ("Termine") for Vienna-local today, the current Monday-Sunday week, and the next 30 calendar days; the exact category filter updates every tile. *(Alexander: "alright. implement it", 2026-08-14)*
 
 9. **Embeddings provider** → local multilingual MPNet for unified 1–3-word tags. Measured comparison on the Wasup relation set: E5-small AUC 0.890, E5-base 0.943, `paraphrase-multilingual-mpnet-base-v2` 1.000 with zero unrelated pairs above the calibrated 0.5 boundary. The winning quantized ONNX build is 279 MB/768d and runs comfortably on the production CPU without a service, API key, or recurring cost. *(Alexander direction + measured agent evaluation, 2026-07-22)*
 16. **event.lang column** → **fill** through the LLM enrichment, represented as a confidence-bearing estimate like the other inferred attributes rather than a bare unqualified value. *(Alexander, 2026-07-22)*

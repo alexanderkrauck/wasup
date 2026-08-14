@@ -56,7 +56,8 @@ _OPEN_PATHS = {"/", "/calendar", "/llms.txt", "/.well-known/api-catalog",
 # pure Postgres by design) but rate-limited per IP. /v1/search stays keyed
 # because it spends OUR llm budget per call; /v1/reports because it writes.
 _PUBLIC_READS = {
-    ("GET", "/v1/occurrences"), ("POST", "/v1/query"), ("GET", "/v1/query"),
+    ("GET", "/v1/occurrences"), ("GET", "/v1/occurrences/summary"),
+    ("POST", "/v1/query"), ("GET", "/v1/query"),
     ("GET", "/v1/feed.ics"), ("GET", "/v1/changes"),
 }
 PUBLIC_READ_RATE_PER_MIN = 60
@@ -476,8 +477,18 @@ def _occurrence_filter_parts(
         params.update(x1=x1, y1=y1, x2=x2, y2=y2)
     if category is not None:
         # null category = unknown: never matches a category filter (§7)
+        categories = [c.strip() for c in category.split(",") if c.strip()]
+        if not categories:
+            raise HTTPException(422, "category must contain at least one value")
+        unknown = set(categories) - set(config.CATEGORIES)
+        if unknown:
+            raise HTTPException(
+                422,
+                f"unknown categories {sorted(unknown)}; "
+                f"valid: {sorted(config.CATEGORIES)}",
+            )
         parts.append(("category", "e.category && %(cats)s"))
-        params["cats"] = [c.strip() for c in category.split(",")]
+        params["cats"] = categories
     parts.append((
         "confidence", f"({EFFECTIVE_CONFIDENCE_SQL}) >= %(min_conf)s",
     ))
@@ -529,6 +540,65 @@ def _occurrence_filters(
         name, organizer, venue, source, exclude_sex_service_context,
     )
     return [condition for _, condition in parts], params
+
+
+@app.get("/v1/occurrences/summary")
+def occurrence_summary(
+    category: str | None = Query(None, description="comma-separated"),
+):
+    """Occurrence counts for the GUI's fixed Vienna calendar ranges."""
+    local_now = datetime.now(VIENNA)
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=today_start.weekday())
+    ranges = {
+        "today": {
+            "from": today_start,
+            "to": today_start + timedelta(days=1) - timedelta(microseconds=1),
+        },
+        "this_week": {
+            "from": week_start,
+            "to": week_start + timedelta(days=7) - timedelta(microseconds=1),
+        },
+        "next_30_days": {
+            "from": today_start,
+            "to": today_start + timedelta(days=30) - timedelta(microseconds=1),
+        },
+    }
+    conditions, params = _occurrence_filters(
+        min(window["from"] for window in ranges.values()),
+        max(window["to"] for window in ranges.values()),
+        None, "default", None, category, DEFAULT_MIN_CONFIDENCE,
+    )
+    for name, window in ranges.items():
+        params[f"{name}_from"] = window["from"]
+        params[f"{name}_to"] = window["to"]
+    sql = f"""
+        SELECT
+          count(*) FILTER (WHERE
+            coalesce(o.ends_at, o.starts_at) >= %(today_from)s
+            AND o.starts_at <= %(today_to)s) AS today,
+          count(*) FILTER (WHERE
+            coalesce(o.ends_at, o.starts_at) >= %(this_week_from)s
+            AND o.starts_at <= %(this_week_to)s) AS this_week,
+          count(*) FILTER (WHERE
+            coalesce(o.ends_at, o.starts_at) >= %(next_30_days_from)s
+            AND o.starts_at <= %(next_30_days_to)s) AS next_30_days
+        FROM occurrence o JOIN event e ON e.id = o.event_id
+        LEFT JOIN venue v ON v.id = e.venue_id
+        WHERE {" AND ".join(conditions)}
+    """
+    with db.connect() as conn:
+        row = conn.execute(sql, params).fetchone()
+        for name, window in ranges.items():
+            window["count"] = row[name]
+        freshness = _data_freshness(conn)
+
+    return {
+        "data_freshness": freshness,
+        "timezone": VIENNA.key,
+        "as_of": local_now,
+        "ranges": ranges,
+    }
 
 
 @app.get("/v1/occurrences")

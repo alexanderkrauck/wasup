@@ -3,198 +3,1169 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wasup — was geht in Linz</title>
+<meta name="description" content="Alle öffentlichen Veranstaltungen in und um Linz — aktuell, ehrlich und direkt aus dem Wasup-Index.">
+<title>Events in Linz — Wasup</title>
+<link rel="icon" href="/logo.png">
 <style>
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         margin: 2rem auto; max-width: 58rem; padding: 0 1rem; color: #111; }
-  h1 { margin-bottom: .2rem; }
-  .sub { color: #666; margin-top: 0; }
-  .controls { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center;
-              margin: 1.2rem 0; }
-  .controls input, .controls select, .controls button { font-size: 1rem;
-              padding: .35rem .6rem; }
-  h2 { border-bottom: 2px solid #111; padding-bottom: .2rem; margin: 2rem 0 .4rem; }
-  .occ { padding: .45rem 0; border-bottom: 1px solid #eee; display: flex;
-         gap: .9rem; align-items: baseline; }
-  .time { font-weight: 600; white-space: nowrap; min-width: 7rem; }
-  .title { color: #1a5bb0; }
-  .meta { color: #666; font-size: .9rem; }
-  .flag { background: #fdd; padding: 0 .35rem; border-radius: 3px;
-          font-size: .8rem; margin-left: .4rem; }
-  .flag.proj { background: #ffe9c4; }
-  #status { color: #666; }
-  footer { margin: 2.5rem 0 1rem; color: #666; font-size: .9rem; }
+  :root {
+    --red: #ed2939;
+    --red-dark: #b81f2d;
+    --red-soft: #fff2f2;
+    --ink: #16181d;
+    --gray: #5b616e;
+    --muted: #686e79;
+    --line: #e9e9ec;
+    --paper: #fffdfb;
+    --card: #fff;
+    --green: #16833f;
+    --green-soft: #edf8f0;
+    --amber: #9a6500;
+    --amber-soft: #fff5df;
+    --shadow: 0 16px 42px -30px rgba(22, 24, 29, .38);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background:
+      radial-gradient(circle at 8% 13%, rgba(237, 41, 57, .075), transparent 24rem),
+      radial-gradient(circle at 92% 28%, rgba(237, 41, 57, .045), transparent 28rem),
+      var(--paper);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  button, input, select { font: inherit; }
+  button, select, input[type="date"] { min-height: 44px; }
+  a { color: inherit; }
+  [hidden] { display: none !important; }
+
+  .skip-link {
+    position: fixed;
+    left: 1rem;
+    top: -5rem;
+    z-index: 100;
+    padding: .65rem 1rem;
+    border-radius: 10px;
+    color: #fff;
+    background: var(--ink);
+  }
+  .skip-link:focus { top: 1rem; }
+  .flagband {
+    height: 8px;
+    background: linear-gradient(180deg, var(--red) 0 33%, #fff 33% 67%, var(--red) 67% 100%);
+  }
+
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    border-bottom: 1px solid var(--line);
+    background: rgba(255, 253, 251, .88);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+  }
+  .nav {
+    width: min(100% - 2rem, 72rem);
+    min-height: 64px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 1rem;
+  }
+  .brand {
+    width: max-content;
+    display: inline-flex;
+    align-items: center;
+    gap: .6rem;
+    color: var(--ink);
+    font-size: 1.18rem;
+    font-weight: 850;
+    text-decoration: none;
+  }
+  .brand img { width: 36px; height: 36px; border-radius: 26%; }
+  .nav-center { display: flex; align-items: center; gap: .8rem; }
+  .nav-current {
+    padding: .55rem .35rem .45rem;
+    border-bottom: 2px solid var(--red);
+    color: var(--red-dark);
+    font-weight: 750;
+    text-decoration: none;
+  }
+  .ai-button, .subscribe-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: .45rem;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    padding: .55rem .85rem;
+    font-weight: 750;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: transform .15s, box-shadow .15s, background .15s;
+  }
+  .ai-button { color: #fff; background: var(--ink); }
+  .subscribe-button {
+    justify-self: end;
+    color: var(--red-dark);
+    border-color: var(--red);
+    background: rgba(255, 255, 255, .72);
+  }
+  .ai-button:hover, .subscribe-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px -12px rgba(22, 24, 29, .55);
+  }
+
+  main { width: min(100% - 2rem, 72rem); margin: 0 auto; }
+  .intro {
+    display: grid;
+    grid-template-columns: minmax(18rem, .9fr) minmax(30rem, 1.35fr);
+    gap: clamp(1.5rem, 4vw, 4.5rem);
+    align-items: end;
+    padding: clamp(2.5rem, 7vw, 4.7rem) 0 2rem;
+  }
+  .kicker {
+    margin: 0 0 .5rem;
+    color: var(--red-dark);
+    font-size: .78rem;
+    font-weight: 850;
+    letter-spacing: .13em;
+  }
+  h1 {
+    margin: 0;
+    max-width: 30rem;
+    font-size: clamp(2.15rem, 5vw, 3.45rem);
+    line-height: 1.04;
+    letter-spacing: -.035em;
+  }
+  .intro-copy {
+    max-width: 32rem;
+    margin: .8rem 0 1rem;
+    color: var(--gray);
+    font-size: clamp(1rem, 1.5vw, 1.1rem);
+  }
+  .freshness {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 1.5rem;
+    margin: 0;
+    color: var(--gray);
+    font-size: .9rem;
+  }
+  .freshness-dot {
+    width: .62rem;
+    height: .62rem;
+    flex: none;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 4px rgba(22, 131, 63, .08);
+  }
+  .freshness.stale .freshness-dot { background: var(--amber); }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .8rem;
+  }
+  .stat-card {
+    width: 100%;
+    min-height: 9.3rem;
+    padding: 1rem .7rem;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, .9);
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    text-align: center;
+    transition: transform .15s, border-color .15s, background .15s;
+  }
+  .stat-card:hover { transform: translateY(-2px); border-color: #d7d8dd; }
+  .stat-card[aria-pressed="true"] {
+    border-color: var(--red);
+    background: var(--red-soft);
+  }
+  .stat-number {
+    display: block;
+    color: var(--red-dark);
+    font-size: clamp(2rem, 4vw, 3rem);
+    font-weight: 850;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .stat-label { display: block; margin-top: .75rem; font-weight: 720; }
+  .stat-note { display: block; margin-top: .15rem; color: var(--gray); font-size: .78rem; }
+
+  .toolbar {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: .8rem 1rem;
+    background: rgba(255, 255, 255, .9);
+    box-shadow: var(--shadow);
+  }
+  .toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    flex-wrap: wrap;
+  }
+  .toolbar-label { margin-right: .2rem; font-weight: 750; }
+  .window-pills { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .window-button, .control-shell, .reset-button, .load-more, .retry-button {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--ink);
+    background: #fff;
+  }
+  .window-button {
+    padding: .5rem .85rem;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .window-button[aria-pressed="true"] {
+    color: var(--red-dark);
+    border-color: var(--red);
+    background: var(--red-soft);
+  }
+  .toolbar-divider { width: 1px; height: 2rem; margin: 0 .25rem; background: var(--line); }
+  .control-shell {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 44px;
+    padding: 0 .7rem;
+  }
+  .control-shell span { color: var(--gray); font-size: .86rem; }
+  .control-shell select, .control-shell input {
+    max-width: 12rem;
+    min-height: 42px;
+    border: 0;
+    outline: 0;
+    color: var(--ink);
+    background: transparent;
+    cursor: pointer;
+  }
+  .control-shell select { padding-right: .35rem; }
+  .ai-helper {
+    margin: .85rem .15rem 0;
+    color: var(--gray);
+    font-size: .92rem;
+  }
+  .ai-helper a { color: var(--ink); font-weight: 720; text-underline-offset: 3px; }
+
+  .results { padding: 2.2rem 0 0; }
+  .results-head {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: .75rem;
+  }
+  .results-head h2 { margin: 0; font-size: clamp(1.4rem, 3vw, 1.75rem); letter-spacing: -.02em; }
+  .reset-button {
+    min-height: auto;
+    padding: .25rem 0;
+    border-color: transparent;
+    color: var(--red-dark);
+    background: transparent;
+    cursor: pointer;
+    font-size: .9rem;
+  }
+  .status-line { min-height: 1.5rem; margin: 0 0 .45rem; color: var(--gray); font-size: .9rem; }
+
+  .day-group { margin-top: 1.15rem; }
+  .day-heading {
+    margin: 0 0 .5rem .35rem;
+    font-size: 1.05rem;
+    letter-spacing: -.01em;
+  }
+  .event-card {
+    display: grid;
+    grid-template-columns: 8.3rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 1rem;
+    min-height: 76px;
+    margin-top: -1px;
+    padding: .8rem 1rem;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, .92);
+  }
+  .event-card:first-of-type { border-radius: 13px 13px 0 0; }
+  .event-card:last-child { border-radius: 0 0 13px 13px; }
+  .event-card:only-of-type { border-radius: 13px; }
+  .event-time {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    padding-right: 1rem;
+    border-right: 1px solid var(--line);
+    font-size: 1.1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .event-time.unknown { color: var(--gray); font-size: .9rem; white-space: normal; }
+  .event-body { min-width: 0; }
+  .event-title-row { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+  .event-title { margin: 0; font-size: 1rem; line-height: 1.3; overflow-wrap: anywhere; }
+  .event-meta { margin: .18rem 0 0; color: var(--gray); font-size: .88rem; overflow-wrap: anywhere; }
+  .event-extra { margin: .18rem 0 0; color: var(--muted); font-size: .8rem; }
+  .chips { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .48rem; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.65rem;
+    padding: .12rem .55rem;
+    border-radius: 999px;
+    color: #454953;
+    background: #f3f3f5;
+    font-size: .76rem;
+    line-height: 1.2;
+  }
+  .chip.category { color: #8a2430; background: #fff0f1; }
+  .chip.free, .chip.confirmed { color: #126d35; background: var(--green-soft); }
+  .chip.estimated, .chip.projected { color: var(--amber); background: var(--amber-soft); }
+  .chip.limited, .chip.waitlist { color: #8b5900; background: #fff3d6; }
+  .chip.full { color: #9b1c2b; background: #ffe8eb; }
+  .event-actions { display: flex; align-items: center; justify-content: flex-end; gap: .45rem; flex-wrap: wrap; }
+  .event-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: .42rem .68rem;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--ink);
+    background: #fff;
+    font-size: .82rem;
+    font-weight: 720;
+    text-decoration: none;
+  }
+  .event-link.booking { color: #fff; border-color: var(--red-dark); background: var(--red-dark); }
+  .event-link:hover { border-color: #caccd2; }
+
+  .state-message {
+    padding: 2.3rem 1rem;
+    border: 1px dashed #d7d8dd;
+    border-radius: 14px;
+    color: var(--gray);
+    background: rgba(255, 255, 255, .6);
+    text-align: center;
+  }
+  .state-message strong { display: block; margin-bottom: .3rem; color: var(--ink); }
+  .skeleton { overflow: hidden; }
+  .skeleton::after {
+    content: "";
+    display: block;
+    width: min(30rem, 80%);
+    height: .85rem;
+    margin: .5rem auto;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #eee 25%, #f8f8f8 50%, #eee 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s infinite linear;
+  }
+  .skeleton::before {
+    content: "";
+    display: block;
+    width: min(19rem, 55%);
+    height: 1rem;
+    margin: 0 auto .7rem;
+    border-radius: 999px;
+    background: #e9e9ec;
+  }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .retry-button { margin-top: .6rem; padding: .5rem .9rem; cursor: pointer; }
+  .result-actions { display: flex; justify-content: center; padding: 1.6rem 0 .4rem; }
+  .load-more {
+    min-width: 12rem;
+    padding: .62rem 1rem;
+    color: var(--red-dark);
+    border-color: var(--red);
+    cursor: pointer;
+    font-weight: 750;
+  }
+  .load-more:hover { color: #fff; background: var(--red-dark); }
+  .load-more:disabled { cursor: wait; opacity: .65; }
+
+  footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 1.5rem;
+    margin-top: 3rem;
+    padding: 1.25rem 0 2.2rem;
+    border-top: 1px solid var(--line);
+    color: var(--gray);
+    font-size: .84rem;
+  }
+  footer p { max-width: 39rem; margin: 0; }
+  footer nav { display: flex; gap: .85rem; flex-wrap: wrap; align-content: flex-start; }
+  footer a { color: var(--gray); }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  :focus-visible { outline: 3px solid rgba(237, 41, 57, .33); outline-offset: 3px; }
+
+  @media (max-width: 860px) {
+    .intro { grid-template-columns: 1fr; align-items: start; }
+    .intro-copy { max-width: 38rem; }
+    .event-card { grid-template-columns: 7.3rem minmax(0, 1fr); }
+    .event-actions { grid-column: 2; justify-content: flex-start; margin-top: -.15rem; }
+  }
+  @media (max-width: 680px) {
+    .nav { width: min(100% - 1.2rem, 72rem); min-height: 58px; grid-template-columns: 1fr auto auto; gap: .45rem; }
+    .brand { font-size: 1.05rem; }
+    .brand img { width: 32px; height: 32px; }
+    .nav-current { display: none; }
+    .ai-button, .subscribe-button { padding: .5rem .62rem; font-size: .78rem; }
+    .ai-button .spark { display: none; }
+    .subscribe-button .wide-label { display: none; }
+    main { width: min(100% - 1.2rem, 72rem); }
+    .intro { gap: 1.25rem; padding: 2.3rem 0 1.4rem; }
+    h1 { font-size: clamp(2.15rem, 11vw, 3rem); }
+    .intro-copy { font-size: .96rem; }
+    .stats { gap: .45rem; }
+    .stat-card { min-height: 7.35rem; padding: .8rem .25rem; border-radius: 14px; }
+    .stat-number { font-size: clamp(1.65rem, 9vw, 2.4rem); }
+    .stat-label { margin-top: .55rem; font-size: .78rem; }
+    .stat-note { font-size: .68rem; }
+    .toolbar { padding: .7rem; }
+    .toolbar-label, .window-pills, .toolbar-divider { display: none; }
+    .toolbar-row { display: grid; grid-template-columns: 1fr 1fr; }
+    .control-shell { width: 100%; min-width: 0; padding: 0 .55rem; }
+    .control-shell select, .control-shell input { min-width: 0; width: 100%; font-size: .85rem; }
+    .control-shell span { display: none; }
+    .results { padding-top: 1.8rem; }
+    .results-head { align-items: center; }
+    .results-head h2 { font-size: 1.35rem; }
+    .event-card { grid-template-columns: 5.6rem minmax(0, 1fr); gap: .75rem; padding: .9rem .75rem; }
+    .event-time { padding-right: .7rem; color: var(--red-dark); font-size: 1.02rem; }
+    .event-time.unknown { color: var(--gray); font-size: .8rem; }
+    .event-actions { grid-column: 1 / -1; padding-left: 6.35rem; }
+    .event-link { min-height: 38px; }
+    footer { display: block; }
+    footer nav { margin-top: .9rem; }
+  }
+  @media (max-width: 390px) {
+    .ai-button { font-size: 0; }
+    .ai-button::after { content: "KI"; font-size: .78rem; }
+    .stat-label { line-height: 1.15; }
+    .event-card { grid-template-columns: 4.9rem minmax(0, 1fr); }
+    .event-actions { padding-left: 5.65rem; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  }
 </style>
 </head>
 <body>
-<h1>Wasup</h1>
-<p class="sub">Alle öffentlichen Veranstaltungen in und um Linz — roh, chronologisch,
-direkt aus dem Index. Für KI-Assistenten: <a href="/llms.txt">/llms.txt</a></p>
+<a class="skip-link" href="#results">Zu den Terminen springen</a>
+<div class="flagband" aria-hidden="true"></div>
 
-<div class="controls">
-  <label>ab <input type="date" id="from"></label>
-  <select id="category"><option value="">alle Kategorien</option></select>
-  <input id="tags" type="search" placeholder="Tags, z. B. salsa tanzen"
-         aria-label="Semantische Tags">
-  <button id="reload">Anzeigen</button>
-  <a id="subscribe" href="#">Kalender-Abo (.ics)</a>
-  <span id="status"></span>
-</div>
-
-<div id="list"></div>
-
-<div class="controls">
-  <button id="prev" disabled>&larr; Zurück</button>
-  <span id="page"></span>
-  <button id="next" disabled>Weiter &rarr;</button>
-</div>
-
-<footer>
-  <span id="freshness"></span> ·
-  <a href="/">Start</a> ·
-  <a href="/privacy">Datenschutz</a> ·
-  <a href="/llms.txt">API für Agenten</a> ·
-  Konfidenz und „projiziert" sind ehrlich: der Index behauptet nichts,
-  was er nicht belegen kann.
-</footer>
-
-<template id="occ-t">
-  <div class="occ">
-    <div class="time"></div>
-    <div>
-      <a class="title" target="_blank" rel="noopener"></a>
-      <span class="flags"></span>
-      <div class="meta"></div>
+<header class="site-header">
+  <nav class="nav" aria-label="Hauptnavigation">
+    <a class="brand" href="/"><img src="/logo.png" alt=""><span>Wasup</span></a>
+    <div class="nav-center">
+      <a class="nav-current" href="/calendar" aria-current="page">Events</a>
+      <a class="ai-button" href="/#use"><span class="spark" aria-hidden="true">✦</span> Mit KI fragen</a>
     </div>
-  </div>
-</template>
+    <a class="subscribe-button" id="subscribe" href="/v1/feed.ics?exclude_sex_service_context=true&amp;include_time_unknown=false" title="Kalender-Abo für kommende Termine"><span aria-hidden="true">＋</span><span class="wide-label">Kalender abonnieren</span><span class="sr-only">Kalender abonnieren</span></a>
+  </nav>
+</header>
+
+<main>
+  <section class="intro" aria-labelledby="page-title">
+    <div>
+      <p class="kicker">LINZ IST LOS</p>
+      <h1 id="page-title">Was geht heute in Linz?</h1>
+      <p class="intro-copy">Alle öffentlichen Veranstaltungen aus dem Wasup-Index — aktuell, ehrlich und direkt verlinkt.</p>
+      <p class="freshness" id="freshness"><span class="freshness-dot" aria-hidden="true"></span><span id="freshness-text">Indexstand wird geladen …</span></p>
+    </div>
+
+    <div class="stats" aria-label="Zeitraum wählen">
+      <button class="stat-card" type="button" data-window="today" aria-pressed="true">
+        <span class="stat-number" id="count-today">–</span>
+        <span class="stat-label">Termine heute</span>
+      </button>
+      <button class="stat-card" type="button" data-window="this_week" aria-pressed="false">
+        <span class="stat-number" id="count-this-week">–</span>
+        <span class="stat-label">Diese Woche</span>
+        <span class="stat-note">Montag–Sonntag</span>
+      </button>
+      <button class="stat-card" type="button" data-window="next_30_days" aria-pressed="false">
+        <span class="stat-number" id="count-next-30-days">–</span>
+        <span class="stat-label">Nächste 30 Tage</span>
+      </button>
+    </div>
+  </section>
+
+  <section class="toolbar" aria-label="Termine filtern">
+    <div class="toolbar-row">
+      <span class="toolbar-label">Anzeigen</span>
+      <div class="window-pills" aria-label="Zeitraum">
+        <button class="window-button" type="button" data-window="today" aria-pressed="true">Heute</button>
+        <button class="window-button" type="button" data-window="this_week" aria-pressed="false">Diese Woche</button>
+        <button class="window-button" type="button" data-window="next_30_days" aria-pressed="false">30 Tage</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <label class="control-shell">
+        <span>Kategorie</span>
+        <select id="category" aria-label="Kategorie"><option value="">Alle Kategorien</option></select>
+      </label>
+      <label class="control-shell">
+        <span>Ab</span>
+        <input id="from" type="date" aria-label="Termine ab Datum">
+      </label>
+    </div>
+  </section>
+  <p class="ai-helper">Komplexer Wunsch? <a href="/#use">Frag Wasup über deine KI.</a></p>
+
+  <section class="results" id="results" aria-labelledby="results-title">
+    <div class="results-head">
+      <h2 id="results-title">Termine heute</h2>
+      <button class="reset-button" id="reset" type="button" hidden>Auswahl zurücksetzen</button>
+    </div>
+    <p class="status-line" id="status" aria-live="polite"></p>
+    <div id="list" aria-live="polite" aria-busy="true">
+      <div class="state-message skeleton" aria-label="Termine werden geladen"></div>
+    </div>
+    <div class="result-actions">
+      <button class="load-more" id="load-more" type="button" hidden>Mehr Termine laden</button>
+    </div>
+  </section>
+
+  <footer>
+    <p>„Uhrzeit unbekannt“ und „projiziert“ sind Absicht: Wasup behauptet nichts, was der Index nicht belegen kann. Das Kalender-Abo lässt Termine ohne bestätigte Uhrzeit aus.</p>
+    <nav aria-label="Fußnavigation">
+      <a href="/">Start</a>
+      <a href="/privacy">Datenschutz</a>
+      <a href="/llms.txt">API für KI</a>
+    </nav>
+  </footer>
+</main>
 
 <script>
 "use strict";
+
+const TIME_ZONE = "Europe/Vienna";
+const PAGE_SIZE = 50;
 const CATEGORIES = {categories_json};
-const PAGE_SIZE = 100;
+const CATEGORY_LABELS = {
+  music: "Musik", nightlife: "Nachtleben", theatre: "Theater", film: "Film",
+  art: "Kunst", culture: "Kultur", sport: "Sport", community: "Gemeinschaft",
+  learning: "Bildung", family: "Familie", market: "Markt",
+  food_drink: "Essen & Trinken", tech: "Technik", religion: "Religion",
+  other: "Sonstiges",
+};
+const AVAILABILITY_LABELS = {
+  available: ["Plätze verfügbar", "confirmed"],
+  limited: ["Wenige Plätze", "limited"],
+  waitlist: ["Warteliste", "waitlist"],
+  full: ["Ausgebucht", "full"],
+};
+const WINDOW_LABELS = {
+  today: "heute",
+  this_week: "diese Woche",
+  next_30_days: "in den nächsten 30 Tagen",
+};
 const $ = id => document.getElementById(id);
-const dayFmt = new Intl.DateTimeFormat("de-AT",
-  { weekday: "long", day: "numeric", month: "long", year: "numeric",
-    timeZone: "Europe/Vienna" });
-const timeFmt = new Intl.DateTimeFormat("de-AT",
-  { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Vienna" });
+const numberFmt = new Intl.NumberFormat("de-AT");
+const dayFmt = new Intl.DateTimeFormat("de-AT", {
+  weekday: "long", day: "numeric", month: "long", year: "numeric",
+  timeZone: TIME_ZONE,
+});
+const shortDayFmt = new Intl.DateTimeFormat("de-AT", {
+  day: "numeric", month: "short", timeZone: TIME_ZONE,
+});
+const timeFmt = new Intl.DateTimeFormat("de-AT", {
+  hour: "2-digit", minute: "2-digit", timeZone: TIME_ZONE,
+});
+const dateKeyFmt = new Intl.DateTimeFormat("en-CA", {
+  year: "numeric", month: "2-digit", day: "2-digit", timeZone: TIME_ZONE,
+});
 
-let cursorStack = [];   // cursors of previous pages ([] = page 1)
-let currentCursor = null;
-let nextCursor = null;
+const state = {
+  activeWindow: "today",
+  ranges: null,
+  nextCursor: null,
+  lastDayKey: null,
+  lastDayGroup: null,
+  listController: null,
+  summaryController: null,
+  summaryVersion: 0,
+};
 
-for (const c of CATEGORIES) {
-  const o = document.createElement("option");
-  o.value = c; o.textContent = c;
-  $("category").appendChild(o);
+function node(tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text !== undefined && text !== null) element.textContent = text;
+  return element;
 }
-$("from").value = new Date().toISOString().slice(0, 10);
 
-function price(min, max) {
-  if (min === 0 && (max === 0 || max === null)) return "gratis";
-  if (min === null && max === null) return null;
-  const f = v => v === null ? "?" : String(v).replace(".", ",");
-  return min !== null && max !== null && min !== max
-    ? `€ ${f(min)}–${f(max)}` : `€ ${f(min !== null ? min : max)}`;
+function addCalendarDays(dateKey, days) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days, 12));
+  return date.toISOString().slice(0, 10);
 }
 
-function flag(text, cls) {
-  const s = document.createElement("span");
-  s.className = "flag" + (cls ? " " + cls : "");
-  s.textContent = text;
-  return s;
+function dateKey(value) {
+  const parts = Object.fromEntries(
+    dateKeyFmt.formatToParts(new Date(value))
+      .filter(part => part.type !== "literal")
+      .map(part => [part.type, part.value]),
+  );
+  return parts.year + "-" + parts.month + "-" + parts.day;
 }
 
-function render(occurrences) {
-  const list = $("list");
-  list.replaceChildren();
-  let day = null;
-  for (const o of occurrences) {
-    const start = new Date(o.starts_at);
-    const d = dayFmt.format(start);
-    if (d !== day) {
-      day = d;
-      const h = document.createElement("h2");
-      h.textContent = d;
-      list.appendChild(h);
-    }
-    const node = $("occ-t").content.cloneNode(true);
-    node.querySelector(".time").textContent = timeFmt.format(start)
-      + (o.ends_at ? "–" + timeFmt.format(new Date(o.ends_at)) : "");
-    const a = node.querySelector(".title");
-    a.textContent = o.title;
-    if (o.url) a.href = o.url; else a.removeAttribute("target");
-    const flags = node.querySelector(".flags");
-    if (o.projected) flags.appendChild(flag("projiziert", "proj"));
-    if (o.status && o.status !== "scheduled") flags.appendChild(flag(o.status));
-    const meta = [
-      o.venue_name, o.venue_address,
-      (o.category || []).join(", "),
-      price(o.price?.min, o.price?.max),
-      o.confidence !== null
-        ? "Konfidenz " + Math.round(o.confidence * 100) + " %" : null,
-      o.tag_match !== null && o.tag_match !== undefined
-        ? "Tag-Treffer " + Math.round(o.tag_match * 100) + " %" : null,
-    ].filter(Boolean).join(" · ");
-    node.querySelector(".meta").textContent = meta;
-    list.appendChild(node);
+function partsAt(instantMs) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(instantMs));
+  return Object.fromEntries(parts.filter(part => part.type !== "literal")
+    .map(part => [part.type, Number(part.value)]));
+}
+
+function viennaStartIso(value) {
+  const [year, month, day] = value.split("-").map(Number);
+  const desired = Date.UTC(year, month - 1, day, 0, 0, 0);
+  let instant = desired;
+  for (let i = 0; i < 3; i += 1) {
+    const current = partsAt(instant);
+    const represented = Date.UTC(
+      current.year, current.month - 1, current.day,
+      current.hour, current.minute, current.second,
+    );
+    instant = desired - (represented - instant);
   }
-  if (!occurrences.length) {
-    const p = document.createElement("p");
-    p.textContent = "Keine Veranstaltungen für diese Auswahl.";
-    list.appendChild(p);
-  }
+  return new Date(instant).toISOString();
 }
 
-async function load() {
-  $("status").textContent = "lädt …";
-  const params = new URLSearchParams({ limit: PAGE_SIZE });
-  if ($("from").value) params.set("from", $("from").value);
+function rangeDateKey(range) {
+  return dateKey(range.from);
+}
+
+function fallbackRanges() {
+  const today = dateKey(new Date());
+  const [year, month, day] = today.split("-").map(Number);
+  const mondayOffset = (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7;
+  const weekStart = addCalendarDays(today, -mondayOffset);
+  const makeRange = (start, days) => {
+    const endExclusive = viennaStartIso(addCalendarDays(start, days));
+    return {
+      from: viennaStartIso(start),
+      to: new Date(new Date(endExclusive).getTime() - 1).toISOString(),
+      count: null,
+    };
+  };
+  return {
+    today: makeRange(today, 1),
+    this_week: makeRange(weekStart, 7),
+    next_30_days: makeRange(today, 30),
+  };
+}
+
+function categoryLabel(value) {
+  return CATEGORY_LABELS[value] || value.replaceAll("_", " ");
+}
+
+function setWindowButtons() {
+  document.querySelectorAll("[data-window]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.window === state.activeWindow));
+  });
+}
+
+function setControlsDisabled(disabled) {
+  document.querySelectorAll("[data-window], #category, #from, #reset").forEach(control => {
+    control.disabled = disabled;
+  });
+}
+
+function invalidatePagination() {
+  if (state.listController) state.listController.abort();
+  state.nextCursor = null;
+  $("load-more").hidden = true;
+}
+
+function updateUrl() {
+  const url = new URL(window.location.href);
+  url.search = "";
+  if (state.activeWindow !== "today") url.searchParams.set("window", state.activeWindow);
+  if ($("category").value) url.searchParams.set("category", $("category").value);
+  if (state.activeWindow === "custom" && $("from").value) {
+    url.searchParams.set("from", $("from").value);
+  }
+  window.history.replaceState(null, "", url);
+}
+
+function updateSubscribeLink() {
+  const params = new URLSearchParams({
+    exclude_sex_service_context: "true",
+    include_time_unknown: "false",
+  });
   if ($("category").value) params.set("category", $("category").value);
-  if ($("tags").value.trim()) {
-    params.set("tags", $("tags").value.trim());
-    params.set("min_tag_match", "0.5");
+  $("subscribe").href = "/v1/feed.ics?" + params;
+}
+
+function activeCount() {
+  const range = state.ranges && state.ranges[state.activeWindow];
+  return range && Number.isFinite(range.count) ? range.count : null;
+}
+
+function updateResultsTitle() {
+  const count = activeCount();
+  const category = $("category").value;
+  let title;
+  if (state.activeWindow === "custom") {
+    const value = $("from").value;
+    title = value
+      ? "Termine ab " + shortDayFmt.format(new Date(viennaStartIso(value)))
+      : "Kommende Termine";
+  } else {
+    const noun = count === 1 ? "Termin" : "Termine";
+    title = (count === null ? "" : numberFmt.format(count) + " ")
+      + noun + " " + WINDOW_LABELS[state.activeWindow];
   }
-  if (currentCursor) params.set("cursor", currentCursor);
-  const feed = new URLSearchParams(params);
-  feed.delete("limit"); feed.delete("cursor");
-  feed.set("include_time_unknown", "false");
-  feed.set("exclude_sex_service_context", "true");
-  $("subscribe").href = "/v1/feed.ics?" + feed;
-  try {
-    const res = await fetch("/v1/occurrences?" + params);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const body = await res.json();
-    render(body.occurrences);
-    nextCursor = body.next_cursor;
-    $("next").disabled = !nextCursor;
-    $("prev").disabled = cursorStack.length === 0;
-    $("page").textContent = "Seite " + (cursorStack.length + 1);
-    $("status").textContent = "";
-    if (body.data_freshness)
-      $("freshness").textContent = "Stand: " + new Date(body.data_freshness)
-        .toLocaleString("de-AT", { timeZone: "Europe/Vienna" });
-    window.scrollTo(0, 0);
-  } catch (e) {
-    $("status").textContent = "Fehler: " + e.message;
+  if (category) title += " · " + categoryLabel(category);
+  $("results-title").textContent = title;
+  $("reset").hidden = !category && state.activeWindow === "today";
+}
+
+function showFreshness(value) {
+  if (!value) {
+    $("freshness-text").textContent = "Indexstand derzeit unbekannt";
+    return;
+  }
+  const timestamp = new Date(value);
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp.getTime()) / 60000));
+  let label;
+  if (minutes < 2) label = "gerade aktualisiert";
+  else if (minutes < 60) label = "vor " + minutes + " Minuten";
+  else if (minutes < 120) label = "vor einer Stunde";
+  else if (minutes < 24 * 60) label = "vor " + Math.round(minutes / 60) + " Stunden";
+  else label = timestamp.toLocaleString("de-AT", { timeZone: TIME_ZONE, dateStyle: "medium", timeStyle: "short" });
+  $("freshness-text").textContent = "Indexstand: " + label;
+  $("freshness").classList.toggle("stale", minutes >= 48 * 60);
+}
+
+async function loadSummary() {
+  const version = ++state.summaryVersion;
+  if (state.summaryController) state.summaryController.abort();
+  state.summaryController = new AbortController();
+  ["count-today", "count-this-week", "count-next-30-days"].forEach(id => {
+    $(id).textContent = "–";
+  });
+  state.ranges = null;
+  const params = new URLSearchParams();
+  if ($("category").value) params.set("category", $("category").value);
+  const query = params.size ? "?" + params : "";
+  const response = await fetch("/v1/occurrences/summary" + query, {
+    signal: state.summaryController.signal,
+  });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  const body = await response.json();
+  if (version !== state.summaryVersion) return false;
+  state.ranges = body.ranges;
+  $("count-today").textContent = numberFmt.format(body.ranges.today.count);
+  $("count-this-week").textContent = numberFmt.format(body.ranges.this_week.count);
+  $("count-next-30-days").textContent = numberFmt.format(body.ranges.next_30_days.count);
+  $("from").min = rangeDateKey(body.ranges.today);
+  showFreshness(body.data_freshness);
+  return true;
+}
+
+function occurrenceParams(cursor) {
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  const range = state.ranges && state.ranges[state.activeWindow];
+  if (state.activeWindow !== "custom" && range) {
+    params.set("from", range.from);
+    params.set("to", range.to);
+  } else if ($("from").value) {
+    params.set("from", viennaStartIso($("from").value));
+  }
+  if ($("category").value) params.set("category", $("category").value);
+  if (cursor) params.set("cursor", cursor);
+  return params;
+}
+
+function priceLabel(price) {
+  if (!price || (price.min === null && price.max === null)) return null;
+  const estimated = price.basis === "estimated";
+  if (price.min === 0 && (price.max === 0 || price.max === null)) {
+    return [estimated ? "vermutlich gratis" : "Gratis", estimated ? "estimated" : "free"];
+  }
+  const format = value => Number(value).toLocaleString("de-AT", {
+    minimumFractionDigits: Number(value) % 1 ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+  const min = price.min === null ? null : format(price.min);
+  const max = price.max === null ? null : format(price.max);
+  const value = min !== null && max !== null && min !== max
+    ? "€ " + min + "–" + max
+    : "€ " + (min !== null ? min : max);
+  return [(estimated ? "ca. " : "") + value, estimated ? "estimated" : ""];
+}
+
+function addChip(container, text, className, title) {
+  const chip = node("span", "chip" + (className ? " " + className : ""), text);
+  if (title) chip.title = title;
+  container.appendChild(chip);
+}
+
+function confirmationLabel(value) {
+  if (!value) return null;
+  const confirmed = new Date(value);
+  const todayRange = state.ranges && state.ranges.today;
+  if (todayRange && dateKey(confirmed) === rangeDateKey(todayRange)) return "heute bestätigt";
+  return "bestätigt " + shortDayFmt.format(confirmed);
+}
+
+function timeInfo(occurrence) {
+  const start = new Date(occurrence.starts_at);
+  if (occurrence.time_unknown) {
+    const estimate = occurrence.start_time_estimate && occurrence.start_time_estimate.value;
+    const extra = [];
+    if (estimate) extra.push("Typisch " + estimate + " · geschätzt");
+    if (occurrence.ends_at) {
+      const end = new Date(occurrence.ends_at);
+      if (dateKey(start) !== dateKey(end)) extra.push("bis " + shortDayFmt.format(end));
+    }
+    return {
+      label: "Uhrzeit unbekannt",
+      extra: extra.length ? extra.join(" · ") : null,
+      unknown: true,
+      datetime: dateKey(start),
+    };
+  }
+  if (!occurrence.ends_at) {
+    return { label: timeFmt.format(start), extra: null, unknown: false, datetime: occurrence.starts_at };
+  }
+  const end = new Date(occurrence.ends_at);
+  if (dateKey(start) === dateKey(end)) {
+    return {
+      label: timeFmt.format(start) + "–" + timeFmt.format(end),
+      extra: null, unknown: false, datetime: occurrence.starts_at,
+    };
+  }
+  return {
+    label: timeFmt.format(start),
+    extra: "bis " + shortDayFmt.format(end) + ", " + timeFmt.format(end),
+    unknown: false,
+    datetime: occurrence.starts_at,
+  };
+}
+
+function dayHeading(start) {
+  const key = dateKey(start);
+  const today = state.ranges && rangeDateKey(state.ranges.today);
+  const tomorrow = today ? addCalendarDays(today, 1) : null;
+  const full = dayFmt.format(start).replace(/^./, char => char.toUpperCase());
+  if (key === today) return "Heute · " + full;
+  if (key === tomorrow) return "Morgen · " + full;
+  return full;
+}
+
+function eventCard(occurrence) {
+  const card = node("article", "event-card");
+  const info = timeInfo(occurrence);
+  const time = node("time", "event-time" + (info.unknown ? " unknown" : ""), info.label);
+  time.dateTime = info.datetime;
+  card.appendChild(time);
+
+  const body = node("div", "event-body");
+  const titleRow = node("div", "event-title-row");
+  titleRow.appendChild(node("h3", "event-title", occurrence.title));
+  if (occurrence.projected) {
+    addChip(titleRow, "projiziert", "projected", "Voraussichtlicher Termin aus bestätigter Serie");
+  }
+  if (occurrence.ongoing) {
+    addChip(titleRow, "bereits begonnen", "", "Begann vor dem gewählten Zeitraum und läuft in ihn hinein");
+  }
+  body.appendChild(titleRow);
+
+  const location = [occurrence.venue_name, occurrence.organizer].filter(Boolean).join(" · ");
+  if (location) {
+    const meta = node("p", "event-meta", location);
+    if (occurrence.venue_address) meta.title = occurrence.venue_address;
+    body.appendChild(meta);
+  }
+  const timingDetails = [];
+  if (occurrence.ongoing) {
+    const start = new Date(occurrence.starts_at);
+    timingDetails.push(
+      "Beginn " + shortDayFmt.format(start)
+      + (occurrence.time_unknown ? " · Uhrzeit unbekannt" : ", " + timeFmt.format(start)),
+    );
+  }
+  if (info.extra) timingDetails.push(info.extra);
+  if (timingDetails.length) {
+    body.appendChild(node("p", "event-extra", timingDetails.join(" · ")));
+  }
+
+  const chips = node("div", "chips");
+  (occurrence.category || []).forEach(category => {
+    addChip(chips, categoryLabel(category), "category");
+  });
+  const price = priceLabel(occurrence.price);
+  if (price) addChip(chips, price[0], price[1], price[1] === "estimated" ? "Preis geschätzt" : null);
+  if (occurrence.registration_required === true) addChip(chips, "Anmeldung nötig", "");
+  const availability = AVAILABILITY_LABELS[occurrence.availability];
+  if (availability) addChip(chips, availability[0], availability[1]);
+  const confirmation = confirmationLabel(occurrence.last_confirmed_at);
+  if (confirmation) addChip(chips, confirmation, "confirmed");
+  const sources = occurrence.provenance_summary || [];
+  if (sources.length) {
+    addChip(chips, sources.length === 1 ? "1 Quelle" : sources.length + " Quellen", "", sources.join(", "));
+  }
+  if (chips.childElementCount) body.appendChild(chips);
+  card.appendChild(body);
+
+  const actions = node("div", "event-actions");
+  if (occurrence.booking_url) {
+    const booking = node("a", "event-link booking", "Buchen ↗");
+    booking.href = occurrence.booking_url;
+    booking.target = "_blank";
+    booking.rel = "noopener";
+    booking.setAttribute("aria-label", occurrence.title + " buchen (neuer Tab)");
+    actions.appendChild(booking);
+  }
+  if (occurrence.url) {
+    const source = node("a", "event-link", "Quelle ↗");
+    source.href = occurrence.url;
+    source.target = "_blank";
+    source.rel = "noopener";
+    source.setAttribute("aria-label", "Quelle für " + occurrence.title + " öffnen (neuer Tab)");
+    actions.appendChild(source);
+  }
+  if (actions.childElementCount) card.appendChild(actions);
+  return card;
+}
+
+function renderOccurrences(occurrences, append) {
+  const list = $("list");
+  if (!append) {
+    list.replaceChildren();
+    state.lastDayKey = null;
+    state.lastDayGroup = null;
+  }
+  for (const occurrence of occurrences) {
+    const start = new Date(occurrence.starts_at);
+    const key = occurrence.ongoing ? "__ongoing__" : dateKey(start);
+    if (key !== state.lastDayKey) {
+      state.lastDayKey = key;
+      state.lastDayGroup = node("section", "day-group");
+      const heading = node(
+        "h3", "day-heading", occurrence.ongoing ? "Läuft bereits" : dayHeading(start),
+      );
+      state.lastDayGroup.appendChild(heading);
+      list.appendChild(state.lastDayGroup);
+    }
+    state.lastDayGroup.appendChild(eventCard(occurrence));
   }
 }
 
-function reset() { cursorStack = []; currentCursor = null; load(); }
+function showListState(kind, title, message) {
+  const box = node("div", "state-message" + (kind === "loading" ? " skeleton" : ""));
+  if (kind !== "loading") {
+    box.appendChild(node("strong", "", title));
+    box.appendChild(node("span", "", message));
+  }
+  $("list").replaceChildren(box);
+  $("list").setAttribute("aria-busy", String(kind === "loading"));
+  state.lastDayKey = null;
+  state.lastDayGroup = null;
+}
 
-$("reload").addEventListener("click", reset);
-$("from").addEventListener("change", reset);
-$("category").addEventListener("change", reset);
-$("tags").addEventListener("change", reset);
-$("next").addEventListener("click", () => {
-  cursorStack.push(currentCursor); currentCursor = nextCursor; load();
-});
-$("prev").addEventListener("click", () => {
-  currentCursor = cursorStack.pop() ?? null; load();
-});
+async function loadOccurrences({ append = false } = {}) {
+  if (state.listController) state.listController.abort();
+  const controller = new AbortController();
+  state.listController = controller;
+  const cursor = append ? state.nextCursor : null;
+  if (!append) {
+    state.nextCursor = null;
+    $("load-more").hidden = true;
+    showListState("loading", "", "");
+    $("status").textContent = "Termine werden geladen …";
+  } else {
+    $("load-more").disabled = true;
+    $("load-more").textContent = "Lädt …";
+  }
+  try {
+    const response = await fetch("/v1/occurrences?" + occurrenceParams(cursor), {
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const body = await response.json();
+    if (state.listController !== controller) return;
+    renderOccurrences(body.occurrences, append);
+    state.nextCursor = body.next_cursor;
+    $("load-more").hidden = !state.nextCursor;
+    $("list").setAttribute("aria-busy", "false");
+    $("status").textContent = "";
+    if (!append && !body.occurrences.length) {
+      showListState(
+        "empty",
+        "Keine Termine im Index für diese Auswahl",
+        "Wähle einen anderen Zeitraum oder eine andere Kategorie.",
+      );
+    }
+    if (body.data_freshness) showFreshness(body.data_freshness);
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    if (state.listController !== controller) return;
+    if (!append) {
+      showListState("error", "Die Termine konnten nicht geladen werden", "Bitte versuche es noch einmal.");
+      $("status").textContent = "Die Termine konnten nicht geladen werden.";
+      const retry = node("button", "retry-button", "Erneut versuchen");
+      retry.type = "button";
+      retry.addEventListener("click", () => loadOccurrences());
+      $("list").firstElementChild.appendChild(retry);
+    } else {
+      $("status").textContent = "Weitere Termine konnten nicht geladen werden.";
+    }
+  } finally {
+    if (state.listController === controller) {
+      $("load-more").disabled = false;
+      $("load-more").textContent = "Mehr Termine laden";
+    }
+  }
+}
 
-load();
+async function selectWindow(windowName, { load = true } = {}) {
+  state.activeWindow = windowName;
+  setWindowButtons();
+  const range = state.ranges && state.ranges[windowName];
+  if (range) $("from").value = rangeDateKey(range);
+  updateResultsTitle();
+  updateUrl();
+  if (load) await loadOccurrences();
+}
+
+async function refreshCategory() {
+  setControlsDisabled(true);
+  invalidatePagination();
+  updateSubscribeLink();
+  $("status").textContent = "Zahlen werden aktualisiert …";
+  try {
+    try {
+      await loadSummary();
+      if (state.activeWindow !== "custom") {
+        const range = state.ranges[state.activeWindow];
+        $("from").value = rangeDateKey(range);
+      }
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      state.ranges = fallbackRanges();
+      if (state.activeWindow !== "custom") {
+        $("from").value = rangeDateKey(state.ranges[state.activeWindow]);
+      }
+      $("status").textContent = "Die Übersichtszahlen konnten nicht geladen werden.";
+    }
+    updateSubscribeLink();
+    updateResultsTitle();
+    updateUrl();
+    await loadOccurrences();
+  } finally {
+    setControlsDisabled(false);
+  }
+}
+
+async function resetSelection() {
+  setControlsDisabled(true);
+  invalidatePagination();
+  try {
+    $("category").value = "";
+    updateSubscribeLink();
+    try {
+      await loadSummary();
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      state.ranges = fallbackRanges();
+    }
+    updateSubscribeLink();
+    await selectWindow("today");
+  } finally {
+    setControlsDisabled(false);
+  }
+}
+
+for (const category of CATEGORIES) {
+  const option = node("option", "", categoryLabel(category));
+  option.value = category;
+  $("category").appendChild(option);
+}
+
+document.querySelectorAll("[data-window]").forEach(button => {
+  button.addEventListener("click", () => selectWindow(button.dataset.window));
+});
+$("category").addEventListener("change", refreshCategory);
+$("from").addEventListener("change", async () => {
+  if (!$("from").value) {
+    await selectWindow("today");
+    return;
+  }
+  state.activeWindow = "custom";
+  setWindowButtons();
+  updateResultsTitle();
+  updateUrl();
+  await loadOccurrences();
+});
+$("reset").addEventListener("click", resetSelection);
+$("load-more").addEventListener("click", () => loadOccurrences({ append: true }));
+
+async function init() {
+  const query = new URLSearchParams(window.location.search);
+  const category = query.get("category");
+  if (category && CATEGORIES.includes(category)) $("category").value = category;
+  const requestedWindow = query.get("window");
+  const rawFrom = query.get("from");
+  const requestedFrom = rawFrom && /^\d{4}-\d{2}-\d{2}$/.test(rawFrom) ? rawFrom : null;
+  let summaryAvailable = true;
+  try {
+    await loadSummary();
+  } catch (error) {
+    summaryAvailable = false;
+    state.ranges = fallbackRanges();
+    $("from").min = rangeDateKey(state.ranges.today);
+  }
+  try {
+    if (requestedFrom) {
+      $("from").value = requestedFrom;
+      state.activeWindow = "custom";
+      setWindowButtons();
+      updateResultsTitle();
+      updateSubscribeLink();
+      await loadOccurrences();
+    } else {
+      const windowName = Object.hasOwn(state.ranges, requestedWindow)
+        ? requestedWindow : "today";
+      updateSubscribeLink();
+      await selectWindow(windowName);
+    }
+    if (!summaryAvailable) {
+      $("status").textContent = "Die Übersichtszahlen konnten nicht geladen werden; die Terminliste nutzt weiterhin die korrekten Wiener Zeiträume.";
+    }
+  } finally {
+    setControlsDisabled(false);
+  }
+}
+
+setControlsDisabled(true);
+init();
 </script>
 </body>
 </html>

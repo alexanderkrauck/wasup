@@ -6,6 +6,7 @@ ChatGPT-specific safety, relevance, response-shaping, and standard
 ``search``/``fetch`` contracts.
 """
 
+import asyncio
 import json
 import math
 import re
@@ -22,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
 from eventindex.api.confidence import DEFAULT_MIN_CONFIDENCE
+from eventindex.api.mcp_usage import record_mcp_call
 from eventindex.api.search import FILTER_DEFAULTS, QueryBody, SearchFilters, VIENNA
 from eventindex.resolve.match import _trigrams
 
@@ -51,17 +53,36 @@ class _StrictToolInputsFastMCP(FastMCP):
             tool.parameters["additionalProperties"] = False
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
-        tool = self._tool_manager.get_tool(name)
-        if tool is not None:
-            allowed = set(tool.parameters.get("properties", {}))
-            unknown = sorted(set(arguments) - allowed)
-            if unknown:
-                raise ToolError(
-                    f"Unknown top-level arguments for {name}: {unknown}. "
-                    "Follow the published input schema and keep structured "
-                    "fields inside their documented object."
-                )
-        return await super().call_tool(name, arguments)
+        try:
+            context = self.get_context()
+        except Exception:
+            # Context is useful only for optional telemetry. Tool execution must
+            # remain available if a transport omits it or changes its shape.
+            context = None
+        failed = True
+        try:
+            tool = self._tool_manager.get_tool(name)
+            if tool is not None:
+                allowed = set(tool.parameters.get("properties", {}))
+                unknown = sorted(set(arguments) - allowed)
+                if unknown:
+                    raise ToolError(
+                        f"Unknown top-level arguments for {name}: {unknown}. "
+                        "Follow the published input schema and keep structured "
+                        "fields inside their documented object."
+                    )
+            result = await super().call_tool(name, arguments)
+            failed = False
+            return result
+        finally:
+            # Psycopg is synchronous. Keep optional telemetry off the MCP event
+            # loop so a slow database cannot serialize unrelated tool calls.
+            await asyncio.to_thread(
+                record_mcp_call,
+                context,
+                name,
+                failed=failed,
+            )
 
 
 class MCPQueryBody(QueryBody):

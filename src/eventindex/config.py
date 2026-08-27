@@ -19,6 +19,7 @@ DATABASE_URL = os.environ.get(
 )
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
+MCP_USAGE_HMAC_KEY = os.environ.get("MCP_USAGE_HMAC_KEY", "")
 
 # LLM (DECISIONS.md: one provider = OpenRouter; model names live here)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -145,6 +146,7 @@ PARITY_MIN_COVERAGE = 0.7   # below this, misses feed the source's notes
 DIGEST_DIR = VAR_DIR / "digests"
 DEAD_MAN_HOURS = 48
 CREDITS_WARN_USD = 3.0  # less than one maximum-cost day remains
+MCP_USAGE_RETENTION_DAYS = 30
 
 TIMEZONE = "Europe/Vienna"
 

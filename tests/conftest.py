@@ -35,6 +35,6 @@ def conn(test_db_url):
             "event_claim, occurrence, "
             "identity, event, source, venue, report, api_key, text_recurrence, "
             "enrichment, adjudication, probe_rejection, event_tag, "
-            "tag_embedding CASCADE"
+            "tag_embedding, mcp_usage_daily CASCADE"
         )
         c.commit()

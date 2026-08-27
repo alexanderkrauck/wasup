@@ -116,6 +116,52 @@ def test_healthy_balance_stays_quiet():
     assert "BALANCE LOW" not in text
 
 
+def test_mcp_usage_renders_partial_user_attribution():
+    stats = _stats(NOW) | {
+        "mcp_usage": {
+            "days": 7,
+            "since": NOW.date() - timedelta(days=6),
+            "through": NOW.date(),
+            "hashing_configured": True,
+            "totals": {
+                "calls": 8,
+                "failures": 1,
+                "observed_users": 2,
+                "observed_sessions": 3,
+            },
+            "clients": [
+                {
+                    "client_family": "chatgpt",
+                    "calls": 6,
+                    "failures": 1,
+                    "observed_users": 2,
+                    "observed_sessions": 3,
+                    "subject_attributed_calls": 5,
+                },
+                {
+                    "client_family": "claude",
+                    "calls": 2,
+                    "failures": 0,
+                    "observed_users": 0,
+                    "observed_sessions": 0,
+                    "subject_attributed_calls": 0,
+                },
+            ],
+            "tools": [
+                {"tool_name": "search_events", "calls": 8, "failures": 1}
+            ],
+        }
+    }
+
+    text = render(stats, NOW)
+
+    assert "observed pseudonymous users=2" in text
+    assert "chatgpt: calls=6" in text
+    assert "subject coverage=83%" in text
+    assert "claude: calls=2" in text
+    assert "users unavailable" in text
+
+
 def test_fetch_blocked_suspects_render():
     stats = _stats(NOW) | {"fetch_blocked": [{"name": "Stadionwelt"}]}
     text = render(stats, NOW)

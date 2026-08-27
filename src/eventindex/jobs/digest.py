@@ -8,9 +8,16 @@ puts a loud warning at the top. Run by cron nightly; runnable by hand anytime.
 from datetime import datetime, timedelta, timezone
 
 from eventindex import config, db
+from eventindex.api.mcp_usage import (
+    purge_old_usage,
+    render_usage_report,
+    usage_report,
+)
 
 
 def gather_stats(conn) -> dict:
+    purge_old_usage(conn)
+    mcp_usage = usage_report(conn, days=7)
     crawls = conn.execute(
         "SELECT status, count(*) AS n, sum(events_found) AS events FROM crawl_log "
         "WHERE started_at >= now() - interval '24 hours' GROUP BY status"
@@ -275,6 +282,7 @@ def gather_stats(conn) -> dict:
         "hydration": hydration,
         "verification": verification,
         "audience_readiness": audience_readiness,
+        "mcp_usage": mcp_usage,
     }
 
 
@@ -329,6 +337,11 @@ def render(stats: dict, now: datetime) -> str:
             f" + €{float(row.get('reserved_eur') or 0):.4f} reserved"
         )
     lines.append("")
+
+    usage = stats.get("mcp_usage")
+    if usage:
+        lines.extend(render_usage_report(usage).rstrip().splitlines())
+        lines.append("")
 
     last = stats["last_success"]
     if last is None or now - last > timedelta(hours=config.DEAD_MAN_HOURS):

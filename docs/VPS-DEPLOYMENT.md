@@ -29,7 +29,8 @@ apt install postgresql-16 postgresql-16-postgis-3 postgresql-16-pgvector
 curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone <remote> /opt/eventindex && cd /opt/eventindex && uv sync
 uv run playwright install --with-deps chromium
-# .env copied over (scp), same OPENROUTER/GOOGLE_PLACES keys, prod DATABASE_URL
+# .env copied over (scp), same provider keys, prod DATABASE_URL, and a random
+# MCP_USAGE_HMAC_KEY (python -c 'import secrets; print(secrets.token_urlsafe(32))')
 uv run python -m eventindex.db.migrate
 ```
 
@@ -40,7 +41,8 @@ re-crawl:
 
 ```sh
 # on the Mac                      # on the VPS
-pg_dump -Fc eventindex > ei.dump  pg_restore -d eventindex ei.dump
+pg_dump -Fc --exclude-table-data=public.mcp_usage_daily eventindex > ei.dump
+pg_restore -d eventindex ei.dump
 ```
 
 Copy `var/` (trajectories, review dumps, digests) for continuity.
@@ -49,7 +51,7 @@ Copy `var/` (trajectories, review dumps, digests) for continuity.
 
 | Unit | What | Notes |
 |---|---|---|
-| `eventindex-api.service` | `uvicorn eventindex.api.app:app --host 127.0.0.1 --port 8000` | Restart=always |
+| `eventindex-api.service` | `uvicorn eventindex.api.app:app --host 127.0.0.1 --port 8000 --no-access-log` | Restart=always; structured MCP aggregates replace raw full-path access logs |
 | `eventindex-worker.service` | `python -m eventindex.jobs.worker` (loop mode, no `--once`) | Restart=always; replaces the 10-min cron |
 | `eventindex-schedule.timer` | every 15 min | as today |
 | `eventindex-digest.timer` | daily 23:55 | as today |
@@ -61,11 +63,16 @@ zero-maintenance TLS.
 
 ## 5. Backups + monitoring
 
-- Nightly `pg_dump -Fc` -> Storage Box via cron, 14-day rotation. The DB IS
+- Nightly `pg_dump -Fc --exclude-table-data=public.mcp_usage_daily` -> Storage
+  Box via cron, 14-day rotation. The DB IS
   the product; everything else is regenerable.
 - The existing digest + dead-man's switch stay the observability stack
   (H7.3). Add one line to the digest cron: ping healthchecks.io so a dead
   *server* (not just dead crawls) alerts Alexander's phone.
+- MCP adoption appears in the nightly digest and on demand through
+  `uv run python scripts/mcp_usage_report.py --days 7`. Pseudonymous
+  subject/session aggregates expire after 30 days; the report never prints
+  digests or raw client metadata.
 
 ## 6. Cutover checklist
 

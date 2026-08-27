@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
+from eventindex import config
 from eventindex.api.app import app
 from test_api import _add_event
 
@@ -43,12 +44,12 @@ def client(conn, _lifespan_client):
     return _lifespan_client
 
 
-def _rpc(client, method, params=None, id=1):
+def _rpc(client, method, params=None, id=1, headers=None):
     resp = client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": id, "method": method,
               "params": params or {}},
-        headers=_HEADERS,
+        headers=_HEADERS | (headers or {}),
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -94,6 +95,58 @@ def test_tools_carry_directory_required_annotations(client):
         assert t["outputSchema"].get("additionalProperties") is False, t["name"]
         assert t["outputSchema"].get("properties"), t["name"]
         assert t["description"].startswith("Use this when"), t["name"]
+
+
+def test_mcp_usage_persists_real_request_metadata(conn, client, monkeypatch):
+    monkeypatch.setattr(config, "MCP_USAGE_HMAC_KEY", "k" * 32)
+    raw_subject = "openai-subject-must-not-be-stored"
+    raw_session = "openai-session-must-not-be-stored"
+    valid_arguments = {"filters": {"categories": ["music"]}}
+
+    success = _rpc(client, "tools/call", {
+        "name": "get_calendar_link",
+        "arguments": valid_arguments,
+        "_meta": {
+            "openai/userAgent": "ChatGPT/1.0",
+            "openai/subject": raw_subject,
+            "openai/session": raw_session,
+        },
+    })
+    assert not success["result"].get("isError")
+
+    failed = _rpc(client, "tools/call", {
+        "name": "get_calendar_link",
+        "arguments": {"unexpected": True},
+        "_meta": {
+            "openai/userAgent": "ChatGPT/1.0",
+            "openai/subject": raw_subject,
+            "openai/session": raw_session,
+        },
+    })
+    assert failed["result"].get("isError") is True
+
+    claude = _rpc(
+        client,
+        "tools/call",
+        {"name": "get_calendar_link", "arguments": valid_arguments},
+        headers={"User-Agent": "Claude Desktop/1.0"},
+    )
+    assert not claude["result"].get("isError")
+
+    rows = conn.execute(
+        "SELECT * FROM mcp_usage_daily ORDER BY client_family"
+    ).fetchall()
+    assert len(rows) == 2
+    by_client = {row["client_family"]: row for row in rows}
+    assert by_client["chatgpt"]["call_count"] == 2
+    assert by_client["chatgpt"]["failure_count"] == 1
+    assert len(by_client["chatgpt"]["subject_digest"]) == 64
+    assert len(by_client["chatgpt"]["session_digest"]) == 64
+    assert by_client["claude"]["call_count"] == 1
+    assert by_client["claude"]["subject_digest"] == ""
+    assert by_client["claude"]["session_digest"] == ""
+    assert raw_subject not in str(rows)
+    assert raw_session not in str(rows)
 
 
 def test_tool_metadata_teaches_one_call_composition_and_hard_soft_intent(client):

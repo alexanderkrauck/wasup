@@ -35,15 +35,32 @@ heuristics: events that look private (residential address, personal
 organizer) are published without location data.</p>
 
 <h2>What we do NOT process</h2>
-<p>No user accounts, no tracking, no cookies, no profiling of API or
-website users. API access logs (IP address, timestamp, endpoint) are kept
-short-term for abuse prevention only.</p>
+<p>No user accounts, cookies, advertising tracking, or interest profiles.
+The server necessarily processes IP addresses to deliver requests and apply
+abuse-rate limits, but structured usage analytics do not store or use them as
+user identifiers. Usage analytics also do not retain prompts, search filters,
+tool results, location metadata, or raw client headers.</p>
 
 <h2>AI assistants (ChatGPT, Claude, …)</h2>
 <p>When you use Wasup through an AI assistant, your questions are handled
-by that assistant under its own privacy policy. Wasup only receives the
-resulting search filters (e.g. date range, category) and returns public
-event data. We do not receive your identity or conversation.</p>
+by that assistant under its own privacy policy. Wasup receives the selected
+tool call and its search filters (e.g. date range, category) to return public
+event data, but not the surrounding conversation.</p>
+<p>For MCP usage measurement, Wasup stores daily tool-call totals by a
+normalized, self-reported client family. If a client supplies a documented
+pseudonymous user or conversation identifier, Wasup immediately converts it
+to a secret-keyed one-way digest; the original identifier is not stored.
+These pseudonymous aggregates are retained in 30 Vienna-calendar-day buckets
+and removed by a nightly purge. Non-identifying totals in operational digests
+may be retained for trend analysis. Clients without such an identifier
+contribute only unattributed calls.</p>
+<p>Wasup cannot map these hints to a name, email address, ChatGPT account, or
+Claude account. Client hints are never used for authentication or access
+decisions.</p>
+<p>The legal basis for these minimized usage aggregates is legitimate interests
+under Article 6(1)(f) GDPR: operating and improving Wasup and understanding
+whether its public MCP tools are useful, without identifying or profiling
+people.</p>
 
 <h2>Inferred attributes</h2>
 <p>Audience estimates (e.g. expected age range) are clearly labeled
@@ -57,9 +74,13 @@ history for data-quality purposes.</p>
 <h2>Your rights (GDPR)</h2>
 <p>Organizers can request correction or removal of their data (takedown)
 at the address above; deletion requests are honored including in the
-claims history via redaction. Response within 48 hours. You also have the
-right to lodge a complaint with the Austrian data protection authority
-(dsb.gv.at).</p>
+claims history via redaction. Response within 48 hours.</p>
+<p>Any person whose data Wasup processes may request access, correction,
+deletion, restriction, or object to processing based on legitimate interests
+at the address above. Because Wasup stores no raw AI-client identifier or
+identity mapping, an account name or email address alone may not let us locate
+a pseudonymous aggregate. You also have the right to lodge a complaint with
+the Austrian data protection authority (dsb.gv.at).</p>
 
 <footer>
   <a href="/">Wasup</a> ·

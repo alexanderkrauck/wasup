@@ -537,6 +537,7 @@ Response objects carry `confidence`, `provenance_summary` (["venue_website","oet
 - **Private-intent suppression**: heuristics at resolve time - residential address + small/no venue + personal-profile organizer → suppress address/geo (publish district-level only) or hold the event entirely for review. Technically-public ≠ intended-public.
 - **Takedown**: `POST /v1/takedown` (organizer self-service) with a 48h SLA; takedowns also add the source pattern to a suppression list so recrawls don't resurrect the listing. GDPR: organizer names/addresses are personal data - deletion requests are honored in claims history too (redaction, since claims are append-only).
 - **Scope honesty over fabrication**: the index knows events, not safety ratings, not vendor menus, not parking. The API never fills these gaps with guesses - out-of-scope questions get explicit "unknown" (see §7), and the consumer-facing layer should say so ("no info on gluten-free stalls - here's the organizer contact").
+- **MCP adoption metrics without identity tracking**: retain only daily aggregate tool/client counts and secret-keyed digests of documented client-provided pseudonymous subject/session hints for 30 days. Never persist prompts, tool arguments/results, IPs, location, raw identifiers, or raw client headers. Report distinct people only as partial "observed pseudonymous users"; Claude and other clients without a documented subject remain unattributed, never inferred from IP.
 
 ---
 
